@@ -1,10 +1,18 @@
 /*--------------------
 SCRIPT: control_hud.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 6
 PURPOSE: Auto-detect nearby collars and connect automatically
 ARCHITECTURE: RLV relay-style broadcast and listen workflow, namespaced internal message protocol
 CHANGES:
+- v1.1 rev 6: Use llRequestDisplayName for scan labels (works for absent
+  avatars; llKey2Name is regional-only). UUID tag now a placeholder while
+  the async lookup resolves.
+- v1.1 rev 5: Fall back to UUID tag when llKey2Name returns "" (owner not
+  in-region) so llDialog never receives an empty button label.
+- v1.1 rev 4: Per-collar detection. Dedup scan results by collar prim
+  (not owner), carry target_collar in ACL query so only the selected
+  collar replies, and disambiguate same-owner labels as "Name #N".
 - v1.1 rev 3: Consistency pass — convert user-facing llOwnerSay notices
   to llRegionSayTo(llGetOwner(), 0, ...). Matches project convention.
 - v1.1 rev 2: Namespace context values. ROOT_CONTEXT → "ui.core.root",
@@ -60,8 +68,12 @@ integer COLLAR_STRIDE = 3;
 float TouchStartTime = 0.0;
 string RequestedContext = "";
 
-/* Display name lookup */
+/* Display name lookup (post-selection "Connected to X's collar" notice) */
 key DisplayNameQueryId = NULL_KEY;
+
+/* Scan-time display name lookups: [query_id, avatar_key, ...] */
+list PendingDisplayQueries = [];
+integer DISPLAY_QUERY_STRIDE = 2;
 
 /* -------------------- HELPERS -------------------- */
 
@@ -90,17 +102,18 @@ cleanup_session() {
     TouchStartTime = 0.0;
     RequestedContext = "";
     DisplayNameQueryId = NULL_KEY;
+    PendingDisplayQueries = [];
     llSetTimerEvent(0.0);
 }
 
 /* -------------------- COLLAR DETECTION -------------------- */
 
 add_detected_collar(key avatar_key, key collar_key, string avatar_name) {
-    // Check if already detected using native search (faster than loop)
-    if (llListFindList(DetectedCollars, [avatar_key]) != -1) {
+    // Dedup by collar prim: two collars on the same owner must remain distinct
+    if (llListFindList(DetectedCollars, [collar_key]) != -1) {
         return;
     }
-    
+
     DetectedCollars += [avatar_key, collar_key, avatar_name];
 }
 
@@ -144,8 +157,9 @@ process_scan_results() {
     if (num_collars == 1) {
         // AUTO-CONNECT to single collar (RLV relay style!)
         key avatar_key = llList2Key(DetectedCollars, 0);
+        key collar_key = llList2Key(DetectedCollars, 1);
 
-        request_acl_from_collar(avatar_key);
+        request_acl_from_collar(avatar_key, collar_key);
         return;
     }
     
@@ -157,54 +171,78 @@ process_scan_results() {
 
 show_collar_selection_dialog() {
     integer num_collars = llGetListLength(DetectedCollars) / COLLAR_STRIDE;
-    
+
     if (num_collars == 0) return;
-    
+
+    // Disambiguate labels when multiple collars share an owner: "Name #N"
+    integer i = 0;
+    while (i < num_collars) {
+        key owner = llList2Key(DetectedCollars, i * COLLAR_STRIDE);
+        integer total = 1;
+        integer position = 1;
+        integer j = 0;
+        while (j < num_collars) {
+            if (j != i && llList2Key(DetectedCollars, j * COLLAR_STRIDE) == owner) {
+                total += 1;
+                if (j < i) position += 1;
+            }
+            j += 1;
+        }
+        if (total > 1) {
+            string base = llList2String(DetectedCollars, i * COLLAR_STRIDE + 2);
+            DetectedCollars = llListReplaceList(DetectedCollars,
+                [base + " #" + (string)position],
+                i * COLLAR_STRIDE + 2, i * COLLAR_STRIDE + 2);
+        }
+        i += 1;
+    }
+
     // Set up dialog listener
     if (DialogListenHandle != 0) {
         llListenRemove(DialogListenHandle);
     }
     DialogListenHandle = llListen(DIALOG_CHANNEL, "", HudWearer, "");
-    
+
     // Build dialog
-    string text = "Multiple collars found. Select one:\n\n";
+    string text = "Collars found. Select one:\n\n";
     list buttons = [];
-    integer i = 0;
+    i = 0;
     integer collar_count = llGetListLength(DetectedCollars);
-    
+
     while (i < collar_count && (i / COLLAR_STRIDE) < MAX_DIALOG_BUTTONS) {
-        string avatar_name = llList2String(DetectedCollars, i + 2);
-        buttons += [avatar_name];
+        buttons += [llList2String(DetectedCollars, i + 2)];
         i += COLLAR_STRIDE;
     }
-    
+
     if (llGetListLength(buttons) < MAX_DIALOG_BUTTONS) {
         buttons += ["Cancel"];
     }
-    
+
     llDialog(HudWearer, text, buttons, DIALOG_CHANNEL);
     llSetTimerEvent(30.0);
 }
 
 /* -------------------- ACL QUERY -------------------- */
 
-request_acl_from_collar(key avatar_key) {
+request_acl_from_collar(key avatar_key, key collar_key) {
     string json_msg = llList2Json(JSON_OBJECT, [
         "type", "auth.aclqueryexternal",
         "avatar", (string)HudWearer,
         "hud", (string)llGetKey(),
-        "target_avatar", (string)avatar_key
+        "target_avatar", (string)avatar_key,
+        "target_collar", (string)collar_key
     ]);
-    
+
     if (CollarListenHandle != 0) {
         llListenRemove(CollarListenHandle);
     }
     CollarListenHandle = llListen(COLLAR_ACL_REPLY_CHAN, "", NULL_KEY, "");
-    
+
     llRegionSay(COLLAR_ACL_QUERY_CHAN, json_msg);
-    
+
     AclPending = TRUE;
     TargetAvatarKey = avatar_key;
+    TargetCollarKey = collar_key;
     TargetAvatarName = llKey2Name(avatar_key);
     llSetTimerEvent(QUERY_TIMEOUT_SEC);
 }
@@ -333,9 +371,19 @@ default {
             string collar_owner_str = llJsonGetValue(message, ["collar_owner"]);
             if (collar_owner_str == JSON_INVALID) return;
             key collar_owner = (key)collar_owner_str;
-            string owner_name = llKey2Name(collar_owner);
-            
-            add_detected_collar(collar_owner, id, owner_name);
+
+            // Placeholder label until llRequestDisplayName resolves. llKey2Name
+            // is regional-only and returns "" for absent avatars, which llDialog
+            // rejects as a button label.
+            string placeholder = "(" + llGetSubString((string)collar_owner, 0, 7) + ")";
+            add_detected_collar(collar_owner, id, placeholder);
+
+            // One display-name lookup per owner; stripe the result across
+            // same-owner collars when it returns.
+            if (llListFindList(PendingDisplayQueries, [collar_owner]) == -1) {
+                key dn_query = llRequestDisplayName(collar_owner);
+                PendingDisplayQueries += [dn_query, collar_owner];
+            }
             return;
         }
         
@@ -351,22 +399,24 @@ default {
                 return;
             }
             
-            // Find selected collar by name
+            // Find selected collar by label
             integer i = 0;
             key selected_avatar = NULL_KEY;
+            key selected_collar = NULL_KEY;
             while (i < llGetListLength(DetectedCollars)) {
-                string avatar_name = llList2String(DetectedCollars, i + 2);
-                if (avatar_name == message) {
+                string label = llList2String(DetectedCollars, i + 2);
+                if (label == message) {
                     selected_avatar = llList2Key(DetectedCollars, i);
+                    selected_collar = llList2Key(DetectedCollars, i + 1);
                     i = llGetListLength(DetectedCollars);  // Exit loop
                 }
                 else {
                     i += COLLAR_STRIDE;
                 }
             }
-            
-            if (selected_avatar != NULL_KEY) {
-                request_acl_from_collar(selected_avatar);
+
+            if (selected_collar != NULL_KEY) {
+                request_acl_from_collar(selected_avatar, selected_collar);
             }
             else {
                 llRegionSayTo(llGetOwner(), 0, "Error: Selection not found.");
@@ -392,12 +442,11 @@ default {
             key collar_owner = (key)collar_owner_str;
             
             if (collar_owner != TargetAvatarKey) return;
-            
+            if (id != TargetCollarKey) return;
+
             llSetTimerEvent(0.0);
             AclPending = FALSE;
-            
-            TargetCollarKey = id;
-            
+
             string tmp = llJsonGetValue(message, ["level"]);
             if (tmp != JSON_INVALID) {
                 AclLevel = (integer)tmp;
@@ -413,6 +462,26 @@ default {
     }
     
     dataserver(key query_id, string data) {
+        // Scan-time display name: update every detected collar from this owner
+        integer dn_idx = llListFindList(PendingDisplayQueries, [query_id]);
+        if (dn_idx != -1) {
+            key avatar = llList2Key(PendingDisplayQueries, dn_idx + 1);
+            PendingDisplayQueries = llDeleteSubList(PendingDisplayQueries,
+                dn_idx, dn_idx + DISPLAY_QUERY_STRIDE - 1);
+            if (data != "") {
+                integer n = llGetListLength(DetectedCollars);
+                integer i = 0;
+                while (i < n) {
+                    if (llList2Key(DetectedCollars, i) == avatar) {
+                        DetectedCollars = llListReplaceList(DetectedCollars,
+                            [data], i + 2, i + 2);
+                    }
+                    i += COLLAR_STRIDE;
+                }
+            }
+            return;
+        }
+
         if (query_id == DisplayNameQueryId) {
             DisplayNameQueryId = NULL_KEY;
             DisplayNamePending = FALSE;

@@ -1,10 +1,12 @@
 /*--------------------
 MODULE: kmod_remote.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: External HUD communication bridge for remote control workflows
 ARCHITECTURE: Consolidated message bus lanes, namespaced internal message protocol
 CHANGES:
+- v1.1 rev 8: Honor optional target_collar filter in auth.aclqueryexternal
+  so only the intended collar replies when a HUD scopes its query.
 - v1.1 rev 7: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
@@ -279,9 +281,16 @@ handle_acl_query_external(string message) {
     if (hud_object == NULL_KEY) return;
     if (target_avatar == NULL_KEY) return;
 
+    // If the HUD scoped the query to a specific collar prim, only that collar replies.
+    // Kernel-level work will prevent multi-collar-per-avatar, but guard anyway.
+    string target_collar_str = llJsonGetValue(message, ["target_collar"]);
+    if (target_collar_str != JSON_INVALID) {
+        if ((key)target_collar_str != llGetKey()) return;
+    }
+
     // Rate limit
     if (!check_rate_limit(hud_wearer, REQUEST_TYPE_ACL_QUERY)) return;
-    
+
     // Check if this query is for OUR collar (target matches our owner)
     if (target_avatar != CollarOwner) {
         return;
