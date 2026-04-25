@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 0
+REVISION: 1
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   driver broadcasts remote.updatediscover on kmod_remote's well-known
   external channel, receives the collar's PIN + session via remote.collarready,
@@ -13,6 +13,12 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   protocol with shim uses a random per-session secure channel passed as
   llRemoteLoadScriptPin's start_param.
 CHANGES:
+- v1.1 rev 1: Add collar-driven invitation entry. Permanent listener on
+  REPLY_CHAN; in Phase=idle, remote.updateravailable triggers a
+  remote.updaterhere reply on QUERY_CHAN and we cache the session/collar/
+  wearer. The collar's confirm path then sends remote.collarready directly
+  to us; on session match we skip the discovery broadcast and go straight
+  to load_shim. Touch-driven path still works.
 - v1.1 rev 0: Initial implementation. Single-bundle dispatch for now; the
   bundler-side loop supports multiple bundle notecards via link_message
   iteration but this v1 driver only enumerates one REQUIRED bundle.
@@ -55,26 +61,39 @@ list Bundles = [
 ];
 
 // Timeouts.
-float DISCOVERY_TIMEOUT = 10.0;   // wait for remote.collarready
-float SHIM_READY_TIMEOUT = 15.0;  // wait for READY from shim after load
-float BUNDLE_TIMEOUT = 180.0;     // wait for each bundle to complete
+float DISCOVERY_TIMEOUT = 10.0;    // wait for remote.collarready
+float SHIM_READY_TIMEOUT = 15.0;   // wait for READY from shim after load
+float BUNDLE_TIMEOUT = 180.0;      // wait for each bundle to complete
+float INVITE_TIMEOUT = 60.0;       // wait for collar's confirm after we replied to invite
 
 
 /* -------------------- STATE -------------------- */
 // Phase names reflect what we're currently waiting on.
-string Phase = "idle";   // idle | discovering | shim_loading | bundling | done
+//   idle           — no update in progress
+//   idle_invited   — answered remote.updateravailable, waiting for collar's
+//                    confirm (delivered as remote.collarready with PIN)
+//   discovering    — we touched and broadcast remote.updatediscover, waiting for reply
+//   shim_loading   — shim has been deposited, waiting for READY whisper
+//   bundling       — bundler is iterating a notecard
+//   done           — all bundles applied
+string Phase = "idle";
 
 key CollarKey = NULL_KEY;
 integer CollarPin = 0;
 string  Session = "";
 integer SecureChannel = 0;
 
-integer ReplyListen = 0;   // listen on EXTERNAL_ACL_REPLY_CHAN
+integer ReplyListen = 0;   // permanent listen on EXTERNAL_ACL_REPLY_CHAN
 integer SecureListen = 0;  // listen on SecureChannel
 
 integer BundleIdx = 0;
 
-key Wearer = NULL_KEY;   // who rezzed / touched
+key Wearer = NULL_KEY;   // who rezzed / touched / was named in invite
+
+// Cached invitation context. Populated when we answer remote.updateravailable;
+// validated against the subsequent remote.collarready before we accept.
+string  InviteSession = "";
+key     InviteCollar = NULL_KEY;
 
 
 /* -------------------- HELPERS -------------------- */
@@ -90,10 +109,11 @@ integer random_channel() {
     return n;
 }
 
+// Closes the per-session secure listen but leaves the permanent REPLY_CHAN
+// listen alone — that one is needed even in Phase=idle so we can answer
+// future remote.updateravailable invitations.
 cleanup_listens() {
-    if (ReplyListen) llListenRemove(ReplyListen);
     if (SecureListen) llListenRemove(SecureListen);
-    ReplyListen = 0;
     SecureListen = 0;
 }
 
@@ -107,6 +127,8 @@ cleanup_all() {
     SecureChannel = 0;
     BundleIdx = 0;
     Wearer = NULL_KEY;
+    InviteSession = "";
+    InviteCollar = NULL_KEY;
 }
 
 notice(string s) {
@@ -128,8 +150,7 @@ begin_discovery(key toucher) {
     Session = new_session();
     BundleIdx = 0;
 
-    cleanup_listens();
-    ReplyListen = llListen(EXTERNAL_ACL_REPLY_CHAN, "", "", "");
+    // ReplyListen stays open permanently from state_entry; no re-open here.
 
     string msg = llList2Json(JSON_OBJECT, [
         "type",    "remote.updatediscover",
@@ -140,6 +161,71 @@ begin_discovery(key toucher) {
 
     llSetTimerEvent(DISCOVERY_TIMEOUT);
     notice("Searching for collar...");
+}
+
+// Collar broadcast remote.updateravailable. If we're idle and same-owner,
+// reply on QUERY_CHAN with our key + version + session, and wait for the
+// collar's confirm path to send remote.collarready directly to us.
+respond_to_invite(string message) {
+    if (Phase != "idle") return;
+
+    string sess = llJsonGetValue(message, ["session"]);
+    if (sess == JSON_INVALID) return;
+    string collar_str = llJsonGetValue(message, ["collar"]);
+    if (collar_str == JSON_INVALID) return;
+    string wearer_str = llJsonGetValue(message, ["wearer"]);
+    if (wearer_str == JSON_INVALID) wearer_str = collar_str;
+
+    key collar = (key)collar_str;
+    if (collar == NULL_KEY) return;
+
+    // Same-owner gate. SL's llRemoteLoadScriptPin requires identical owner
+    // anyway; surfacing the rejection here is just cleaner.
+    if (llGetOwnerKey(collar) != llGetOwner()) return;
+
+    Phase = "idle_invited";
+    InviteSession = sess;
+    InviteCollar = collar;
+    Wearer = (key)wearer_str;
+
+    string reply = llList2Json(JSON_OBJECT, [
+        "type",    "remote.updaterhere",
+        "updater", (string)llGetKey(),
+        "version", BUILD_VERSION,
+        "session", sess
+    ]);
+    llRegionSay(EXTERNAL_ACL_QUERY_CHAN, reply);
+
+    llSetTimerEvent(INVITE_TIMEOUT);
+}
+
+// Collar's confirm path: remote.collarready sent directly to us with PIN.
+// Validate session + collar identity, then jump straight to load_shim.
+accept_invitation(string msg) {
+    string sess = llJsonGetValue(msg, ["session"]);
+    if (sess == JSON_INVALID) return;
+    if (sess != InviteSession) return;
+
+    string collar_str = llJsonGetValue(msg, ["collar"]);
+    if (collar_str == JSON_INVALID) return;
+    if ((key)collar_str != InviteCollar) return;
+
+    string pin_str = llJsonGetValue(msg, ["pin"]);
+    if (pin_str == JSON_INVALID) return;
+
+    CollarKey = InviteCollar;
+    CollarPin = (integer)pin_str;
+    Session = InviteSession;
+    BundleIdx = 0;
+
+    if (llGetOwnerKey(CollarKey) != llGetOwner()) {
+        notice("Collar is owned by a different avatar. Aborting.");
+        cleanup_all();
+        return;
+    }
+
+    notice("Collar accepted update; preparing scripts...");
+    load_shim();
 }
 
 handle_collar_ready(string msg) {
@@ -236,6 +322,11 @@ default {
         // holds stagable scripts should carry this marker.
         llSetObjectDesc(UPDATER_MARKER);
         cleanup_all();
+
+        // Permanent listener on REPLY_CHAN: needed in idle to catch
+        // remote.updateravailable invitations, and during the touch-driven
+        // flow to catch remote.collarready replies to our own discover.
+        ReplyListen = llListen(EXTERNAL_ACL_REPLY_CHAN, "", "", "");
     }
 
     on_rez(integer start_param) {
@@ -259,11 +350,27 @@ default {
         if (channel == EXTERNAL_ACL_REPLY_CHAN) {
             // Same-owner filter — kmod_remote is the only legitimate sender.
             if (llGetOwnerKey(id) != llGetOwner()) return;
-            if (Phase != "discovering") return;
 
             string mtype = llJsonGetValue(message, ["type"]);
-            if (mtype != "remote.collarready") return;
-            handle_collar_ready(message);
+
+            // Collar broadcasting an open invitation.
+            if (mtype == "remote.updateravailable") {
+                respond_to_invite(message);
+                return;
+            }
+
+            // Confirm of an invitation we answered earlier.
+            if (mtype == "remote.collarready" && Phase == "idle_invited") {
+                accept_invitation(message);
+                return;
+            }
+
+            // Reply to our own discover broadcast (touch-driven flow).
+            if (mtype == "remote.collarready" && Phase == "discovering") {
+                handle_collar_ready(message);
+                return;
+            }
+
             return;
         }
 
@@ -288,6 +395,13 @@ default {
 
     timer() {
         llSetTimerEvent(0.0);
+        if (Phase == "idle_invited") {
+            // Collar's wearer probably cancelled at the confirm dialog, or
+            // the confirm path stalled. Drop quietly back to idle so we can
+            // answer the next invitation.
+            cleanup_all();
+            return;
+        }
         if (Phase == "discovering") {
             notice("No collar responded. Make sure your collar is worn and you are within 20 meters.");
             cleanup_all();

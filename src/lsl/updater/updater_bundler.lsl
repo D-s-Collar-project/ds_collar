@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 0
+REVISION: 1
 PURPOSE: Installer child-prim script. Holds the staged collar scripts in
   its own inventory. On LM_BUNDLE_BEGIN from updater_driver, reads the
   named bundle notecard one line at a time, asks update_shim (running in
@@ -13,6 +13,15 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   transferred must exist in THIS prim's inventory — llRemoteLoadScriptPin
   can only send items from the calling script's own prim.
 CHANGES:
+- v1.1 rev 1: Add CONDITIONAL bundle mode. Bundle whose name contains
+  "CONDITIONAL" ships items only if the collar already has them; lets us
+  preserve the wearer's installed-plugin set rather than force-installing
+  every plugin in our bundle. Per-line optional 3rd field carries a gate
+  script name (for paired kmods like kmod_leash gated on plugin_leash) so
+  the kmod ships when the gating plugin is present even if the kmod
+  itself was lost. Protocol extended:
+    QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]
+  Notecard line: SCRIPT|<name>[|<gate>]   (gate only meaningful in CONDITIONAL).
 - v1.1 rev 0: Initial implementation. Single-bundle loop with dataserver
   line-reading and per-script shim handshake. Returns LM_BUNDLE_DONE to
   the driver when the notecard is exhausted; driver iterates across
@@ -49,6 +58,11 @@ key     LineRequest = NULL_KEY;
 // REPLY|<name>|<verdict> from the shim before reading the next line.
 string  PendingName = "";
 
+// Optional gate parameter for the in-flight CONDITIONAL query. Cached
+// alongside PendingName because handle_reply needs to know whether a GIVE
+// is even possible (no gate / no local copy ⇒ skip silently).
+string  PendingGate = "";
+
 // Listen on SecureChannel for shim REPLYs.
 integer SecureListen = 0;
 
@@ -58,6 +72,7 @@ integer SecureListen = 0;
 // Derive mode from bundle name. OpenCollar convention: BUNDLE_##_MODE.
 string derive_mode(string bundle_name) {
     if (llSubStringIndex(bundle_name, "DEPRECATED") != -1) return "DEPRECATED";
+    if (llSubStringIndex(bundle_name, "CONDITIONAL") != -1) return "CONDITIONAL";
     return "REQUIRED";
 }
 
@@ -72,6 +87,7 @@ cleanup_bundle() {
     LineIdx = 0;
     LineRequest = NULL_KEY;
     PendingName = "";
+    PendingGate = "";
 }
 
 notify_driver_done() {
@@ -88,13 +104,17 @@ read_next_line() {
 
 // Send a QUERY to the shim for the named script. Format mirrors
 // update_shim.lsl's protocol:
-//   QUERY|SCRIPT|<name>|<uuid>|<mode>
-send_query(string script_name) {
+//   QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]
+// gate is only emitted for CONDITIONAL mode entries that supplied one.
+send_query(string script_name, string gate) {
     key uuid = llGetInventoryKey(script_name);
     PendingName = script_name;
-    llWhisper(SecureChannel, "QUERY|SCRIPT|" + script_name
+    PendingGate = gate;
+    string q = "QUERY|SCRIPT|" + script_name
         + "|" + (string)uuid
-        + "|" + BundleMode);
+        + "|" + BundleMode;
+    if (gate != "") q += "|" + gate;
+    llWhisper(SecureChannel, q);
 }
 
 
@@ -125,10 +145,16 @@ process_line(string line) {
         return;
     }
 
-    // For REQUIRED mode, the script MUST exist in this prim. For DEPRECATED
-    // mode, the shim does all the work (delete if present) and we don't
-    // need a local copy — we just tell the shim the name.
-    if (BundleMode == "REQUIRED") {
+    // Optional 3rd field: gate script name. Only meaningful in CONDITIONAL
+    // bundles; for paired kmods (e.g. kmod_leash gated on plugin_leash)
+    // shim ships the kmod when the gate is in collar inventory.
+    string gate = "";
+    if (llGetListLength(parts) >= 3) gate = llList2String(parts, 2);
+
+    // For REQUIRED and CONDITIONAL modes the script MUST exist in this prim
+    // (shim may answer GIVE in either case). For DEPRECATED the shim does
+    // all the work and we don't need a local copy.
+    if (BundleMode == "REQUIRED" || BundleMode == "CONDITIONAL") {
         if (llGetInventoryType(name) != INVENTORY_SCRIPT) {
             // Missing script in installer inventory — can't deliver. Skip
             // with a warning on DEBUG_CHANNEL; continue with the next line.
@@ -141,7 +167,7 @@ process_line(string line) {
         }
     }
 
-    send_query(name);
+    send_query(name, gate);
 }
 
 
@@ -153,13 +179,16 @@ handle_reply(string verdict) {
         // Ship the script. llRemoteLoadScriptPin sleeps 3 s.
         llRemoteLoadScriptPin(CollarKey, PendingName, CollarPin, TRUE, 0);
         PendingName = "";
+        PendingGate = "";
         LineIdx += 1;
         read_next_line();
         return;
     }
 
-    // SKIP (already current) or OK (deprecated item removed or absent).
+    // SKIP (already current, or CONDITIONAL with neither name nor gate
+    // present in collar) or OK (deprecated item removed or absent).
     PendingName = "";
+    PendingGate = "";
     LineIdx += 1;
     read_next_line();
 }

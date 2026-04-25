@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: update_shim.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: Transient payload deposited into the collar by updater_driver via
   llRemoteLoadScriptPin. Runs inside the collar, negotiates per-script
   install/skip/delete with updater_bundler over the start_param channel,
@@ -12,6 +12,13 @@ ARCHITECTURE: No link_message interaction with the rest of the collar.
   its next inventory tick — the shim does not clean up LSD itself.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
+- v1.1 rev 2: Add CONDITIONAL mode. Bundler may now query with mode
+  CONDITIONAL and an optional gate script name; shim answers SKIP if
+  neither the named script nor the gate is in collar inventory, and
+  otherwise treats the query like REQUIRED. Lets the updater preserve
+  the wearer's installed-plugin set rather than force-installing every
+  plugin in the bundle, while still healing paired-kmod gaps when the
+  gating plugin is present.
 - v1.1 rev 1: Hold @detach=n while the shim is resident if the collar was
   locked at update start. Keyed to the shim's script UUID so it drops
   automatically on self-delete; bridges the ~3s window during plugin_lock
@@ -39,10 +46,13 @@ integer ListenHandle = 0;
 
 
 /* -------------------- PROTOCOL -------------------- */
-// Installer → shim: "QUERY|SCRIPT|<name>|<uuid>|<mode>"   mode: REQUIRED|DEPRECATED
+// Installer → shim: "QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]"
+//                   mode: REQUIRED | CONDITIONAL | DEPRECATED
+//                   gate: optional script name; CONDITIONAL with gate ships
+//                         when gate is present in collar even if name isn't
 // Installer → shim: "DONE"
-// Shim → installer: "READY"                               (shim is listening)
-// Shim → installer: "REPLY|<name>|<verdict>"              verdict: GIVE|SKIP|OK
+// Shim → installer: "READY"                              (shim is listening)
+// Shim → installer: "REPLY|<name>|<verdict>"             verdict: GIVE|SKIP|OK
 
 
 /* -------------------- HELPERS -------------------- */
@@ -53,7 +63,7 @@ reply(string target_name, string verdict) {
 
 // Handle a single QUERY line from the bundler. Mutates local inventory
 // when a stale script needs to be removed or a deprecated item is present.
-handle_query(string target_name, key target_uuid, string mode) {
+handle_query(string target_name, key target_uuid, string mode, string gate) {
     if (mode == "DEPRECATED") {
         if (llGetInventoryType(target_name) != INVENTORY_NONE) {
             llRemoveInventory(target_name);
@@ -62,7 +72,22 @@ handle_query(string target_name, key target_uuid, string mode) {
         return;
     }
 
-    // REQUIRED mode. Script-only for v1.
+    // CONDITIONAL: ship only if the wearer already has this script, or the
+    // optional gate script. The gate covers paired kmods (e.g. kmod_leash
+    // gated on plugin_leash) so they get restored even if the kmod itself
+    // was somehow lost while the gating plugin remains.
+    if (mode == "CONDITIONAL") {
+        integer name_present = (llGetInventoryType(target_name) != INVENTORY_NONE);
+        integer gate_present = FALSE;
+        if (gate != "") gate_present = (llGetInventoryType(gate) != INVENTORY_NONE);
+        if (!name_present && !gate_present) {
+            reply(target_name, "SKIP");
+            return;
+        }
+        // fall through to REQUIRED-style handling below
+    }
+
+    // REQUIRED (or CONDITIONAL with name/gate present). Script-only for v1.
     if (llGetInventoryType(target_name) == INVENTORY_NONE) {
         reply(target_name, "GIVE");
         return;
@@ -156,14 +181,16 @@ default {
         }
 
         if (verb == "QUERY") {
-            // QUERY|SCRIPT|<name>|<uuid>|<mode>
+            // QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]
             if (llGetListLength(parts) < 5) return;
             string target_type = llList2String(parts, 1);
             if (target_type != "SCRIPT") return;  // v1: scripts only
             string target_name = llList2String(parts, 2);
             key target_uuid = (key)llList2String(parts, 3);
             string mode = llList2String(parts, 4);
-            handle_query(target_name, target_uuid, mode);
+            string gate = "";
+            if (llGetListLength(parts) >= 6) gate = llList2String(parts, 5);
+            handle_query(target_name, target_uuid, mode, gate);
             return;
         }
     }

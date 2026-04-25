@@ -1,10 +1,17 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Maintenance and utility functions for collar management
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 14: Add Update Collar entry. Wearer/primary-owner ACLs (2/4/5)
+  only; trustees and TPE wearer (ACL 0) locked out by policy. Tapping it
+  asks kmod_remote to broadcast remote.updateravailable for 5s; first
+  remote.updaterhere reply wins. On match, confirm dialog shows updater
+  key + reported version; on confirm, kmod_remote sends remote.collarready
+  with a fresh PIN to the chosen updater so updater_driver's existing
+  shim-load + bundle-dispatch flow runs against this collar.
 - v1.1 rev 13: Factory Reset → Reset Config. Now sends settings.reset.config
   on SETTINGS_BUS to kmod_settings instead of calling llLinksetDataReset
   directly. kmod_settings owns reset semantics: preserves owner+lock,
@@ -58,6 +65,7 @@ CHANGES:
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
+integer REMOTE_BUS = 600;
 integer SETTINGS_BUS = 800;
 integer UI_BUS = 900;
 integer DIALOG_BUS = 950;
@@ -86,6 +94,11 @@ integer CurrentUserAcl = -999;
 list gPolicyButtons = [];
 string SessionId = "";
 string MenuContext = "main";
+
+// Carries the first-responder updater key and version between scan result
+// and user confirmation. Cleared by cleanup_session.
+key UpdateScanUpdater = NULL_KEY;
+string UpdateScanVersion = "";
 
 /* -------------------- HELPERS -------------------- */
 
@@ -134,12 +147,16 @@ write_plugin_reg(string label) {
 
 register_self() {
     // Write button visibility policy to LSD (default-deny per ACL level)
+    // Update Collar gated to wearer (ACL 2/4) and primary owner (ACL 5).
+    // Trustees (ACL 3) deliberately excluded — updates rewrite scripts and
+    // are wearer/owner business. TPE wearer becomes ACL 0 and gets nothing
+    // here, so no runtime tpe.mode check is needed.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
         "1", "Get HUD,User Manual",
-        "2", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config",
+        "2", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
         "3", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual",
-        "4", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config",
-        "5", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual"
+        "4", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
+        "5", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Update Collar"
     ]));
 
     // Self-declared menu presence for kmod_ui.
@@ -185,6 +202,7 @@ show_main_menu() {
     if (btn_allowed("Get HUD"))          button_data += [btn("Get HUD", "get_hud")];
     if (btn_allowed("User Manual"))      button_data += [btn("User Manual", "user_manual")];
     if (btn_allowed("Reset Config"))     button_data += [btn("Reset Config", "reset_config")];
+    if (btn_allowed("Update Collar"))    button_data += [btn("Update Collar", "update_collar")];
 
     if (btn_allowed("View Settings")) {
         body += "System utilities and documentation.";
@@ -492,6 +510,96 @@ do_reload_collar() {
     llRegionSayTo(CurrentUser, 0, "Collar reload initiated.");
 }
 
+/* -------------------- UPDATE FLOW -------------------- */
+
+// Asks kmod_remote to broadcast remote.updateravailable and watch for the
+// first remote.updaterhere reply. We park MenuContext in update_scan_waiting
+// and leave no dialog open; result arrives within 5s via REMOTE_BUS and
+// either opens the confirm dialog or notifies the user there's nothing.
+do_start_update_scan() {
+    MenuContext = "update_scan_waiting";
+    UpdateScanUpdater = NULL_KEY;
+    UpdateScanVersion = "";
+
+    string msg = llList2Json(JSON_OBJECT, [
+        "type", "remote.updaterscan.start",
+        "user", (string)CurrentUser
+    ]);
+    llMessageLinked(LINK_SET, REMOTE_BUS, msg, NULL_KEY);
+
+    llRegionSayTo(CurrentUser, 0, "Scanning for an updater in range...");
+}
+
+show_update_confirm() {
+    MenuContext = "update_confirm";
+    SessionId = generate_session_id();
+
+    list button_data = [
+        btn("No", "cancel"),
+        btn("Yes", "confirm")
+    ];
+
+    string body = "Updater found.\n\n";
+    body += "Updater: " + (string)UpdateScanUpdater + "\n";
+    body += "Version: " + UpdateScanVersion + "\n\n";
+    body += "Begin update? Your collar will receive new scripts.";
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "session_id", SessionId,
+        "user", (string)CurrentUser,
+        "title", "Update Collar",
+        "body", body,
+        "button_data", llList2Json(JSON_ARRAY, button_data),
+        "timeout", 60
+    ]), NULL_KEY);
+}
+
+do_confirm_update() {
+    string msg = llList2Json(JSON_OBJECT, [
+        "type", "remote.updaterscan.confirm",
+        "updater", (string)UpdateScanUpdater
+    ]);
+    llMessageLinked(LINK_SET, REMOTE_BUS, msg, NULL_KEY);
+
+    llRegionSayTo(CurrentUser, 0, "Update started. Please leave your collar attached.");
+    cleanup_session();
+}
+
+do_cancel_update() {
+    string msg = llList2Json(JSON_OBJECT, [
+        "type", "remote.updaterscan.cancel"
+    ]);
+    llMessageLinked(LINK_SET, REMOTE_BUS, msg, NULL_KEY);
+}
+
+handle_scan_result(string msg) {
+    // Only honour scan results while the user is still in the waiting state.
+    // If they navigated away, drop it.
+    if (MenuContext != "update_scan_waiting") return;
+
+    integer found = (integer)llJsonGetValue(msg, ["found"]);
+
+    if (!found) {
+        llRegionSayTo(CurrentUser, 0, "No updater responded. Make sure your updater object is rezzed and within 20m.");
+        cleanup_session();
+        return;
+    }
+
+    string updater_str = llJsonGetValue(msg, ["updater"]);
+    if (updater_str == JSON_INVALID) {
+        cleanup_session();
+        return;
+    }
+    UpdateScanUpdater = (key)updater_str;
+
+    string ver = llJsonGetValue(msg, ["version"]);
+    if (ver == JSON_INVALID) ver = "?";
+    UpdateScanVersion = ver;
+
+    show_update_confirm();
+}
+
 do_give_hud() {
     if (llGetInventoryType(HUD_ITEM) != INVENTORY_OBJECT) {
         llRegionSayTo(CurrentUser, 0, "HUD not found in inventory.");
@@ -540,6 +648,8 @@ cleanup_session() {
     gPolicyButtons = [];
     SessionId = "";
     MenuContext = "main";
+    UpdateScanUpdater = NULL_KEY;
+    UpdateScanVersion = "";
 }
 
 /* -------------------- DIALOG HANDLERS -------------------- */
@@ -584,6 +694,16 @@ handle_dialog_response(string msg) {
         return;
     }
 
+    if (MenuContext == "update_confirm") {
+        if (cmd == "confirm") {
+            do_confirm_update();
+            return;
+        }
+        do_cancel_update();
+        show_main_menu();
+        return;
+    }
+
     // Main menu commands
     if (cmd == "view_settings") {
         do_view_settings();
@@ -621,6 +741,10 @@ handle_dialog_response(string msg) {
     }
     if (cmd == "reset_config") {
         show_reset_config_confirm();
+        return;
+    }
+    if (cmd == "update_collar") {
+        do_start_update_scan();
         return;
     }
 }
@@ -683,6 +807,18 @@ default {
                 llLinksetDataDelete("plugin.reg." + PLUGIN_CONTEXT);
                 llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
                 llResetScript();
+            }
+
+            return;
+        }
+
+        /* -------------------- REMOTE BUS -------------------- */if (num == REMOTE_BUS) {
+            string msg_type = llJsonGetValue(msg, ["type"]);
+            if (msg_type == JSON_INVALID) return;
+
+            if (msg_type == "remote.updaterscan.result") {
+                handle_scan_result(msg);
+                return;
             }
 
             return;

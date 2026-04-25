@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 7: Reviewed burst and scale for particles.
 - v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
@@ -37,10 +38,10 @@ integer KERNEL_LIFECYCLE = 500;
 integer UI_BUS = 900;
 
 /* -------------------- CONSTANTS -------------------- */
-float PARTICLE_UPDATE_RATE = 0.5;  // Update every 0.5 seconds
+float PARTICLE_UPDATE_RATE = 0.25;  // Update every 0.5 seconds
 
 // Default chain texture
-string CHAIN_TEXTURE = "4d3b6c6f-52e2-da9d-f7be-cccb1e535aca";
+string CHAIN_TEXTURE = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
 
 // Lockmeister protocol
 integer LEASH_CHAN_LM = -8888;
@@ -244,16 +245,16 @@ render_chain_particles(key target) {
     llLinkParticleSystem(LeashpointLink, [
         PSYS_SRC_PATTERN, PSYS_SRC_PATTERN_DROP,
         PSYS_SRC_TEXTURE, CHAIN_TEXTURE,
-        PSYS_SRC_BURST_RATE, 0.0,
+        PSYS_SRC_BURST_RATE, 0.05,
         PSYS_SRC_BURST_PART_COUNT, 1,
         PSYS_PART_START_ALPHA, 1.0,
         PSYS_PART_END_ALPHA, 1.0,
-        PSYS_PART_MAX_AGE, 2.6,
-        PSYS_PART_START_SCALE, <0.07, 0.07, 0.07>,
-        PSYS_PART_END_SCALE, <0.07, 0.07, 0.07>,
+        PSYS_PART_MAX_AGE, 1.5,
+        PSYS_PART_START_SCALE, <0.06, 0.06, 0.06>,
+        PSYS_PART_END_SCALE, <0.06, 0.06, 0.06>,
         PSYS_PART_START_COLOR, <1, 1, 1>,
         PSYS_PART_END_COLOR, <1, 1, 1>,
-        PSYS_SRC_ACCEL, <0, 0, -1.25>,
+        PSYS_SRC_ACCEL, <0.00, 0.00, -1.75>,
         PSYS_PART_FLAGS, 
             PSYS_PART_INTERP_COLOR_MASK |
             PSYS_PART_FOLLOW_SRC_MASK |

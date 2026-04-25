@@ -1,10 +1,19 @@
 /*--------------------
 MODULE: kmod_remote.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: External HUD communication bridge for remote control workflows
 ARCHITECTURE: Consolidated message bus lanes, namespaced internal message protocol
 CHANGES:
+- v1.1 rev 9: Add collar-driven update broker. plugin_maint asks via
+  REMOTE_BUS (remote.updaterscan.start); we broadcast remote.updateravailable
+  on REPLY_CHAN and listen on QUERY_CHAN for remote.updaterhere — first
+  responder wins, result returned to plugin_maint as remote.updaterscan.result.
+  On remote.updaterscan.confirm we generate a fresh PIN via
+  llSetRemoteScriptAccessPin and send remote.collarready (same payload as
+  the legacy update_discover handler) directly to the chosen updater so its
+  existing shim-load / bundle-dispatch flow runs against this collar.
+  Scan timeout is 5s, multiplexed onto the existing prune timer.
 - v1.1 rev 8: Honor optional target_collar filter in auth.aclqueryexternal
   so only the intended collar replies when a HUD scopes its query.
 - v1.1 rev 7: Add dormancy guard in state_entry — script parks itself
@@ -27,6 +36,7 @@ CHANGES:
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
+integer REMOTE_BUS = 600;
 integer AUTH_BUS = 700;
 integer UI_BUS = 900;
 
@@ -61,6 +71,19 @@ float QUERY_TIMEOUT = 30.0;  // 30 seconds
 
 // Kernel presence — set TRUE on first heartbeat ping received
 integer KernelAlive = FALSE;
+
+/* Updater scan state. UpdateScanActive flips on remote.updaterscan.start
+   (from plugin_maint over REMOTE_BUS), broadcasts remote.updateravailable
+   on REPLY_CHAN, and listens for remote.updaterhere on QUERY_CHAN for 5s.
+   First responder wins (UpdateScanWinner), and we hold scan state until
+   plugin_maint either confirms (PIN-issue path) or cancels. */
+integer UpdateScanActive = FALSE;
+integer UpdateScanStart = 0;       // unix seconds, for timeout
+string UpdateScanSession = "";
+key UpdateScanRequester = NULL_KEY;
+key UpdateScanWinner = NULL_KEY;
+string UpdateScanWinnerVer = "";
+float UPDATER_SCAN_TIMEOUT = 5.0;
 
 /* Per-request-type rate limiting: [avatar_key, request_type, timestamp, ...] */
 list RateLimitTimestamps = [];
@@ -347,6 +370,113 @@ handle_menu_request_external(string message) {
 
 /* -------------------- UPDATE PROTOCOL HANDLERS -------------------- */
 
+// Send the scan result back to plugin_maint over REMOTE_BUS. Called once per
+// scan: either when the first remote.updaterhere arrives, or when the 5s
+// timeout fires. Clears state when not found; keeps state on found until
+// plugin_maint sends confirm/cancel.
+report_scan_result(integer found) {
+    string msg = llList2Json(JSON_OBJECT, [
+        "type",    "remote.updaterscan.result",
+        "found",   (string)found,
+        "updater", (string)UpdateScanWinner,
+        "version", UpdateScanWinnerVer
+    ]);
+    llMessageLinked(LINK_SET, REMOTE_BUS, msg, NULL_KEY);
+
+    if (!found) {
+        clear_scan_state();
+    }
+}
+
+clear_scan_state() {
+    UpdateScanActive = FALSE;
+    UpdateScanStart = 0;
+    UpdateScanSession = "";
+    UpdateScanRequester = NULL_KEY;
+    UpdateScanWinner = NULL_KEY;
+    UpdateScanWinnerVer = "";
+}
+
+start_update_scan(key requester) {
+    if (UpdateScanActive) return;  // serialise — plugin_maint shouldn't double-start
+
+    UpdateScanRequester = requester;
+    UpdateScanWinner = NULL_KEY;
+    UpdateScanWinnerVer = "";
+    UpdateScanStart = llGetUnixTime();
+    UpdateScanSession = "scan_" + (string)llGetKey() + "_" + (string)UpdateScanStart;
+    UpdateScanActive = TRUE;
+
+    string broadcast = llList2Json(JSON_OBJECT, [
+        "type",    "remote.updateravailable",
+        "collar",  (string)llGetKey(),
+        "owner",   (string)CollarOwner,
+        "wearer",  (string)llGetOwner(),
+        "session", UpdateScanSession
+    ]);
+    llRegionSay(EXTERNAL_ACL_REPLY_CHAN, broadcast);
+
+    // Tighten timer cadence so the 5s scan deadline isn't blocked behind
+    // the 60s prune cycle. Restored to 60s on scan finalise.
+    llSetTimerEvent(1.0);
+}
+
+handle_updater_here(string message) {
+    if (!UpdateScanActive) return;
+    if (UpdateScanWinner != NULL_KEY) return;  // first responder wins
+
+    string sess = llJsonGetValue(message, ["session"]);
+    if (sess == JSON_INVALID) return;
+    if (sess != UpdateScanSession) return;
+
+    string updater_str = llJsonGetValue(message, ["updater"]);
+    if (updater_str == JSON_INVALID) return;
+    key updater = (key)updater_str;
+    if (updater == NULL_KEY) return;
+
+    string ver = llJsonGetValue(message, ["version"]);
+    if (ver == JSON_INVALID) ver = "?";
+
+    UpdateScanWinner = updater;
+    UpdateScanWinnerVer = ver;
+
+    report_scan_result(TRUE);
+    // Scan state retained for the upcoming confirm/cancel from plugin_maint.
+    // Restore default timer cadence.
+    llSetTimerEvent(60.0);
+}
+
+confirm_update_scan() {
+    if (!UpdateScanActive) return;
+    if (UpdateScanWinner == NULL_KEY) return;
+
+    integer pin = (integer)(llFrand(1.0e8));
+    llSetRemoteScriptAccessPin(pin);
+
+    integer has_receiver = (llGetInventoryType("ds_collar_receiver") == INVENTORY_SCRIPT);
+
+    string ready = llList2Json(JSON_OBJECT, [
+        "type",         "remote.collarready",
+        "collar",       (string)llGetKey(),
+        "owner",        (string)CollarOwner,
+        "wearer",       (string)llGetOwner(),
+        "session",      UpdateScanSession,
+        "pin",          (string)pin,
+        "has_kernel",   (string)KernelAlive,
+        "has_receiver", (string)has_receiver
+    ]);
+    llRegionSayTo(UpdateScanWinner, EXTERNAL_ACL_REPLY_CHAN, ready);
+    llRegionSayTo(llGetOwner(), 0, "Update authorised. PIN issued; updater is taking over.");
+
+    clear_scan_state();
+}
+
+cancel_update_scan() {
+    if (!UpdateScanActive) return;
+    clear_scan_state();
+    llSetTimerEvent(60.0);
+}
+
 handle_update_discover(string message) {
     if (llJsonGetValue(message, ["updater"]) == JSON_INVALID) return;
     if (llJsonGetValue(message, ["session"]) == JSON_INVALID) return;
@@ -430,8 +560,18 @@ default {
     }
     
     timer() {
-        // Periodic query pruning
-        prune_expired_queries(now());
+        integer t = now();
+
+        // Updater-scan deadline. start_update_scan tightens timer to 1s so
+        // the scan window expires promptly even if the prune cycle is far off.
+        if (UpdateScanActive && UpdateScanWinner == NULL_KEY) {
+            if ((t - UpdateScanStart) >= (integer)UPDATER_SCAN_TIMEOUT) {
+                report_scan_result(FALSE);
+                llSetTimerEvent(60.0);
+            }
+        }
+
+        prune_expired_queries(t);
     }
     
     listen(integer channel, string name, key speaker_id, string message) {
@@ -457,7 +597,13 @@ default {
                 handle_update_discover(message);
                 return;
             }
-            
+
+            // Updater answering our remote.updateravailable broadcast.
+            if (msg_type == "remote.updaterhere") {
+                handle_updater_here(message);
+                return;
+            }
+
             return;
         }
         
@@ -484,6 +630,26 @@ default {
             KernelAlive = TRUE;  // Any kernel message proves kernel is present
             if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
                 llResetScript();
+            }
+            return;
+        }
+
+        /* -------------------- REMOTE BUS (plugin_maint update flow) -------------------- */
+        if (num == REMOTE_BUS) {
+            if (msg_type == "remote.updaterscan.start") {
+                key requester = NULL_KEY;
+                string ru = llJsonGetValue(str, ["user"]);
+                if (ru != JSON_INVALID) requester = (key)ru;
+                start_update_scan(requester);
+                return;
+            }
+            if (msg_type == "remote.updaterscan.confirm") {
+                confirm_update_scan();
+                return;
+            }
+            if (msg_type == "remote.updaterscan.cancel") {
+                cancel_update_scan();
+                return;
             }
             return;
         }
