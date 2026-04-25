@@ -1,11 +1,16 @@
 /*--------------------
 PLUGIN: plugin_tpe.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 11
 PURPOSE: Manage TPE mode with wearer confirmation and owner oversight
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 11: Sharpen wearer-consent dialog copy to acknowledge the SOS
+  panel as the OOC safety hatch — including SOS Runaway as the absolute
+  last resort. Prior copy implied "all control relinquished" without
+  qualification, which misled wearers about whether any escape path
+  remained while in TPE.
 - v1.1 rev 10: Toggle state now written to plugin.state.<ctx> in LSD
   (via idempotent write_plugin_state helper) instead of pushed via
   ui.state.update link_message. kmod_ui rev 17 reads plugin.state.<ctx>
@@ -324,8 +329,11 @@ handle_tpe_click(key user, integer acl_level) {
         // Send dialog to WEARER, not CurrentUser
 
         string msg_body = "Your owner wants to enable TPE mode.\n\n";
-        msg_body += "By clicking Yes, you relinquish all control of this collar.\n\n";
-        msg_body += "You will not be able to access the collar menu while TPE is active.\n\n";
+        msg_body += "By clicking Yes, you relinquish in-scene control of this collar. ";
+        msg_body += "The normal collar menu will be locked out.\n\n";
+        msg_body += "The SOS panel remains available as an OOC safety hatch — ";
+        msg_body += "Unleash, Clear RLV, Clear Relay, and Runaway (last resort) ";
+        msg_body += "stay accessible at any time.\n\n";
         msg_body += "Do you consent?";
 
         SessionId = gen_session();

@@ -1,10 +1,16 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Maintenance and utility functions for collar management
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 13: Factory Reset → Reset Config. Now sends settings.reset.config
+  on SETTINGS_BUS to kmod_settings instead of calling llLinksetDataReset
+  directly. kmod_settings owns reset semantics: preserves owner+lock,
+  re-parses notecard for defaults, sets bootstrap sentinel, broadcasts
+  kernel.reset.factory once LSD is final. Confirmation copy updated to
+  reflect new behaviour and redirect abuse-recovery cases to Runaway.
 - v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -130,9 +136,9 @@ register_self() {
     // Write button visibility policy to LSD (default-deny per ACL level)
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
         "1", "Get HUD,User Manual",
-        "2", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Factory Reset",
+        "2", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config",
         "3", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual",
-        "4", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Factory Reset",
+        "4", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config",
         "5", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual"
     ]));
 
@@ -178,7 +184,7 @@ show_main_menu() {
     if (btn_allowed("Clear Leash"))      button_data += [btn("Clear Leash", "clear_leash")];
     if (btn_allowed("Get HUD"))          button_data += [btn("Get HUD", "get_hud")];
     if (btn_allowed("User Manual"))      button_data += [btn("User Manual", "user_manual")];
-    if (btn_allowed("Factory Reset"))    button_data += [btn("Factory Reset", "factory_reset")];
+    if (btn_allowed("Reset Config"))     button_data += [btn("Reset Config", "reset_config")];
 
     if (btn_allowed("View Settings")) {
         body += "System utilities and documentation.";
@@ -399,8 +405,8 @@ do_display_access_list() {
     llRegionSayTo(CurrentUser, 0, output);
 }
 
-show_factory_reset_confirm() {
-    MenuContext = "factory_reset";
+show_reset_config_confirm() {
+    MenuContext = "reset_config";
     SessionId = generate_session_id();
 
     list button_data = [
@@ -412,27 +418,23 @@ show_factory_reset_confirm() {
         "type", "ui.dialog.open",
         "session_id", SessionId,
         "user", (string)CurrentUser,
-        "title", "Factory Reset",
-        "body", "This will ERASE ALL settings and return the collar to factory defaults.\n\nOwnership, trustees, lock state, and all other configuration will be lost.\n\nAre you sure?",
+        "title", "Reset Config",
+        "body", "This will reset all settings except for ownership and lock state.\n\nIf you need out of an abusive collar, please use Runaway.",
         "button_data", llList2Json(JSON_ARRAY, button_data),
         "timeout", 30
     ]), NULL_KEY);
 }
 
-do_factory_reset() {
-    llRegionSayTo(CurrentUser, 0, "Factory reset in progress...");
+do_reset_config() {
+    llRegionSayTo(CurrentUser, 0, "Resetting configuration...");
     cleanup_session();
 
-    // Wipe all LSD data
-    llLinksetDataReset();
-
-    // Reset all scripts in the linkset
-    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
-        "type", "kernel.reset.factory",
-        "from", "factory_reset"
+    // kmod_settings owns the reset semantics: snapshot owner+lock, wipe LSD,
+    // re-parse notecard, restore preserved keys for card-silent slots, set
+    // bootstrap sentinel, broadcast kernel.reset.factory once LSD is final.
+    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+        "type", "settings.reset.config"
     ]), NULL_KEY);
-
-    llResetScript();
 }
 
 do_reload_settings() {
@@ -564,9 +566,9 @@ handle_dialog_response(string msg) {
     }
 
     // Confirmation dialogs — route by menu context
-    if (MenuContext == "factory_reset") {
+    if (MenuContext == "reset_config") {
         if (cmd == "confirm") {
-            do_factory_reset();
+            do_reset_config();
             return;
         }
         show_main_menu();
@@ -617,8 +619,8 @@ handle_dialog_response(string msg) {
         show_main_menu();
         return;
     }
-    if (cmd == "factory_reset") {
-        show_factory_reset_confirm();
+    if (cmd == "reset_config") {
+        show_reset_config_confirm();
         return;
     }
 }
