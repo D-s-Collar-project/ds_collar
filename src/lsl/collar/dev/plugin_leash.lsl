@@ -1,10 +1,18 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: User interface and configuration for the leashing system
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 14: Pass/Offer selection now matches the raw clicked button
+  label (the listen message) against SensorCandidates instead of parsing
+  "sel:<name>" out of the routing context. kmod_dialogs' storage_map
+  context lookup was returning "" for avatar-name buttons, so the
+  "sel:" branch never fired — click did nothing. Using the button
+  label directly bypasses that lookup. handleButtonClick now takes
+  (ctx, btn); ctx still routes nav/main/settings/length, btn handles
+  name-based selection.
 - v1.1 rev 13: Sort sensor-driven candidate lists by name, and reorder
   the resulting buttons so they display top-to-bottom-left-to-right.
   Pass/Offer (buildAvatarMenu) now collects all nearby avatars, sorts
@@ -643,7 +651,11 @@ handle_subpath(key user, integer acl_level, string subpath) {
 }
 
 /* -------------------- BUTTON HANDLERS -------------------- */
-handleButtonClick(string ctx) {
+// `ctx` is the routing context resolved by kmod_dialogs (button_data context
+// field, or "" when the lookup misses). `btn` is the raw clicked label —
+// used by the pass/offer avatar selection so name matching does not depend
+// on the storage_map round-trip.
+handleButtonClick(string ctx, string btn) {
 
     if (MenuContext == "main") {
         if (ctx == "clip") {
@@ -722,13 +734,16 @@ handleButtonClick(string ctx) {
         else if (ctx == "prev" || ctx == "next") {
             showPassMenu();
         }
-        else if (llSubStringIndex(ctx, "sel:") == 0) {
-            // Extract avatar name from "sel:Name"
-            string avatar_name = llGetSubString(ctx, 4, -1);
+        else {
+            // Match the raw clicked label against SensorCandidates instead
+            // of decoding "sel:<name>" out of the routing context. The label
+            // is the listen message verbatim, which avoids the case where
+            // kmod_dialogs returns ctx="" because the storage_map lookup
+            // missed for an avatar-name button.
             key selected = NULL_KEY;
             integer i = 0;
             while (i < llGetListLength(SensorCandidates)) {
-                if (llList2String(SensorCandidates, i) == avatar_name) {
+                if (llList2String(SensorCandidates, i) == btn) {
                     selected = llList2Key(SensorCandidates, i + 1);
                     i = llGetListLength(SensorCandidates);
                 }
@@ -984,6 +999,11 @@ default
 
                 string response_session = llJsonGetValue(msg, ["session_id"]);
                 string ctx = llJsonGetValue(msg, ["context"]);
+                // Raw clicked label (the listen message verbatim). Used by the
+                // pass/offer branch to match avatar names directly, bypassing
+                // kmod_dialogs' storage_map context lookup.
+                string btn = llJsonGetValue(msg, ["button"]);
+                if (btn == JSON_INVALID) btn = "";
 
                 // Check if this is an offer dialog response
                 if (response_session == OfferDialogSession) {
@@ -993,7 +1013,7 @@ default
 
                 // Otherwise handle menu dialog response
                 if (response_session != SessionId) return;
-                handleButtonClick(ctx);
+                handleButtonClick(ctx, btn);
                 return;
             }
 
