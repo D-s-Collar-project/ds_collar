@@ -1,10 +1,18 @@
 /*--------------------
 PLUGIN: plugin_sos.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Emergency wearer-accessible actions (OOC safety hatch)
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 10: Gate Runaway at ACL 2 by access.enablerunaway. An owned
+  wearer whose owner has left in-scene Runaway enabled already has the
+  Access → Runaway path; SOS Runaway in that case is a redundant
+  long-touch foot-gun. Runtime filter in show_sos_menu strips Runaway
+  from the ACL 2 button set when access.enablerunaway is TRUE; the
+  sosrunaway chat alias gets the same gate. ACL 0 (TPE) and ACL 2 with
+  runaway disabled still get Runaway — those are the cases where the
+  wearer has no other escape. ACL 4 unchanged (no exposure).
 - v1.1 rev 9: Widen policy to owned-wearer ACLs (0 and 2). TPE wearer
   (ACL 0) retains the full set (Unleash, Clear RLV, Clear Relay, Runaway)
   since SOS is their sole accessible menu. Owned non-TPE wearer (ACL 2)
@@ -111,12 +119,14 @@ register_self() {
     // SOS is the wearer's OOC safety hatch. Visibility tracks the threat
     // model, not symmetry:
     //   0 = TPE wearer: full set; SOS is their sole accessible menu, so
-    //       Unleash/Clear RLV/Clear Relay are essential here.
-    //   2 = Owned wearer: Runaway only. The other three actions are
-    //       reachable via the normal collar menu (Leash, Restrict, Relay),
-    //       so SOS narrows to the unique action — Runaway, which bypasses
-    //       access.enablerunaway and is otherwise unreachable when an
-    //       owner has disabled in-scene runaway.
+    //       Unleash/Clear RLV/Clear Relay are essential here. Runaway is
+    //       always shown — TPE wearers cannot reach Access → Runaway.
+    //   2 = Owned wearer: Runaway listed in the static policy, but stripped
+    //       at runtime by show_sos_menu when access.enablerunaway is TRUE.
+    //       When in-scene Runaway is enabled the wearer already has Access
+    //       → Runaway, so SOS Runaway would be a redundant long-touch
+    //       foot-gun. When in-scene Runaway is disabled, SOS Runaway
+    //       remains the wearer's only OOC escape.
     //   4 = Unowned wearer: not exposed. No ownership to escape, no abuse
     //       vector. Reset Config in Maint covers "wipe my config" cleanly;
     //       Runaway would just be a destructive duplicate.
@@ -178,6 +188,19 @@ show_sos_menu() {
 
     // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
+
+    // Runtime filter: at ACL 2, Runaway is the OOC escape only when the
+    // in-scene Access → Runaway path is unavailable. If access.enablerunaway
+    // is TRUE the wearer already has it the normal way; strip the SOS
+    // duplicate so long-touch isn't a redundant foot-gun.
+    if (UserAcl == 2) {
+        if ((integer)llLinksetDataRead("access.enablerunaway")) {
+            integer idx = llListFindList(gPolicyButtons, ["Runaway"]);
+            if (idx != -1) {
+                gPolicyButtons = llDeleteSubList(gPolicyButtons, idx, idx);
+            }
+        }
+    }
 
     // llDialog displays buttons in rows of 3, bottom-left to top-right.
     // Build buttons + matching body lines from policy so non-TPE wearers
@@ -303,6 +326,14 @@ handle_subpath(key user, integer acl_level, string subpath) {
         return;
     }
     if (subpath == "runaway") {
+        // Same gate as the menu: an ACL 2 wearer with in-scene Runaway
+        // already enabled doesn't get the SOS duplicate. Steer them to
+        // the normal path. ACL 0 (TPE) and runaway-disabled ACL 2 fall
+        // through to the confirm dialog.
+        if (acl_level == 2 && (integer)llLinksetDataRead("access.enablerunaway")) {
+            llRegionSayTo(user, 0, "Use Access → Runaway from the collar menu instead.");
+            return;
+        }
         // Chat-alias path: still requires confirmation. Open the dialog
         // rather than firing the nuclear option from a single chat command.
         show_runaway_confirm();

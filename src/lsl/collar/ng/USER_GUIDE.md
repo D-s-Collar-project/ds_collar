@@ -44,7 +44,7 @@ Core capabilities:
 - Animation menu driven by the collar's inventory
 - Bell with show/hide, volume, and sound toggles
 - Lock, public access, and Total Power Exchange (TPE) modes
-- SOS long-touch escape for wearers locked out in TPE
+- SOS long-touch with granular emergency clears and a nuclear Runaway for wearers locked out by TPE or by an owner who has disabled in-scene runaway
 - Optional HUD for controlling a collar remotely
 - Persistent settings, optionally pre-configured via notecard
 
@@ -98,7 +98,7 @@ Roles in plain terms:
 
 **Short touch** — opens the main menu. Buttons you don't have access to simply won't appear.
 
-**Long touch (≥ 1.5 seconds, wearer only)** — opens the **SOS** session. This is meaningful only for a wearer in TPE mode; for a wearer with normal access it just loads the regular root menu. Non-wearers get a notice and the root menu.
+**Long touch (≥ 1.5 seconds, wearer only)** — opens the **SOS** session. What appears depends on the wearer's situation: a TPE wearer sees every emergency action; an owned wearer with in-scene Runaway disabled sees **Runaway**; an owned wearer with Runaway enabled sees an empty menu (Access → Runaway is the right path); an unowned wearer sees an empty menu (nothing to escape from). Non-wearers get a notice and the root menu.
 
 **Menu navigation** — `Back` returns to the previous menu, `<<` and `>>` page through lists, and menus time out automatically after 60 seconds.
 
@@ -342,21 +342,29 @@ Toggle permission: trustees and primary owners.
 
 **Disable** (owner only): no wearer dialog — the owner's decision restores the wearer's normal access.
 
-TPE is a serious step. Only engage it with partners you trust, and understand that the wearer's only escape hatches while TPE is active are the SOS long-touch menu and the safeword if the relay permits it.
+TPE is a serious step. Only engage it with partners you trust, and understand that the wearer's only escape hatches while TPE is active are the SOS long-touch menu (including the nuclear **Runaway**) and the safeword if the relay permits it.
 
 ---
 
 ## SOS — emergency
 
-Long-touch the collar for **1.5+ seconds** to open SOS. This is wearer-only; other avatars see the regular menu. The SOS menu only *populates* for a TPE wearer (level 0); a wearer with normal access will see nothing useful there, because every SOS action is also available in the normal menu.
+Long-touch the collar for **1.5+ seconds** to open SOS. This is wearer-only; other avatars see the regular menu.
+
+What populates depends on the wearer's situation:
+
+- **TPE wearer (level 0):** Unleash, Clear RLV, Clear Relay, **Runaway** — every emergency tool the collar has, because SOS is the only menu a TPE wearer can reach.
+- **Owned wearer with in-scene Runaway disabled:** **Runaway** only — the long-touch becomes the wearer's OOC escape valve when the regular Runaway path has been turned off.
+- **Owned wearer with in-scene Runaway enabled:** SOS opens but is empty (only Back). Use **Access → Runaway** for a clean break instead.
+- **Unowned wearer:** SOS opens but is empty. There is nobody to escape from; **Maintenance → Reset Config** clears configuration without breaking ownership.
 
 **SOS actions:**
 
 - **Unleash** — release any active leash, no confirmation.
 - **Clear RLV** — drop every direct RLV restriction the collar has applied.
 - **Clear Relay** — safeword. Clear every restriction applied by external relay objects and send release notifications to them. This bypasses Hardcore, by design.
+- **Runaway** — last-resort escape from an abusive owner. Wipes ownership, trustees, and all persisted settings; deletes the settings notecard from the collar; resets every script. The collar comes back to factory defaults under the wearer's control. Confirmation required; not undoable. This deliberately bypasses `access.enablerunaway` because that gate is in-scene/IC consent — the long-touch is the OOC kill-switch.
 
-Use SOS when: you are stuck, your partner is unavailable, you are being griefed, a scene has gone wrong, or the main menu isn't responding.
+Use SOS when: you are stuck, your partner is unavailable, you are being griefed, a scene has gone wrong, or the main menu isn't responding. Use **Runaway** specifically when no other escape works — the granular clears are reversible recoveries; Runaway is permanent.
 
 ---
 
@@ -385,9 +393,12 @@ The Control HUD lets an owner or trustee drive a collar from a HUD instead of to
 | Clear Leash | Force-release the leash regardless of holder | Wearer / trustee / owner |
 | Get HUD | Hand the control HUD to the toucher | Everyone |
 | User Manual | Hand a copy of this guide to the toucher | Everyone |
-| Factory Reset | Wipe all settings, owners, trustees, and blacklist | Wearer only |
+| Reset Config | Reset configuration **but preserve owner and lock state** | Wearer / primary owner |
+| Update Collar | Search for an updater object and run an OTA update | Wearer / primary owner |
 
-Factory Reset is deliberately wearer-only so an owner cannot erase themselves from the collar.
+**Reset Config** is non-destructive to ownership: it clears the rest of the configuration and re-reads the settings notecard, but the current owner and lock state are kept. It is the right tool for "I want my settings back to defaults," not for "I want out of this collar." For escape from an abusive owner, use **Access → Runaway** if it is enabled, or long-touch → **SOS → Runaway** if it is not (see the SOS section above).
+
+> **Resetting scripts does not clear settings.** Right-click → *Reset Scripts in Selection*, **Reload Collar**, and any other script reset re-initialise the running code but leave persisted settings (ownership, trustees, lock state, blacklist, plugin state) intact — this behaviour is by design, so the collar survives crashes and updates without losing its configuration. The only ways to wipe settings are **Access → Runaway** (when enabled), **SOS → Runaway** (long-touch, for a TPE wearer or an owned wearer when in-scene Runaway is disabled), or **Maintenance → Reset Config** (which preserves owner and lock — choose Runaway instead if you actually want ownership cleared). If a collar still shows old ownership or restrictions after you reset its scripts, that is expected; one of those paths is needed to start clean.
 
 ---
 
@@ -632,7 +643,7 @@ Some features have no chat commands on purpose:
 
 **Can I have more than one owner?** Yes — set `access.multiowner = 1` in the notecard and list the UUIDs and honorifics. All owners are peers.
 
-**What if my owner disappears?** If the owner enabled Runaway, use **Access → Runaway**. Otherwise, either the owner, a trustee, or a full factory reset (performed by the wearer in Maintenance) breaks the ownership.
+**What if my owner disappears?** If the owner enabled Runaway, use **Access → Runaway**. If they disabled it, long-touch the collar (1.5 s) → **SOS → Runaway** breaks ownership and wipes the collar back to factory defaults. A trustee can also release you, and an owner can step down via **Access → Release**.
 
 **Can a trustee change ownership?** No. Trustees are powerful but never touch the owner list.
 
@@ -662,7 +673,7 @@ Some features have no chat commands on purpose:
 
 **Can someone lock me into restrictions I can't escape?** There is always a path out, but it depends on your situation. An owned (non-TPE) wearer needs the owner or a trustee to clear direct restrictions; if communication is also blocked, preconfigured IM exceptions become your lifeline. A TPE wearer uses SOS. Hardcore relay prevents wearer self-release, but owners and trustees can always Unbind.
 
-**What if I regret enabling TPE?** Only the owner can disable it from inside the collar. SOS still works for leash, direct RLV, and the relay, but it does not turn TPE off. If the notecard sets `tpe.mode = 1`, a factory reset or removal of that line is required to keep TPE off across future resets.
+**What if I regret enabling TPE?** Only the owner can disable it from inside the collar. The granular SOS clears (Unleash, Clear RLV, Clear Relay) work but do not turn TPE off. **SOS → Runaway** does — it wipes ownership and persisted state, including any `tpe.mode = 1` line baked into the settings notecard, because the notecard itself is deleted as part of the runaway.
 
 **Can the blacklist trap me?** No. It blocks others from using the collar, not you.
 

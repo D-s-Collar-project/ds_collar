@@ -1,10 +1,30 @@
 /*--------------------
 PLUGIN: plugin_sos.lsl
 VERSION: 1.10
-REVISION: 8
-PURPOSE: Emergency wearer-accessible actions when ACL is locked out
+REVISION: 10
+PURPOSE: Emergency wearer-accessible actions (OOC safety hatch)
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 10: Gate Runaway at ACL 2 by access.enablerunaway. An owned
+  wearer whose owner has left in-scene Runaway enabled already has the
+  Access → Runaway path; SOS Runaway in that case is a redundant
+  long-touch foot-gun. Runtime filter in show_sos_menu strips Runaway
+  from the ACL 2 button set when access.enablerunaway is TRUE; the
+  sosrunaway chat alias gets the same gate. ACL 0 (TPE) and ACL 2 with
+  runaway disabled still get Runaway — those are the cases where the
+  wearer has no other escape. ACL 4 unchanged (no exposure).
+- v1.1 rev 9: Widen policy to owned-wearer ACLs (0 and 2). TPE wearer
+  (ACL 0) retains the full set (Unleash, Clear RLV, Clear Relay, Runaway)
+  since SOS is their sole accessible menu. Owned non-TPE wearer (ACL 2)
+  gets only Runaway — the other three actions are reachable via the
+  normal collar menu, and Runaway is the one action that's otherwise
+  unreachable when an owner has disabled in-scene runaway. Unowned
+  wearer (ACL 4) gets nothing: no ownership to escape, no abuse vector,
+  Reset Config covers "wipe my config" with less collateral damage.
+  Runaway sends settings.runaway on SETTINGS_BUS, bypassing the
+  access.enablerunaway in-scene gate. Confirmation dialog required.
+  Body text built dynamically from policy-allowed buttons. New chat
+  alias sosrunaway.
 - v1.1 rev 8: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -38,6 +58,7 @@ CHANGES:
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
+integer SETTINGS_BUS = 800;
 integer UI_BUS = 900;
 integer DIALOG_BUS = 950;
 
@@ -50,6 +71,7 @@ key CurrentUser = NULL_KEY;
 integer UserAcl = -999;
 list gPolicyButtons = [];
 string SessionId = "";
+string MenuContext = "main";
 
 /* -------------------- HELPERS -------------------- */
 
@@ -94,9 +116,23 @@ write_plugin_reg(string label) {
 }
 
 register_self() {
-    // Write button visibility policy to LSD (emergency access for ACL 0 only)
+    // SOS is the wearer's OOC safety hatch. Visibility tracks the threat
+    // model, not symmetry:
+    //   0 = TPE wearer: full set; SOS is their sole accessible menu, so
+    //       Unleash/Clear RLV/Clear Relay are essential here. Runaway is
+    //       always shown — TPE wearers cannot reach Access → Runaway.
+    //   2 = Owned wearer: Runaway listed in the static policy, but stripped
+    //       at runtime by show_sos_menu when access.enablerunaway is TRUE.
+    //       When in-scene Runaway is enabled the wearer already has Access
+    //       → Runaway, so SOS Runaway would be a redundant long-touch
+    //       foot-gun. When in-scene Runaway is disabled, SOS Runaway
+    //       remains the wearer's only OOC escape.
+    //   4 = Unowned wearer: not exposed. No ownership to escape, no abuse
+    //       vector. Reset Config in Maint covers "wipe my config" cleanly;
+    //       Runaway would just be a destructive duplicate.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
-        "0", "Unleash,Clear RLV,Clear Relay"
+        "0", "Unleash,Clear RLV,Clear Relay,Runaway",
+        "2", "Runaway"
     ]));
 
     // Self-declared menu presence for kmod_ui.
@@ -131,6 +167,11 @@ register_self() {
         "alias",   "sosrelay",
         "context", PLUGIN_CONTEXT + ".relay"
     ]), NULL_KEY);
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type",    "chat.alias.declare",
+        "alias",   "sosrunaway",
+        "context", PLUGIN_CONTEXT + ".runaway"
+    ]), NULL_KEY);
 }
 
 send_pong() {
@@ -142,23 +183,47 @@ send_pong() {
 
 /* -------------------- MENU DISPLAY -------------------- */
 show_sos_menu() {
+    MenuContext = "main";
     SessionId = generate_session_id();
 
     // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
-    // llDialog displays buttons in rows of 3, bottom-left to top-right
-    // Build button list from policy
-    list button_data = [btn("Back", "back")];
-    if (btn_allowed("Unleash")) button_data += [btn("Unleash", "unleash")];
-    if (btn_allowed("Clear RLV")) button_data += [btn("Clear RLV", "clear_rlv")];
-    if (btn_allowed("Clear Relay")) button_data += [btn("Clear Relay", "clear_relay")];
+    // Runtime filter: at ACL 2, Runaway is the OOC escape only when the
+    // in-scene Access → Runaway path is unavailable. If access.enablerunaway
+    // is TRUE the wearer already has it the normal way; strip the SOS
+    // duplicate so long-touch isn't a redundant foot-gun.
+    if (UserAcl == 2) {
+        if ((integer)llLinksetDataRead("access.enablerunaway")) {
+            integer idx = llListFindList(gPolicyButtons, ["Runaway"]);
+            if (idx != -1) {
+                gPolicyButtons = llDeleteSubList(gPolicyButtons, idx, idx);
+            }
+        }
+    }
 
-    string body = "EMERGENCY ACCESS\n\n";
-    body += "Choose an action:\n";
-    body += "• Unleash - Release leash\n";
-    body += "• Clear RLV - Clear RLV restrictions\n";
-    body += "• Clear Relay - Clear relay restrictions";
+    // llDialog displays buttons in rows of 3, bottom-left to top-right.
+    // Build buttons + matching body lines from policy so non-TPE wearers
+    // (Runaway-only) don't see bullets for actions they can't take.
+    list button_data = [btn("Back", "back")];
+    string body = "EMERGENCY ACCESS\n\nChoose an action:\n";
+
+    if (btn_allowed("Unleash")) {
+        button_data += [btn("Unleash", "unleash")];
+        body += "• Unleash - Release leash\n";
+    }
+    if (btn_allowed("Clear RLV")) {
+        button_data += [btn("Clear RLV", "clear_rlv")];
+        body += "• Clear RLV - Clear RLV restrictions\n";
+    }
+    if (btn_allowed("Clear Relay")) {
+        button_data += [btn("Clear Relay", "clear_relay")];
+        body += "• Clear Relay - Clear relay restrictions\n";
+    }
+    if (btn_allowed("Runaway")) {
+        button_data += [btn("Runaway", "runaway")];
+        body += "• Runaway - Nuclear option: erase everything";
+    }
 
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
@@ -170,6 +235,32 @@ show_sos_menu() {
         "timeout", 60
     ]), NULL_KEY);
 
+}
+
+show_runaway_confirm() {
+    MenuContext = "runaway_confirm";
+    SessionId = generate_session_id();
+
+    list button_data = [
+        btn("No", "cancel"),
+        btn("Yes", "confirm")
+    ];
+
+    string body = "EMERGENCY RUNAWAY\n\n";
+    body += "This will remove ownership entirely and erase ALL collar settings. ";
+    body += "The collar will return to an unowned, unlocked state.\n\n";
+    body += "This cannot be undone.\n\n";
+    body += "Proceed?";
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "session_id", SessionId,
+        "user", (string)CurrentUser,
+        "title", "Runaway",
+        "body", body,
+        "button_data", llList2Json(JSON_ARRAY, button_data),
+        "timeout", 30
+    ]), NULL_KEY);
 }
 
 /* -------------------- EMERGENCY ACTIONS -------------------- */
@@ -203,6 +294,19 @@ action_clear_relay() {
     llRegionSayTo(CurrentUser, 0, "[SOS] All relay restrictions cleared.");
 }
 
+// SOS Runaway: nuclear, irreversible, unconditional. settings.runaway hits
+// kmod_settings.handle_runaway() → factory_reset(): notecard removed, LSD
+// wiped, kernel.reset.factory broadcast, script reset. Bypasses the in-scene
+// access.enablerunaway gate by design — this is the OOC safety hatch and
+// must work even when an owner has trapped the wearer with runaway disabled.
+action_runaway() {
+    llRegionSayTo(CurrentUser, 0, "[SOS] Runaway initiated. Wiping collar...");
+
+    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+        "type", "settings.runaway"
+    ]), NULL_KEY);
+}
+
 /* -------------------- CHAT SUBCOMMAND HANDLING -------------------- */
 
 handle_subpath(key user, integer acl_level, string subpath) {
@@ -221,11 +325,39 @@ handle_subpath(key user, integer acl_level, string subpath) {
         action_clear_relay();
         return;
     }
+    if (subpath == "runaway") {
+        // Same gate as the menu: an ACL 2 wearer with in-scene Runaway
+        // already enabled doesn't get the SOS duplicate. Steer them to
+        // the normal path. ACL 0 (TPE) and runaway-disabled ACL 2 fall
+        // through to the confirm dialog.
+        if (acl_level == 2 && (integer)llLinksetDataRead("access.enablerunaway")) {
+            llRegionSayTo(user, 0, "Use Access → Runaway from the collar menu instead.");
+            return;
+        }
+        // Chat-alias path: still requires confirmation. Open the dialog
+        // rather than firing the nuclear option from a single chat command.
+        show_runaway_confirm();
+        return;
+    }
     llRegionSayTo(user, 0, "Unknown SOS subcommand: " + subpath);
 }
 
 /* -------------------- BUTTON HANDLER -------------------- */
 handle_button_click(string cmd) {
+
+    // Confirmation dialog routing
+    if (MenuContext == "runaway_confirm") {
+        if (cmd == "confirm") {
+            action_runaway();
+            // Don't reopen the menu — kmod_settings is about to wipe LSD
+            // and broadcast kernel.reset.factory; this script will reset.
+            cleanup_session();
+            return;
+        }
+        // Cancel → back to SOS menu
+        show_sos_menu();
+        return;
+    }
 
     if (cmd == "back") {
         return_to_root();
@@ -247,6 +379,11 @@ handle_button_click(string cmd) {
     if (cmd == "clear_relay") {
         action_clear_relay();
         show_sos_menu();
+        return;
+    }
+
+    if (cmd == "runaway") {
+        show_runaway_confirm();
         return;
     }
 }
@@ -272,6 +409,7 @@ cleanup_session() {
     UserAcl = -999;
     gPolicyButtons = [];
     SessionId = "";
+    MenuContext = "main";
 }
 
 /* -------------------- EVENT HANDLERS -------------------- */

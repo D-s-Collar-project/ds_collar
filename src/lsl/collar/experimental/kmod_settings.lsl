@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -11,6 +11,13 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               Trustees and blacklist always use CSVs. Display names are
               resolved asynchronously via llRequestDisplayName.
 CHANGES:
+- v1.1 rev 10: Notecard parsing gated by settings.bootstrapped sentinel —
+  state_entry no longer re-parses card after first bootstrap. New
+  settings.reset.config message snapshots owner+lock keys, llLinksetDataReset,
+  re-parses card, restores preserved keys for card-silent slots, sets sentinel,
+  broadcasts. factory_reset (Runaway) now llRemoveInventory(notecard) before
+  wipe — disarms hostile notecards. Reload Settings and CHANGED_INVENTORY
+  notecard-changed paths clear sentinel before re-parsing.
 - v1.1 rev 9: settings.get now re-reads the notecard when one is present,
   matching the UI contract that "Reload Settings" re-reads the notecard.
   Previous behavior rebroadcast LSD only, so a wearer who had (e.g.)
@@ -86,6 +93,12 @@ string KEY_PUBLIC_ACCESS = "public.mode";
 string KEY_TPE_MODE      = "tpe.mode";
 string KEY_LOCKED        = "lock.locked";
 
+// Bootstrap sentinel — set after first notecard parse completes.
+// Gates start_notecard_reading() so subsequent script restarts don't
+// re-arm a hostile notecard. Cleared by Reload Settings, Reset Config,
+// CHANGED_INVENTORY notecard-changed, or llLinksetDataReset().
+string KEY_SENTINEL = "settings.bootstrapped";
+
 // Placeholder used while a display name is being resolved
 string NAME_LOADING = "(loading...)";
 
@@ -101,6 +114,12 @@ key NotecardQuery = NULL_KEY;
 integer NotecardLine = 0;
 integer IsLoadingNotecard = FALSE;
 key NotecardKey = NULL_KEY;
+
+// Reset Config in-flight state. When TRUE, dataserver EOF routes to
+// finalize_reset_config() instead of the normal bootstrap broadcast.
+integer InResetConfig = FALSE;
+list ResetConfigKeys   = [];
+list ResetConfigValues = [];
 
 integer MaxListLen = 64;
 
@@ -176,6 +195,15 @@ clear_trustee_keys() {
 
 factory_reset() {
     llRegionSayTo(llGetOwner(), 0, "Collar factory reset triggered.");
+
+    // Zero-trust: assume the notecard is poisoned (an abusive owner could
+    // have baked owner/lock/restriction values into it). Remove it before
+    // wiping so post-reset state_entry can't re-arm the collar from card.
+    // The queued CHANGED_INVENTORY event is wiped by llResetScript below.
+    if (llGetInventoryType(NOTECARD_NAME) == INVENTORY_NOTECARD) {
+        llRemoveInventory(NOTECARD_NAME);
+    }
+
     llLinksetDataReset();
 
     // Reset all scripts in the linkset
@@ -548,6 +576,12 @@ parse_notecard_line(string line) {
 }
 
 integer start_notecard_reading() {
+    // Sentinel-gated: callers wanting an explicit re-parse (Reload Settings,
+    // Reset Config, CHANGED_INVENTORY notecard-changed) must clear the
+    // sentinel first. Boot/restart paths fall through this guard so a
+    // hostile notecard cannot self-arm a wiped collar.
+    if (llLinksetDataRead(KEY_SENTINEL) != "") return FALSE;
+
     if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) {
         return FALSE;
     }
@@ -572,6 +606,11 @@ handle_settings_get() {
     // flight — broadcast_settings_changed will also fire from the EOF
     // branch of the dataserver handler once the in-flight read completes.
     if (IsLoadingNotecard) return;
+
+    // Reload Settings is an explicit re-arm: clear the sentinel so
+    // start_notecard_reading() proceeds past its bootstrap guard.
+    llLinksetDataDelete(KEY_SENTINEL);
+
     if (!start_notecard_reading()) {
         broadcast_settings_changed();
     }
@@ -691,6 +730,78 @@ handle_runaway() {
     factory_reset();
 }
 
+/* -------------------- RESET CONFIG (preserve owner+lock) -------------------- */
+
+// Reset Config: wipe LSD except owner block and lock state, then re-parse the
+// notecard so its defaults re-populate everything else. Card writes win for
+// any key the card touches; preserved values fill the slots the card is
+// silent on. Sentinel is set on completion so subsequent restarts don't
+// re-parse. Trust assumption: wearer is consenting and the notecard is fine.
+// Abuse-recovery is the Runaway path, not this.
+handle_reset_config() {
+    ResetConfigKeys = [
+        KEY_OWNER,
+        KEY_OWNER_NAME,
+        KEY_OWNER_HONORIFIC,
+        KEY_OWNER_UUIDS,
+        KEY_OWNER_NAMES,
+        KEY_OWNER_HONORIFICS,
+        KEY_MULTI_OWNER_MODE,
+        KEY_ISOWNED,
+        KEY_LOCKED
+    ];
+    ResetConfigValues = [];
+
+    integer i;
+    integer n = llGetListLength(ResetConfigKeys);
+    for (i = 0; i < n; i++) {
+        ResetConfigValues += [llLinksetDataRead(llList2String(ResetConfigKeys, i))];
+    }
+
+    llRegionSayTo(llGetOwner(), 0, "Resetting configuration...");
+
+    // Wipe LSD. Sentinel is removed implicitly so start_notecard_reading
+    // below will proceed. Notecard stays in inventory (preserve trust).
+    llLinksetDataReset();
+
+    InResetConfig = TRUE;
+
+    if (!start_notecard_reading()) {
+        // No notecard — restore + finalize immediately.
+        finalize_reset_config();
+    }
+    // else: dataserver chain runs; EOF routes to finalize_reset_config.
+}
+
+finalize_reset_config() {
+    integer i;
+    integer n = llGetListLength(ResetConfigKeys);
+    for (i = 0; i < n; i++) {
+        string k = llList2String(ResetConfigKeys, i);
+        if (llLinksetDataRead(k) == "") {
+            string v = llList2String(ResetConfigValues, i);
+            if (v != "") {
+                llLinksetDataWrite(k, v);
+            }
+        }
+    }
+
+    // Mark bootstrap complete; subsequent restarts skip notecard parse.
+    llLinksetDataWrite(KEY_SENTINEL, "1");
+
+    InResetConfig = FALSE;
+    ResetConfigKeys = [];
+    ResetConfigValues = [];
+
+    // Tell other plugins to reset against the final LSD state.
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type", "kernel.reset.factory",
+        "from", "reset_config"
+    ]), NULL_KEY);
+
+    broadcast_settings_changed();
+}
+
 /* -------------------- EVENTS -------------------- */
 
 default
@@ -747,7 +858,11 @@ default
                     factory_reset();
                 }
                 else {
+                    // Wearer/owner swapped or edited the notecard. Clear the
+                    // bootstrap sentinel so start_notecard_reading proceeds —
+                    // the new card is an explicit re-arm signal.
                     NotecardKey = current_notecard_key;
+                    llLinksetDataDelete(KEY_SENTINEL);
                     start_notecard_reading();
                 }
             }
@@ -764,12 +879,22 @@ default
             }
             else {
                 IsLoadingNotecard = FALSE;
-                broadcast_settings_changed();
 
-                // Trigger bootstrap completion
-                llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
-                    "type", "settings.notecard.loaded"
-                ]), NULL_KEY);
+                if (InResetConfig) {
+                    // Reset Config in flight: restore preserved keys for any
+                    // slot the card was silent on, set sentinel, broadcast.
+                    finalize_reset_config();
+                }
+                else {
+                    // Normal bootstrap completion. Mark sentinel so the next
+                    // script restart doesn't re-parse the card automatically.
+                    llLinksetDataWrite(KEY_SENTINEL, "1");
+                    broadcast_settings_changed();
+
+                    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+                        "type", "settings.notecard.loaded"
+                    ]), NULL_KEY);
+                }
             }
             return;
         }
@@ -792,5 +917,6 @@ default
         else if (msg_type == "settings.blacklist.add")   handle_blacklist_add(msg);
         else if (msg_type == "settings.blacklist.remove") handle_blacklist_remove(msg);
         else if (msg_type == "settings.runaway")        handle_runaway();
+        else if (msg_type == "settings.reset.config")   handle_reset_config();
     }
 }

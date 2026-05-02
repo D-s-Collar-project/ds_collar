@@ -1,10 +1,14 @@
 /*--------------------
 SCRIPT: leash_holder.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 3
 PURPOSE: Minimal leash-holder target responder for external objects
 ARCHITECTURE: Direct channel listener with prim discovery fallback, namespaced message protocol
 CHANGES:
+- v1.1 rev 3: Skip reply when plugin.leash.request `mode` is "coffle" —
+  coffle explicitly targets the peer collar's leashpoint, so any holder
+  the wearer happens to also have on must stay out of that handshake.
+  Missing field = old requester, reply as before.
 - v1.1 rev 2: Include "root" (linkset root UUID) in plugin.leash.target
   reply so the collar can validate post-mode responses against the
   user-selected target root. Additive field; old collars ignore it.
@@ -84,6 +88,10 @@ default {
 
         // Expect JSON: {"type":"plugin.leash.request","wearer":"...","collar":"...","session":"..."}
         if (llJsonGetValue(msg, ["type"]) != "plugin.leash.request") return;
+
+        // Coffle requests want the peer collar's leashpoint, not a holder.
+        // Missing field = old requester, reply as before.
+        if (llJsonGetValue(msg, ["mode"]) == "coffle") return;
 
         key collar = (key)llJsonGetValue(msg, ["collar"]);
         integer session = (integer)llJsonGetValue(msg, ["session"]);

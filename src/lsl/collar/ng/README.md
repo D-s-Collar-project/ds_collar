@@ -93,7 +93,7 @@ On startup the collar will detect RLV support, load any settings notecard, and r
 
 **Touch** the collar to open the main menu. You'll see only the options your access level allows.
 
-**Long-touch** (hold for 1.5+ seconds) to access the emergency SOS menu. This is a safety net for the wearer in TPE mode, who has lost normal collar access.
+**Long-touch** (hold for 1.5+ seconds) to access the emergency SOS menu. It is the wearer's safety net when normal access has been lost — TPE wearers see the full set of emergency clears, and an owned wearer whose owner has disabled in-scene Runaway sees the **Runaway** option as a last-resort escape.
 
 ### Who Can Do What
 
@@ -126,7 +126,7 @@ Status         — View collar information
 TPE: Y/N       — Toggle Total Power Exchange
 ```
 
-The **SOS** menu (wearer long-touch in TPE mode) provides emergency unleash, RLV clear, and relay clear.
+The **SOS** menu (wearer long-touch) provides emergency unleash, RLV clear, relay clear, and a nuclear **Runaway** that wipes the collar back to factory defaults. Which buttons appear depends on the wearer's situation; see the User Guide for the full matrix.
 
 ---
 
