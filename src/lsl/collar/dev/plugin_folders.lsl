@@ -1,12 +1,15 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
              no text input required. Only the locked-folder list is persisted.
 CHANGES:
+- v1.1 rev 16: persist_locked stops pre-writing LSD before sending
+  settings.set. Aligns with project rule that kmod_settings is the
+  canonical writer for shared LSD keys.
 - v1.1 rev 15: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -228,7 +231,7 @@ apply_settings_sync() {
 
 persist_locked() {
     string csv = llDumpList2String(LockedNames, ",");
-    llLinksetDataWrite(KEY_LOCKED, csv);
+    // kmod_settings is the canonical writer. See rev 16 changelog.
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type",  "settings.set",
         "key",   KEY_LOCKED,
