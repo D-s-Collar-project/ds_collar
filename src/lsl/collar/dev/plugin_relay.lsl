@@ -1,10 +1,23 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 15
 PURPOSE: Provide ORG-compliant RLV relay with hardcore mode and safeword hooks
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 15: persist_mode and persist_hardcore stop pre-writing LSD
+  before sending settings.set. The pre-write tripped kmod_settings's
+  idempotency guard, swallowing broadcast_settings_changed. Aligns this
+  plugin with the project rule: kmod_settings is the canonical writer
+  for shared LSD keys.
+- v1.1 rev 14: Tighten parser. Require strict ORG format (exactly three
+  comma-separated fields with a 36-char UUID in field 2); messages that
+  don't match are dropped instead of being treated as raw commands.
+  Wildcard target (ffffffff-...) is now honoured only for @version /
+  @versionnew capability probes — for any other command the target must
+  match this wearer specifically. Closes a real exposure where a
+  third-party piece of furniture broadcast a restriction to wildcard
+  and our relay applied (or ASK-prompted) it on every wearer in range.
 - v1.1 rev 13: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -407,7 +420,7 @@ apply_settings_sync() {
 /* -------------------- SETTINGS MODIFICATION -------------------- */
 
 persist_mode(integer new_mode) {
-    llLinksetDataWrite(KEY_RELAY_MODE, (string)new_mode);
+    // kmod_settings is the canonical writer. See rev 15 changelog.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", KEY_RELAY_MODE,
@@ -417,7 +430,7 @@ persist_mode(integer new_mode) {
 }
 
 persist_hardcore(integer new_hardcore) {
-    llLinksetDataWrite(KEY_RELAY_HARDCORE, (string)new_hardcore);
+    // kmod_settings is the canonical writer. See rev 15 changelog.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", KEY_RELAY_HARDCORE,
@@ -818,36 +831,31 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
         session_chan = (integer)llList2String(parsed, 1);
     }
 
-    // Parse ORG standard format: "<ident>,<target_uuid>,<commands>"
+    // Parse ORG standard format: "<ident>,<target_uuid>,<command>".
+    // Strict — exactly three fields, with a real 36-char UUID in field 2.
+    // Anything else is silently dropped; we have no business processing
+    // chat that wasn't addressed to us in the protocol's own terms.
     list parts = llParseString2List(raw_cmd, [","], []);
-    string command = raw_cmd;
+    if (llGetListLength(parts) != 3) return;
+    string potential_uuid = llList2String(parts, 1);
+    if (llStringLength(potential_uuid) != 36) return;
+    if (llGetSubString(potential_uuid,  8,  8) != "-") return;
+    if (llGetSubString(potential_uuid, 13, 13) != "-") return;
+    if (llGetSubString(potential_uuid, 18, 18) != "-") return;
+    if (llGetSubString(potential_uuid, 23, 23) != "-") return;
+    key target_uuid = (key)potential_uuid;
+    string command = llList2String(parts, 2);
 
-    // Validate ORG format: check if parts[1] looks like a UUID
-    // UUIDs are 36 chars (8-4-4-4-12) with hyphens at positions 8,13,18,23
-    if (llGetListLength(parts) >= 3) {
-        string potential_uuid = llList2String(parts, 1);
-        integer uuid_len = llStringLength(potential_uuid);
-
-        // Check if this looks like a UUID (36 chars with hyphens in right places)
-        if (uuid_len == 36 &&
-            llGetSubString(potential_uuid, 8, 8) == "-" &&
-            llGetSubString(potential_uuid, 13, 13) == "-" &&
-            llGetSubString(potential_uuid, 18, 18) == "-" &&
-            llGetSubString(potential_uuid, 23, 23) == "-") {
-
-            // This is ORG format, validate target UUID
-            key target_uuid = (key)potential_uuid;
-
-            // Check if command is meant for this wearer (or wildcard)
-            if (target_uuid != WearerKey && target_uuid != WILDCARD_UUID) {
-                // Command not meant for this wearer, ignore it
-                return;
-            }
-
-            // Extract commands (field 2 onwards)
-            command = llList2String(parts, 2);
-        }
-        // else: not ORG format, treat entire raw_cmd as command
+    // Wildcard target is reserved for capability probes per ORG spec.
+    // Some furniture vendors broadcast actual restrictions to wildcard so
+    // a single rezzed object catches whoever happens to be in range; we
+    // refuse that. Wearer-targeted commands proceed; non-wearer non-probe
+    // wildcard commands are dropped.
+    if (target_uuid == WILDCARD_UUID) {
+        if (command != "@version" && command != "@versionnew") return;
+    }
+    else if (target_uuid != WearerKey) {
+        return;
     }
 
     // Handle version queries
