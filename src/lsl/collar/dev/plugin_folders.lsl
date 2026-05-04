@@ -1,12 +1,15 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 21
+REVISION: 22
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
              no text input required. Only the locked-folder list is persisted.
 CHANGES:
+- v1.1 rev 22: Drop "[Folders]" source prefix from the two user-facing
+  llRegionSayTo notices, matching the project convention applied to
+  plugin_relay / plugin_sos in earlier revs.
 - v1.1 rev 21: Skip tilde-prefixed folders alongside dot-prefixed ones in
   the @getinvworn parser. Tilde folders are auto-created by the viewer
   when scripted objects use Give-to-#RLV; the delivering object handles
@@ -326,7 +329,7 @@ scan_current_path() {
     llSetTimerEvent(RLV_TIMEOUT);
     string where = "#RLV";
     if (CurrentPath != "") where = "#RLV/" + CurrentPath;
-    llRegionSayTo(CurrentUser, 0, "[" + PLUGIN_LABEL + "] Reading " + where + " ...");
+    llRegionSayTo(CurrentUser, 0, "Reading " + where + " ...");
 }
 
 // On menu entry, scan from #RLV root. Once the viewer responds,
@@ -726,7 +729,7 @@ default
         // RLV @getinv query timed out — viewer is not RLV-enabled or not responding
         stop_rlv_listen();
         if (CurrentUser != NULL_KEY) {
-            llRegionSayTo(CurrentUser, 0, "[" + PLUGIN_LABEL + "] RLV not responding. Is RLV mode enabled?");
+            llRegionSayTo(CurrentUser, 0, "RLV not responding. Is RLV mode enabled?");
             return_to_root();
         }
     }

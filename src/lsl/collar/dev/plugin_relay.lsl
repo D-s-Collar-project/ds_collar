@@ -1,10 +1,14 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 17
+REVISION: 18
 PURPOSE: Provide ORG-compliant RLV relay with hardcore mode and safeword hooks
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 18: Drop "[RELAY]" source prefix from the remaining 13 sites
+  (12 user notices + 1 ASK-dialog body). The rev 8 cleanup only caught
+  3 of them; the rest were missed. Brings this plugin into line with
+  the project convention applied to plugin_folders / plugin_sos.
 - v1.1 rev 17: ASK mode now acks on arrival but still defers apply until
   consent. Source's state machine doesn't time out (it sees ,ok
   immediately), but the viewer doesn't see the restriction until the
@@ -368,7 +372,7 @@ show_ask_dialog() {
     if (AskListenHandle) llListenRemove(AskListenHandle);
     AskListenHandle = llListen(AskDialogChan, "", WearerKey, "");
 
-    string body = "[RELAY] " + PendingAskName +
+    string body = "" + PendingAskName +
                   " applied RLV restrictions.\n\nAllow to keep them, or Deny to release.";
 
     // Three buttons: Deny left, Allow right, blank centre for spacing
@@ -392,7 +396,7 @@ accept_ask() {
     if (llListFindList(SessionTrustedKeys, [(string)PendingAskKey]) == -1) {
         SessionTrustedKeys += [(string)PendingAskKey];
     }
-    llRegionSayTo(WearerKey, 0, "[RELAY] Allowed: " + PendingAskName);
+    llRegionSayTo(WearerKey, 0, "Allowed: " + PendingAskName);
     clear_pending_ask();
 }
 
@@ -406,7 +410,7 @@ decline_ask() {
         llRegionSayTo(PendingAskKey, PendingAskChan,
             "RLV," + (string)llGetKey() + ",!release,ok");
     }
-    llRegionSayTo(WearerKey, 0, "[RELAY] Denied: " + PendingAskName);
+    llRegionSayTo(WearerKey, 0, "Denied: " + PendingAskName);
     clear_pending_ask();
 }
 
@@ -621,14 +625,14 @@ handle_button_click(string button) {
     else if (button == "Safeword") {
         if (btn_allowed("Safeword") && !Hardcore) {
             safeword_clear_all();
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Safeword used - all restrictions cleared");
+            llRegionSayTo(CurrentUser, 0, "Safeword used - all restrictions cleared");
             show_main_menu();
         }
     }
     else if (button == "Unbind") {
         if (btn_allowed("Unbind")) {
             safeword_clear_all();
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Unbound - all restrictions cleared");
+            llRegionSayTo(CurrentUser, 0, "Unbound - all restrictions cleared");
             show_main_menu();
         }
     }
@@ -640,7 +644,7 @@ handle_button_click(string button) {
         persist_mode(MODE_OFF);
         persist_hardcore(FALSE);
         update_relay_listen_state();
-        llRegionSayTo(CurrentUser, 0, "[RELAY] Mode set to OFF");
+        llRegionSayTo(CurrentUser, 0, "Mode set to OFF");
         show_mode_menu();
     }
     else if (button == "ASK") {
@@ -650,7 +654,7 @@ handle_button_click(string button) {
         persist_mode(MODE_ASK);
         persist_hardcore(FALSE);
         update_relay_listen_state();
-        llRegionSayTo(CurrentUser, 0, "[RELAY] Mode set to ASK");
+        llRegionSayTo(CurrentUser, 0, "Mode set to ASK");
         show_mode_menu();
     }
     else if (button == "ON") {
@@ -659,7 +663,7 @@ handle_button_click(string button) {
         persist_mode(MODE_ON);
         update_relay_listen_state();
         if (!Hardcore) {
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Mode set to ON");
+            llRegionSayTo(CurrentUser, 0, "Mode set to ON");
         }
         show_mode_menu();
     }
@@ -669,7 +673,7 @@ handle_button_click(string button) {
             Mode = MODE_ON;
             persist_hardcore(TRUE);
             persist_mode(MODE_ON);
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Hardcore mode ENABLED");
+            llRegionSayTo(CurrentUser, 0, "Hardcore mode ENABLED");
             show_mode_menu();
         }
     }
@@ -679,7 +683,7 @@ handle_button_click(string button) {
             Mode = MODE_ON;
             persist_hardcore(FALSE);
             persist_mode(MODE_ON);
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Hardcore mode DISABLED");
+            llRegionSayTo(CurrentUser, 0, "Hardcore mode DISABLED");
             show_mode_menu();
         }
     }
@@ -805,7 +809,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
             persist_mode(MODE_ON);
         }
         update_relay_listen_state();
-        llRegionSayTo(user, 0, "[RELAY] Mode set to " + llToUpper(subpath) + ".");
+        llRegionSayTo(user, 0, "Mode set to " + llToUpper(subpath) + ".");
         gPolicyButtons = [];
         return;
     }
@@ -819,7 +823,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         safeword_clear_all();
-        llRegionSayTo(user, 0, "[RELAY] Safeword used - all restrictions cleared.");
+        llRegionSayTo(user, 0, "Safeword used - all restrictions cleared.");
         gPolicyButtons = [];
         return;
     }
@@ -1006,7 +1010,7 @@ default
     timer() {
         // ASK dialog timed out — treat as denial
         if (PendingAskKey != NULL_KEY) {
-            llRegionSayTo(WearerKey, 0, "[RELAY] Request timed out: " + PendingAskName);
+            llRegionSayTo(WearerKey, 0, "Request timed out: " + PendingAskName);
             decline_ask();
         }
     }
