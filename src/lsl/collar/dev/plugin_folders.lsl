@@ -1,12 +1,21 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 20
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
              no text input required. Only the locked-folder list is persisted.
 CHANGES:
+- v1.1 rev 20: Two fixes. (1) Worn indicator now reads @getinvworn's
+  two-digit response correctly: <self><descendants> where each digit is
+  0/1/2/3 (empty/none/partial/all). Previous code compared the raw
+  two-char string to "1" / "2" and never matched, leaving every entry
+  showing [ ]. (2) Direct-browse UX: tapping a folder drills in
+  immediately — no more action submenu and no Open button. Actions
+  (Attach/Detach/Lock|Unlock) are inline on the breadcrumb dialog of the
+  drilled-in folder and operate on that path. Lock vs Unlock is
+  state-driven (only the applicable one is shown).
 - v1.1 rev 19: Subfolder browsing. Track CurrentPath; re-issue @getinvworn
   with the path on Open. Folder pick shows the breadcrumb; Back at a
   subfolder pops one level (Back at root still exits the plugin). All
@@ -87,9 +96,10 @@ string PLUGIN_LABEL   = "Folders";
 /* -------------------- SETTINGS KEYS & CONSTANTS -------------------- */
 string  KEY_LOCKED  = "folders.locked";  // CSV of folder names locked via @detachallthis
 
-integer RLV_CHAN    = 1888753;   // Private positive channel for @getinv responses
-float   RLV_TIMEOUT = 10.0;     // Seconds to wait for viewer RLV reply
-integer PAGE_SIZE   = 9;        // Folder buttons per page (fills 3 rows above nav row)
+integer RLV_CHAN          = 1888753;  // Private positive channel for @getinv responses
+float   RLV_TIMEOUT       = 10.0;     // Seconds to wait for viewer RLV reply
+integer PAGE_SIZE_ROOT    = 9;        // At #RLV root: 3 nav slots + 9 folder slots
+integer PAGE_SIZE_SUBPATH = 6;        // At a subfolder: 3 nav + up to 3 actions + 6 folder slots
 
 /* -------------------- STATE -------------------- */
 list    LockedNames       = [];   // Folder paths locked via @detachallthis:name=n
@@ -98,11 +108,10 @@ key     CurrentUser       = NULL_KEY;
 integer UserAcl           = 0;
 list    gPolicyButtons    = [];
 string  SessionId         = "";
-string  MenuContext       = "";   // "scanning" | "pick" | "action"
-string  SelectedFolder    = "";   // Folder name (relative to CurrentPath) chosen in "pick"
+string  MenuContext       = "";   // "scanning" | "pick"
 string  CurrentPath       = "";   // #RLV-relative browsing path; "" = #RLV root
 list    DiscoveredFolders = [];   // Populated from @getinvworn response (relative names)
-list    WornStates        = [];   // Parallel to DiscoveredFolders: "0","1","2"
+list    WornStates        = [];   // Parallel to DiscoveredFolders: two-digit "<self><descendants>"
 integer PickPage          = 0;
 integer RlvListenHandle   = 0;
 
@@ -207,7 +216,6 @@ cleanup_session() {
     UserAcl           = 0;
     gPolicyButtons    = [];
     MenuContext       = "";
-    SelectedFolder    = "";
     CurrentPath       = "";
     DiscoveredFolders = [];
     WornStates        = [];
@@ -306,7 +314,6 @@ pop_current_path() {
 scan_current_path() {
     DiscoveredFolders = [];
     WornStates        = [];
-    SelectedFolder    = "";
     PickPage          = 0;
     MenuContext       = "scanning";
     stop_rlv_listen();
@@ -327,72 +334,90 @@ show_main() {
     scan_current_path();
 }
 
-// Shows a paginated numbered list of folders at CurrentPath. Buttons are
-// 1..N mapped top-to-bottom, left-to-right with no padding. Algorithm: the
-// top row may be partial; all rows below are full. llDialog fills
-// bottom-left to top-right, so we append bottom rows first and the
-// (partial) top row last. Empty list (no subfolders here) renders as a
-// breadcrumb with just Back so the user can navigate up.
+// Decode a @getinvworn worn-state string into a single character indicator.
+// @getinvworn returns "<self><descendants>" where each digit is:
+//   0 = no items, 1 = none worn, 2 = some worn, 3 = all worn.
+// We surface "[+]" if anything (self or descendants) is fully worn, "[-]"
+// if anything is partial, otherwise "[ ]".
+string worn_indicator(string raw) {
+    string self_state = "0";
+    string desc_state = "0";
+    if (llStringLength(raw) >= 1) self_state = llGetSubString(raw, 0, 0);
+    if (llStringLength(raw) >= 2) desc_state = llGetSubString(raw, 1, 1);
+    if (self_state == "3" || desc_state == "3") return "[+]";
+    if (self_state == "2" || desc_state == "2") return "[-]";
+    return "[ ]";
+}
+
+// Shows a paginated numbered list of subfolders at CurrentPath plus, when
+// at a subfolder, inline action buttons (Attach / Detach / Lock|Unlock)
+// that operate on CurrentPath. Tapping a numbered folder drills into it
+// directly — no action submenu. Layout: at root, 3 nav slots + 9 folder
+// slots; at subfolder, 3 nav + up to 3 action + 6 folder slots.
 show_folder_pick(integer page) {
+    integer at_subfolder = (CurrentPath != "");
+    integer page_size;
+    if (at_subfolder) page_size = PAGE_SIZE_SUBPATH;
+    else              page_size = PAGE_SIZE_ROOT;
+
     integer total = llGetListLength(DiscoveredFolders);
 
     SessionId   = generate_session_id();
     MenuContext = "pick";
 
     string crumb = "#RLV";
-    if (CurrentPath != "") crumb = "#RLV/" + CurrentPath;
+    if (at_subfolder) crumb = "#RLV/" + CurrentPath;
 
-    if (total == 0) {
-        // Empty folder — just breadcrumb + Back. Useful at subfolders with
-        // no further subfolders so the user can pop back up.
-        string body0 = crumb + "\n\n(no subfolders here)";
-        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-            "type",        "ui.dialog.open",
-            "session_id",  SessionId,
-            "user",        (string)CurrentUser,
-            "title",       PLUGIN_LABEL,
-            "body",        body0,
-            "button_data", llList2Json(JSON_ARRAY, [btn("Back", "back")]),
-            "timeout",     60
-        ]), NULL_KEY);
-        return;
+    integer current_locked = FALSE;
+    if (at_subfolder) {
+        if (llListFindList(LockedNames, [CurrentPath]) != -1) current_locked = TRUE;
     }
 
-    integer max_page = (total - 1) / PAGE_SIZE;
-    if (page < 0) page = 0;
+    integer max_page;
+    if (total == 0) max_page = 0;
+    else            max_page = (total - 1) / page_size;
+    if (page < 0)        page = 0;
     if (page > max_page) page = max_page;
     PickPage = page;
 
-    integer start   = page * PAGE_SIZE;
-    integer end_idx = start + PAGE_SIZE;
+    integer start   = page * page_size;
+    integer end_idx = start + page_size;
     if (end_idx > total) end_idx = total;
     integer count = end_idx - start;
 
-    // Build body text (natural 1..N order, top-to-bottom)
-    string body = crumb + "\n" +
-                  "Tap a number to manage a folder.\n" +
-                  "[+]=worn  [-]=partial  *=locked\n" +
-                  "Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
-
-    integer k = 0;
-    while (k < count) {
-        string folder_name = llList2String(DiscoveredFolders, start + k);
-        string worn        = llList2String(WornStates, start + k);
-        string worn_ind;
-        if (worn == "1")      worn_ind = "[+]";
-        else if (worn == "2") worn_ind = "[-]";
-        else                  worn_ind = "[ ]";
-        string lock_mark = "";
-        if (llListFindList(LockedNames, [full_path(folder_name)]) != -1) lock_mark = "*";
-        body += (string)(k + 1) + ". " + worn_ind + " " + folder_name + lock_mark + "\n";
-        k += 1;
+    // Body text (natural 1..N order, top-to-bottom)
+    string body = crumb;
+    if (at_subfolder) {
+        if (current_locked) body += "  (Locked)";
+        else                body += "  (Unlocked)";
+    }
+    body += "\n\n";
+    if (total == 0) {
+        body += "(no subfolders here)";
+    }
+    else {
+        body += "Tap a number to open a subfolder.\n";
+        body += "[+]=worn  [-]=partial  *=locked\n";
+        body += "Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
+        integer k = 0;
+        while (k < count) {
+            string folder_name = llList2String(DiscoveredFolders, start + k);
+            string worn        = llList2String(WornStates, start + k);
+            string worn_ind    = worn_indicator(worn);
+            string lock_mark   = "";
+            if (llListFindList(LockedNames, [full_path(folder_name)]) != -1) lock_mark = "*";
+            body += (string)(k + 1) + ". " + worn_ind + " " + folder_name + lock_mark + "\n";
+            k += 1;
+        }
     }
 
-    // Compute rows. Top row may be partial; full rows are below it.
-    integer num_rows  = (count + 2) / 3;          // ceiling division
-    integer top_count = count - (num_rows - 1) * 3; // items in top row (1-3)
-
-    // Append full rows bottom-to-top (skipping the top row)
+    // Folder buttons (row-inversion so dialog reads top-to-bottom)
+    integer num_rows  = 0;
+    integer top_count = 0;
+    if (count > 0) {
+        num_rows  = (count + 2) / 3;
+        top_count = count - (num_rows - 1) * 3;
+    }
     list folder_buttons = [];
     integer r = num_rows - 1;
     while (r >= 1) {
@@ -405,57 +430,30 @@ show_folder_pick(integer page) {
         }
         r -= 1;
     }
-    // Append top (partial) row last
     integer ti = 0;
     while (ti < top_count) {
         folder_buttons += [btn((string)(ti + 1), "pick:" + (string)(start + ti))];
         ti += 1;
     }
 
-    list button_data = [btn("Back", "back"), btn("<<", "prev"), btn(">>", "next")] + folder_buttons;
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
-    ]), NULL_KEY);
-}
-
-// Shows Attach / Detach / Lock (or Unlock) / Open action buttons for a
-// chosen folder. The "Open" button drills into the folder so the wearer
-// can browse its subfolders. Open is unconditional — browsing is purely
-// navigational and shouldn't be ACL-gated.
-show_folder_action(string folder_name) {
-    SelectedFolder = folder_name;
-    SessionId      = generate_session_id();
-    MenuContext    = "action";
-
-    string folder_path = full_path(folder_name);
-
-    string lock_status;
-    if (llListFindList(LockedNames, [folder_path]) != -1) lock_status = "Locked";
-    else                                                  lock_status = "Unlocked";
-
-    string worn_status = "Not worn";
-    integer folder_idx = llListFindList(DiscoveredFolders, [folder_name]);
-    if (folder_idx != -1) {
-        string worn = llList2String(WornStates, folder_idx);
-        if (worn == "1")      worn_status = "Worn";
-        else if (worn == "2") worn_status = "Partially worn";
+    // Action buttons act on CurrentPath itself — only meaningful at a
+    // subfolder. Lock and Unlock are mutually exclusive; show only the
+    // one that applies given the current lock state.
+    list action_buttons = [];
+    if (at_subfolder) {
+        if (btn_allowed("Attach")) action_buttons += [btn("Attach", "attach")];
+        if (btn_allowed("Detach")) action_buttons += [btn("Detach", "detach")];
+        if (current_locked) {
+            if (btn_allowed("Unlock")) action_buttons += [btn("Unlock", "unlock")];
+        }
+        else {
+            if (btn_allowed("Lock")) action_buttons += [btn("Lock", "lock")];
+        }
     }
 
-    string body = "#RLV/" + folder_path + "\n" +
-                  worn_status + " / " + lock_status + "\n\nChoose an action:";
-
-    list button_data = [btn("Back", "back"), btn("Open", "open")];
-    if (btn_allowed("Attach"))  button_data += [btn("Attach",  "attach")];
-    if (btn_allowed("Detach"))  button_data += [btn("Detach",  "detach")];
-    if (btn_allowed("Lock"))    button_data += [btn("Lock",    "lock")];
-    if (btn_allowed("Unlock"))  button_data += [btn("Unlock",  "unlock")];
+    list button_data = [btn("Back", "back"), btn("<<", "prev"), btn(">>", "next")];
+    button_data += action_buttons;
+    button_data += folder_buttons;
 
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type",        "ui.dialog.open",
@@ -510,18 +508,19 @@ handle_subpath(key user, integer acl_level, string subpath) {
     gPolicyButtons = [];
 
     CurrentUser = user;
-    UserAcl = acl_level;
-    // Chat invocation has no UI navigation context — folder_name is the
-    // full path; pass it through with no CurrentPath prefix.
-    CurrentPath = "";
+    UserAcl     = acl_level;
+    // Chat invocation has no UI navigation context — treat folder_name as
+    // the absolute path and act on it directly.
     apply_folder_action(folder_name, action);
 }
 
-// Executes app_action on the absolute #RLV-relative path for folder_name.
-// Menu callers pass the relative name (in CurrentPath); chat callers
-// clear CurrentPath first so folder_name acts as the full path.
-apply_folder_action(string folder_name, string app_action) {
-    string folder_path = full_path(folder_name);
+// Executes app_action on the absolute #RLV-relative folder path. Cannot
+// operate on the empty path (the #RLV root itself).
+apply_folder_action(string folder_path, string app_action) {
+    if (folder_path == "") {
+        llRegionSayTo(CurrentUser, 0, "Cannot perform that on the #RLV root.");
+        return;
+    }
 
     if (app_action == "attach") {
         attach_folder(folder_path);
@@ -573,49 +572,62 @@ handle_dialog_response(string msg) {
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
 
-    if (MenuContext == "pick") {
-        if (ctx == "back") {
-            // At root, exit the plugin. At a subfolder, pop one level and
-            // re-scan so Back walks the user back up the path.
-            if (CurrentPath == "") {
-                return_to_root();
-            }
-            else {
-                pop_current_path();
-                scan_current_path();
-            }
+    if (MenuContext != "pick") return;
+
+    if (ctx == "back") {
+        // At root, exit the plugin. At a subfolder, pop one level and
+        // re-scan so Back walks the user back up the path.
+        if (CurrentPath == "") {
+            return_to_root();
         }
-        else if (ctx == "prev") {
-            integer new_page = PickPage - 1;
-            if (new_page < 0) new_page = 0;
-            show_folder_pick(new_page);
-        }
-        else if (ctx == "next") {
-            integer total = llGetListLength(DiscoveredFolders);
-            integer max_page = (total - 1) / PAGE_SIZE;
-            integer new_page = PickPage + 1;
-            if (new_page > max_page) new_page = max_page;
-            show_folder_pick(new_page);
-        }
-        else if (llSubStringIndex(ctx, "pick:") == 0) {
-            integer idx = (integer)llGetSubString(ctx, 5, -1);
-            if (idx >= 0 && idx < llGetListLength(DiscoveredFolders)) {
-                show_folder_action(llList2String(DiscoveredFolders, idx));
-            }
-        }
-    }
-    else if (MenuContext == "action") {
-        if (ctx == "back") {
-            show_folder_pick(PickPage);
-        }
-        else if (ctx == "open") {
-            // Drill into the selected folder and re-scan its contents.
-            CurrentPath = full_path(SelectedFolder);
+        else {
+            pop_current_path();
             scan_current_path();
         }
-        else if (ctx == "attach" || ctx == "detach" || ctx == "lock" || ctx == "unlock") {
-            apply_folder_action(SelectedFolder, ctx);
-            show_folder_pick(PickPage);
+        return;
+    }
+
+    integer page_size;
+    if (CurrentPath != "") page_size = PAGE_SIZE_SUBPATH;
+    else                   page_size = PAGE_SIZE_ROOT;
+
+    if (ctx == "prev") {
+        integer new_page = PickPage - 1;
+        if (new_page < 0) new_page = 0;
+        show_folder_pick(new_page);
+        return;
+    }
+    if (ctx == "next") {
+        integer total = llGetListLength(DiscoveredFolders);
+        integer max_page;
+        if (total == 0) max_page = 0;
+        else            max_page = (total - 1) / page_size;
+        integer new_page = PickPage + 1;
+        if (new_page > max_page) new_page = max_page;
+        show_folder_pick(new_page);
+        return;
+    }
+
+    // Action buttons act on CurrentPath itself (only present at subfolder).
+    // Attach/Detach refresh the worn state via re-scan; Lock/Unlock just
+    // re-render in place.
+    if (ctx == "attach" || ctx == "detach") {
+        apply_folder_action(CurrentPath, ctx);
+        scan_current_path();
+        return;
+    }
+    if (ctx == "lock" || ctx == "unlock") {
+        apply_folder_action(CurrentPath, ctx);
+        show_folder_pick(PickPage);
+        return;
+    }
+
+    // Numbered folder tap: drill into that subfolder.
+    if (llSubStringIndex(ctx, "pick:") == 0) {
+        integer idx = (integer)llGetSubString(ctx, 5, -1);
+        if (idx >= 0 && idx < llGetListLength(DiscoveredFolders)) {
+            CurrentPath = full_path(llList2String(DiscoveredFolders, idx));
+            scan_current_path();
         }
     }
 }
