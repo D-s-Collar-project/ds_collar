@@ -1,12 +1,18 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 16
+REVISION: 18
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
              no text input required. Only the locked-folder list is persisted.
 CHANGES:
+- v1.1 rev 18: Narrow ACL 2 (owned wearer) to Attach/Detach only — no
+  Lock/Unlock so they cannot defeat owner-set folder locks. RLV still
+  prevents Detach on a locked folder regardless of the menu offering it.
+- v1.1 rev 17: Extend ACL policy to include ACL 2 (owned wearer) with the
+  same Attach/Detach/Lock/Unlock buttons as ACL 3/4/5. Owned wearers can
+  now use folder management.
 - v1.1 rev 16: persist_locked stops pre-writing LSD before sending
   settings.set. Aligns with project rule that kmod_settings is the
   canonical writer for shared LSD keys.
@@ -140,6 +146,7 @@ write_plugin_reg(string label) {
 
 register_self() {
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+        "2", "Attach,Detach",
         "3", "Attach,Detach,Lock,Unlock",
         "4", "Attach,Detach,Lock,Unlock",
         "5", "Attach,Detach,Lock,Unlock"
