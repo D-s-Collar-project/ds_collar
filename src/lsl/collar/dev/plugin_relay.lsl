@@ -1,10 +1,24 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 17
 PURPOSE: Provide ORG-compliant RLV relay with hardcore mode and safeword hooks
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 17: ASK mode now acks on arrival but still defers apply until
+  consent. Source's state machine doesn't time out (it sees ,ok
+  immediately), but the viewer doesn't see the restriction until the
+  wearer clicks Allow. On Deny we don't ,ko the already-acked commands;
+  we send !release,ok so the source tears down its session as if the
+  wearer escaped. Fixes the rev 16 regression where Allow could arrive
+  after the source had given up, requiring re-capture.
+- v1.1 rev 16: ASK mode no longer provisionally applies. Untrusted sources
+  now have their commands queued (capped at MAX_PENDING) until the wearer
+  responds; Allow flushes the queue (apply + ack each), Deny / timeout
+  ko's each queued command and sends !release with no @clear. Replaces
+  the rev 9 provisional-accept behaviour, which applied before consent
+  and used @clear on Deny — both surprising the wearer and stomping on
+  direct-RLV plugins' restrictions.
 - v1.1 rev 15: persist_mode and persist_hardcore stop pre-writing LSD
   before sending settings.set. The pre-write tripped kmod_settings's
   idempotency guard, swallowing broadcast_settings_changed. Aligns this
@@ -106,6 +120,7 @@ integer MODE_ON  = 1;
 integer MODE_ASK = 2;
 
 integer ASK_TIMEOUT_SEC = 30;  // Wearer has 30 seconds to respond to an ASK dialog
+integer MAX_PENDING = 8;       // Anti-flood cap on ASK queue per pending source
 
 
 // ORG relay spec wildcard UUID (accepts commands from any avatar)
@@ -129,12 +144,14 @@ list Relays = [];
 // ASK mode: objects the wearer has accepted this session (not re-prompted)
 list SessionTrustedKeys = [];
 
-// ASK mode: one pending prompt at a time. Restrictions from an untrusted
-// object are applied + acked on arrival (provisional accept); the prompt
-// asks the wearer to Allow (keep) or Deny (revert via @clear + !release).
+// ASK mode: one pending prompt at a time. Untrusted-source commands are
+// queued in PendingAskCommands until the wearer responds — Allow flushes
+// and applies, Deny / timeout ko's each and !releases the source. The
+// queue is per-source (only PendingAskKey can append).
 key PendingAskKey = NULL_KEY;
 string PendingAskName = "";
 integer PendingAskChan = 0;
+list PendingAskCommands = [];
 integer AskListenHandle = 0;
 integer AskDialogChan = 0;
 
@@ -359,9 +376,19 @@ show_ask_dialog() {
     llSetTimerEvent((float)ASK_TIMEOUT_SEC);
 }
 
-// Wearer confirmed: trust the object for this session. Restrictions were
-// already applied on arrival (provisional accept), so nothing to forward.
+// Wearer confirmed: flush the queue — forward each command to the viewer
+// and trust the source for the rest of the session. ,ok was already sent
+// on arrival (rev 17 early-ack), so we don't re-ack here.
 accept_ask() {
+    integer count = llGetListLength(PendingAskCommands);
+    integer i = 0;
+    while (i < count) {
+        string command = llList2String(PendingAskCommands, i);
+        add_relay(PendingAskKey, PendingAskName, PendingAskChan);
+        store_restriction(PendingAskKey, command);
+        llOwnerSay(command);
+        i += 1;
+    }
     if (llListFindList(SessionTrustedKeys, [(string)PendingAskKey]) == -1) {
         SessionTrustedKeys += [(string)PendingAskKey];
     }
@@ -369,12 +396,13 @@ accept_ask() {
     clear_pending_ask();
 }
 
-// Wearer declined or dialog timed out: revert the provisional restrictions
-// from this object and release it.
+// Wearer declined or dialog timed out: send !release,ok to the source so
+// it tears down its session as if the wearer escaped. We don't ,ko the
+// queued commands — they were already acked ,ok on arrival (rev 17). The
+// viewer never saw them, so there's nothing to clear, and other plugins'
+// direct-RLV restrictions stay intact.
 decline_ask() {
     if (PendingAskKey != NULL_KEY) {
-        clear_restrictions(PendingAskKey);
-        remove_relay(PendingAskKey);
         llRegionSayTo(PendingAskKey, PendingAskChan,
             "RLV," + (string)llGetKey() + ",!release,ok");
     }
@@ -392,6 +420,7 @@ clear_pending_ask() {
     PendingAskKey = NULL_KEY;
     PendingAskName = "";
     PendingAskChan = 0;
+    PendingAskCommands = [];
     AskDialogChan = 0;
 }
 
@@ -884,33 +913,50 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
             return;
         }
 
-        // ASK mode: provisional accept. Apply and ack on arrival so the
-        // object's state machine doesn't time out while the wearer reads
-        // the prompt. Wearer's Deny (or timeout) reverts via @clear +
-        // !release. Removal commands (=y, @clear) bypass the prompt.
-        // Objects already trusted this session skip the prompt entirely.
+        // ASK mode: ack on arrival but defer apply until consent. Source
+        // sees ,ok immediately (its state machine doesn't time out), but
+        // the viewer doesn't see the restriction until the wearer Allows.
+        // On Deny we send !release,ok to the source — no ,ko for the
+        // already-acked commands. Removal commands (=y, @clear) and
+        // already-trusted sources skip the queue and apply directly.
         if (Mode == MODE_ASK && !is_removal_command(command)) {
             integer already_trusted = (llListFindList(SessionTrustedKeys, [(string)sender_id]) != -1);
             if (!already_trusted) {
                 if (PendingAskKey == NULL_KEY) {
-                    // No active prompt — open one for this object
+                    // No active prompt — open one for this object, queue
+                    // the command, and ack it on the source's channel.
                     PendingAskKey = sender_id;
                     PendingAskName = sender_name;
                     PendingAskChan = session_chan;
-                    show_ask_dialog();
-                }
-                else if (PendingAskKey != sender_id) {
-                    // Different object arrived while a prompt is open — reject
+                    PendingAskCommands = [command];
                     llRegionSayTo(sender_id, session_chan,
-                        "RLV," + (string)llGetKey() + "," + command + ",ko");
+                        "RLV," + (string)llGetKey() + "," + command + ",ok");
+                    show_ask_dialog();
                     return;
                 }
-                // Fall through to apply (provisional accept)
+                if (PendingAskKey == sender_id) {
+                    // Same source, more commands while waiting — append to
+                    // queue and ack. Past the cap, ,ko (the only path that
+                    // legitimately ko's an in-ASK command).
+                    if (llGetListLength(PendingAskCommands) >= MAX_PENDING) {
+                        llRegionSayTo(sender_id, session_chan,
+                            "RLV," + (string)llGetKey() + "," + command + ",ko");
+                        return;
+                    }
+                    PendingAskCommands += [command];
+                    llRegionSayTo(sender_id, session_chan,
+                        "RLV," + (string)llGetKey() + "," + command + ",ok");
+                    return;
+                }
+                // Different object arrived while a prompt is open — reject
+                llRegionSayTo(sender_id, session_chan,
+                    "RLV," + (string)llGetKey() + "," + command + ",ko");
+                return;
             }
         }
 
-        // Apply command. Reached in MODE_ON, or MODE_ASK either provisionally
-        // (untrusted object, prompt just opened) or directly (trusted / removal).
+        // Apply command. Reached in MODE_ON, or in MODE_ASK for a session-
+        // trusted source or a removal command (=y / @clear).
         add_relay(sender_id, sender_name, session_chan);
         store_restriction(sender_id, command);
         llOwnerSay(command);  // Forward to viewer
