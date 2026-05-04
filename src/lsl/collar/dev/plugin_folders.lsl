@@ -1,12 +1,16 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 20
+REVISION: 21
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
              no text input required. Only the locked-folder list is persisted.
 CHANGES:
+- v1.1 rev 21: Skip tilde-prefixed folders alongside dot-prefixed ones in
+  the @getinvworn parser. Tilde folders are auto-created by the viewer
+  when scripted objects use Give-to-#RLV; the delivering object handles
+  the attach, so they don't belong in the wearer's outfit browser.
 - v1.1 rev 20: Two fixes. (1) Worn indicator now reads @getinvworn's
   two-digit response correctly: <self><descendants> where each digit is
   0/1/2/3 (empty/none/partial/all). Previous code compared the raw
@@ -666,8 +670,14 @@ handle_rlv_response(string message) {
                     folder_name = llGetSubString(entry, 0, pipe_pos - 1);
                     worn_state  = llGetSubString(entry, pipe_pos + 1, -1);
                 }
-                // pipe_pos == 0 means empty name before pipe — malformed, skip
-                if (folder_name != "" && llGetSubString(folder_name, 0, 0) != ".") {
+                // pipe_pos == 0 means empty name before pipe — malformed, skip.
+                // Skip dot-prefixed (hidden) and tilde-prefixed folders.
+                // Tilde folders are auto-created by the viewer when scripted
+                // objects use Give-to-#RLV; the delivering object handles the
+                // attach itself, so the wearer doesn't need to manage them
+                // through this menu.
+                string first = llGetSubString(folder_name, 0, 0);
+                if (folder_name != "" && first != "." && first != "~") {
                     DiscoveredFolders += [folder_name];
                     WornStates        += [worn_state];
                 }
