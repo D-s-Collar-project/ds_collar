@@ -1,4 +1,4 @@
-# Technical Reference — D/s Collar Modular
+# Technical Reference — D/s Collar
 
 Architecture and internals for developers working on or extending the collar system.
 

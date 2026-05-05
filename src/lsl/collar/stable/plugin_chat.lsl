@@ -1,11 +1,13 @@
 /*--------------------
 PLUGIN: plugin_chat.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 11
 PURPOSE: Configuration UI for kmod_chat — change command prefix and toggle
          public chat (channel 0) listening.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 11: Drop "[Chat]" source prefix from the access-denied notice.
+  Brings this plugin into line with the project convention.
 - v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -461,7 +463,7 @@ default
                 if (llJsonGetValue(msg, ["acl"]) == JSON_INVALID) return;
                 integer req_acl = (integer)llJsonGetValue(msg, ["acl"]);
                 if (req_acl < 4) {
-                    llRegionSayTo(id, 0, "[Chat] Access denied.");
+                    llRegionSayTo(id, 0, "Access denied.");
                     return;
                 }
                 CurrentUser = id;

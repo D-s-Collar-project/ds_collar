@@ -33,7 +33,7 @@ A D/s collar system for Second Life: lightweight, modular, and RLV-aware. This g
 
 ## What it is
 
-D/s Collar Modular is a collar system built around a small kernel and a set of plugins. Each feature — leash, bell, RLV relay, TPE mode, and so on — is its own plugin, so a collar can ship lean or fully loaded.
+D/s Collar is a collar system built around a small kernel and a set of plugins. Each feature — leash, bell, RLV relay, TPE mode, and so on — is its own plugin, so a collar can ship lean or fully loaded.
 
 Core capabilities:
 
@@ -188,7 +188,7 @@ Three leashing modes and a small set of movement helpers. Basic leashing works w
 ### Modes
 
 **Avatar** — leash the wearer to another avatar. Default mode.
-**Coffle** — collar-to-collar. Both avatars must wear a D/s Collar Modular. Used to train submissives together.
+**Coffle** — collar-to-collar. Both avatars must wear a D/s Collar. Used to train submissives together.
 **Post** — anchor the wearer to a fixed object.
 
 ### Menu actions
@@ -704,4 +704,4 @@ Stay safe and enjoy your collar.
 
 ---
 
-*D/s Collar Modular — a modular D/s collar system for Second Life. Licensed under MIT.*
+*D/s Collar — a modular D/s collar system for Second Life. Licensed under MIT.*

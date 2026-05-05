@@ -1,10 +1,50 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 20
 PURPOSE: Provide ORG-compliant RLV relay with hardcore mode and safeword hooks
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 20: Correct product name in IMPL_VERSION reply — "D/s Collar
+  Relay v1.10" (was "DS Collar Modular Relay v1.10").
+- v1.1 rev 19: Add ORG capability-probe handlers (!version, !implversion,
+  !x-orgversions). Modern furniture uses these to detect the relay;
+  without them they conclude no relay exists and never attempt to bind,
+  which made the wearer's relay feel non-existent until ASK was already
+  consented. All three auto-reply without going through ASK (they're
+  queries, not binds). Wildcard target whitelist expanded to include
+  them, matching Satomi's Damn Fast Relay and Multi-Relay behaviour.
+- v1.1 rev 18: Drop "[RELAY]" source prefix from the remaining 13 sites
+  (12 user notices + 1 ASK-dialog body). The rev 8 cleanup only caught
+  3 of them; the rest were missed. Brings this plugin into line with
+  the project convention applied to plugin_folders / plugin_sos.
+- v1.1 rev 17: ASK mode now acks on arrival but still defers apply until
+  consent. Source's state machine doesn't time out (it sees ,ok
+  immediately), but the viewer doesn't see the restriction until the
+  wearer clicks Allow. On Deny we don't ,ko the already-acked commands;
+  we send !release,ok so the source tears down its session as if the
+  wearer escaped. Fixes the rev 16 regression where Allow could arrive
+  after the source had given up, requiring re-capture.
+- v1.1 rev 16: ASK mode no longer provisionally applies. Untrusted sources
+  now have their commands queued (capped at MAX_PENDING) until the wearer
+  responds; Allow flushes the queue (apply + ack each), Deny / timeout
+  ko's each queued command and sends !release with no @clear. Replaces
+  the rev 9 provisional-accept behaviour, which applied before consent
+  and used @clear on Deny — both surprising the wearer and stomping on
+  direct-RLV plugins' restrictions.
+- v1.1 rev 15: persist_mode and persist_hardcore stop pre-writing LSD
+  before sending settings.set. The pre-write tripped kmod_settings's
+  idempotency guard, swallowing broadcast_settings_changed. Aligns this
+  plugin with the project rule: kmod_settings is the canonical writer
+  for shared LSD keys.
+- v1.1 rev 14: Tighten parser. Require strict ORG format (exactly three
+  comma-separated fields with a 36-char UUID in field 2); messages that
+  don't match are dropped instead of being treated as raw commands.
+  Wildcard target (ffffffff-...) is now honoured only for @version /
+  @versionnew capability probes — for any other command the target must
+  match this wearer specifically. Closes a real exposure where a
+  third-party piece of furniture broadcast a restriction to wildcard
+  and our relay applied (or ASK-prompted) it on every wearer in range.
 - v1.1 rev 13: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -73,6 +113,13 @@ integer DIALOG_BUS = 950;
 string PLUGIN_CONTEXT = "ui.core.relay";
 string PLUGIN_LABEL = "RLV Relay";
 
+/* -------------------- ORG CAPABILITY-PROBE REPLIES -------------------- */
+// Sources use these probes to detect that a relay is present. Without
+// the replies, sources conclude "no relay" and never attempt to bind.
+string PROTOCOL_VERSION = "1100";                              // RLV API version
+string IMPL_VERSION     = "ORG=0003/D/s Collar Relay v1.10";
+string ORG_VERSIONS     = "ORG=0003";                          // ORG protocol version
+
 /* ACL levels for reference:
    -1 = Blacklisted
     0 = No Access
@@ -93,6 +140,7 @@ integer MODE_ON  = 1;
 integer MODE_ASK = 2;
 
 integer ASK_TIMEOUT_SEC = 30;  // Wearer has 30 seconds to respond to an ASK dialog
+integer MAX_PENDING = 8;       // Anti-flood cap on ASK queue per pending source
 
 
 // ORG relay spec wildcard UUID (accepts commands from any avatar)
@@ -116,12 +164,14 @@ list Relays = [];
 // ASK mode: objects the wearer has accepted this session (not re-prompted)
 list SessionTrustedKeys = [];
 
-// ASK mode: one pending prompt at a time. Restrictions from an untrusted
-// object are applied + acked on arrival (provisional accept); the prompt
-// asks the wearer to Allow (keep) or Deny (revert via @clear + !release).
+// ASK mode: one pending prompt at a time. Untrusted-source commands are
+// queued in PendingAskCommands until the wearer responds — Allow flushes
+// and applies, Deny / timeout ko's each and !releases the source. The
+// queue is per-source (only PendingAskKey can append).
 key PendingAskKey = NULL_KEY;
 string PendingAskName = "";
 integer PendingAskChan = 0;
+list PendingAskCommands = [];
 integer AskListenHandle = 0;
 integer AskDialogChan = 0;
 
@@ -338,7 +388,7 @@ show_ask_dialog() {
     if (AskListenHandle) llListenRemove(AskListenHandle);
     AskListenHandle = llListen(AskDialogChan, "", WearerKey, "");
 
-    string body = "[RELAY] " + PendingAskName +
+    string body = "" + PendingAskName +
                   " applied RLV restrictions.\n\nAllow to keep them, or Deny to release.";
 
     // Three buttons: Deny left, Allow right, blank centre for spacing
@@ -346,26 +396,37 @@ show_ask_dialog() {
     llSetTimerEvent((float)ASK_TIMEOUT_SEC);
 }
 
-// Wearer confirmed: trust the object for this session. Restrictions were
-// already applied on arrival (provisional accept), so nothing to forward.
+// Wearer confirmed: flush the queue — forward each command to the viewer
+// and trust the source for the rest of the session. ,ok was already sent
+// on arrival (rev 17 early-ack), so we don't re-ack here.
 accept_ask() {
+    integer count = llGetListLength(PendingAskCommands);
+    integer i = 0;
+    while (i < count) {
+        string command = llList2String(PendingAskCommands, i);
+        add_relay(PendingAskKey, PendingAskName, PendingAskChan);
+        store_restriction(PendingAskKey, command);
+        llOwnerSay(command);
+        i += 1;
+    }
     if (llListFindList(SessionTrustedKeys, [(string)PendingAskKey]) == -1) {
         SessionTrustedKeys += [(string)PendingAskKey];
     }
-    llRegionSayTo(WearerKey, 0, "[RELAY] Allowed: " + PendingAskName);
+    llRegionSayTo(WearerKey, 0, "Allowed: " + PendingAskName);
     clear_pending_ask();
 }
 
-// Wearer declined or dialog timed out: revert the provisional restrictions
-// from this object and release it.
+// Wearer declined or dialog timed out: send !release,ok to the source so
+// it tears down its session as if the wearer escaped. We don't ,ko the
+// queued commands — they were already acked ,ok on arrival (rev 17). The
+// viewer never saw them, so there's nothing to clear, and other plugins'
+// direct-RLV restrictions stay intact.
 decline_ask() {
     if (PendingAskKey != NULL_KEY) {
-        clear_restrictions(PendingAskKey);
-        remove_relay(PendingAskKey);
         llRegionSayTo(PendingAskKey, PendingAskChan,
             "RLV," + (string)llGetKey() + ",!release,ok");
     }
-    llRegionSayTo(WearerKey, 0, "[RELAY] Denied: " + PendingAskName);
+    llRegionSayTo(WearerKey, 0, "Denied: " + PendingAskName);
     clear_pending_ask();
 }
 
@@ -379,6 +440,7 @@ clear_pending_ask() {
     PendingAskKey = NULL_KEY;
     PendingAskName = "";
     PendingAskChan = 0;
+    PendingAskCommands = [];
     AskDialogChan = 0;
 }
 
@@ -407,7 +469,7 @@ apply_settings_sync() {
 /* -------------------- SETTINGS MODIFICATION -------------------- */
 
 persist_mode(integer new_mode) {
-    llLinksetDataWrite(KEY_RELAY_MODE, (string)new_mode);
+    // kmod_settings is the canonical writer. See rev 15 changelog.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", KEY_RELAY_MODE,
@@ -417,7 +479,7 @@ persist_mode(integer new_mode) {
 }
 
 persist_hardcore(integer new_hardcore) {
-    llLinksetDataWrite(KEY_RELAY_HARDCORE, (string)new_hardcore);
+    // kmod_settings is the canonical writer. See rev 15 changelog.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", KEY_RELAY_HARDCORE,
@@ -579,14 +641,14 @@ handle_button_click(string button) {
     else if (button == "Safeword") {
         if (btn_allowed("Safeword") && !Hardcore) {
             safeword_clear_all();
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Safeword used - all restrictions cleared");
+            llRegionSayTo(CurrentUser, 0, "Safeword used - all restrictions cleared");
             show_main_menu();
         }
     }
     else if (button == "Unbind") {
         if (btn_allowed("Unbind")) {
             safeword_clear_all();
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Unbound - all restrictions cleared");
+            llRegionSayTo(CurrentUser, 0, "Unbound - all restrictions cleared");
             show_main_menu();
         }
     }
@@ -598,7 +660,7 @@ handle_button_click(string button) {
         persist_mode(MODE_OFF);
         persist_hardcore(FALSE);
         update_relay_listen_state();
-        llRegionSayTo(CurrentUser, 0, "[RELAY] Mode set to OFF");
+        llRegionSayTo(CurrentUser, 0, "Mode set to OFF");
         show_mode_menu();
     }
     else if (button == "ASK") {
@@ -608,7 +670,7 @@ handle_button_click(string button) {
         persist_mode(MODE_ASK);
         persist_hardcore(FALSE);
         update_relay_listen_state();
-        llRegionSayTo(CurrentUser, 0, "[RELAY] Mode set to ASK");
+        llRegionSayTo(CurrentUser, 0, "Mode set to ASK");
         show_mode_menu();
     }
     else if (button == "ON") {
@@ -617,7 +679,7 @@ handle_button_click(string button) {
         persist_mode(MODE_ON);
         update_relay_listen_state();
         if (!Hardcore) {
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Mode set to ON");
+            llRegionSayTo(CurrentUser, 0, "Mode set to ON");
         }
         show_mode_menu();
     }
@@ -627,7 +689,7 @@ handle_button_click(string button) {
             Mode = MODE_ON;
             persist_hardcore(TRUE);
             persist_mode(MODE_ON);
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Hardcore mode ENABLED");
+            llRegionSayTo(CurrentUser, 0, "Hardcore mode ENABLED");
             show_mode_menu();
         }
     }
@@ -637,7 +699,7 @@ handle_button_click(string button) {
             Mode = MODE_ON;
             persist_hardcore(FALSE);
             persist_mode(MODE_ON);
-            llRegionSayTo(CurrentUser, 0, "[RELAY] Hardcore mode DISABLED");
+            llRegionSayTo(CurrentUser, 0, "Hardcore mode DISABLED");
             show_mode_menu();
         }
     }
@@ -763,7 +825,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
             persist_mode(MODE_ON);
         }
         update_relay_listen_state();
-        llRegionSayTo(user, 0, "[RELAY] Mode set to " + llToUpper(subpath) + ".");
+        llRegionSayTo(user, 0, "Mode set to " + llToUpper(subpath) + ".");
         gPolicyButtons = [];
         return;
     }
@@ -777,7 +839,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         safeword_clear_all();
-        llRegionSayTo(user, 0, "[RELAY] Safeword used - all restrictions cleared.");
+        llRegionSayTo(user, 0, "Safeword used - all restrictions cleared.");
         gPolicyButtons = [];
         return;
     }
@@ -818,42 +880,58 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
         session_chan = (integer)llList2String(parsed, 1);
     }
 
-    // Parse ORG standard format: "<ident>,<target_uuid>,<commands>"
+    // Parse ORG standard format: "<ident>,<target_uuid>,<command>".
+    // Strict — exactly three fields, with a real 36-char UUID in field 2.
+    // Anything else is silently dropped; we have no business processing
+    // chat that wasn't addressed to us in the protocol's own terms.
     list parts = llParseString2List(raw_cmd, [","], []);
-    string command = raw_cmd;
+    if (llGetListLength(parts) != 3) return;
+    string potential_uuid = llList2String(parts, 1);
+    if (llStringLength(potential_uuid) != 36) return;
+    if (llGetSubString(potential_uuid,  8,  8) != "-") return;
+    if (llGetSubString(potential_uuid, 13, 13) != "-") return;
+    if (llGetSubString(potential_uuid, 18, 18) != "-") return;
+    if (llGetSubString(potential_uuid, 23, 23) != "-") return;
+    key target_uuid = (key)potential_uuid;
+    string command = llList2String(parts, 2);
 
-    // Validate ORG format: check if parts[1] looks like a UUID
-    // UUIDs are 36 chars (8-4-4-4-12) with hyphens at positions 8,13,18,23
-    if (llGetListLength(parts) >= 3) {
-        string potential_uuid = llList2String(parts, 1);
-        integer uuid_len = llStringLength(potential_uuid);
-
-        // Check if this looks like a UUID (36 chars with hyphens in right places)
-        if (uuid_len == 36 &&
-            llGetSubString(potential_uuid, 8, 8) == "-" &&
-            llGetSubString(potential_uuid, 13, 13) == "-" &&
-            llGetSubString(potential_uuid, 18, 18) == "-" &&
-            llGetSubString(potential_uuid, 23, 23) == "-") {
-
-            // This is ORG format, validate target UUID
-            key target_uuid = (key)potential_uuid;
-
-            // Check if command is meant for this wearer (or wildcard)
-            if (target_uuid != WearerKey && target_uuid != WILDCARD_UUID) {
-                // Command not meant for this wearer, ignore it
-                return;
-            }
-
-            // Extract commands (field 2 onwards)
-            command = llList2String(parts, 2);
-        }
-        // else: not ORG format, treat entire raw_cmd as command
+    // Wildcard target is reserved for capability probes per ORG spec.
+    // Some furniture vendors broadcast actual restrictions to wildcard so
+    // a single rezzed object catches whoever happens to be in range; we
+    // refuse that. Wearer-targeted commands proceed; non-wearer non-probe
+    // wildcard commands are dropped.
+    if (target_uuid == WILDCARD_UUID) {
+        if (command != "@version"
+            && command != "@versionnew"
+            && command != "!version"
+            && command != "!implversion"
+            && command != "!x-orgversions") return;
+    }
+    else if (target_uuid != WearerKey) {
+        return;
     }
 
-    // Handle version queries
+    // Handle ORG capability probes — auto-reply without going through ASK.
+    // These are queries, not binds; sources poll them to detect that a
+    // relay is present and learn what protocol level it speaks.
     if (command == "@version" || command == "@versionnew") {
         add_relay(sender_id, sender_name, session_chan);
         string reply = "RLV," + (string)llGetKey() + "," + command + ",ok";
+        llRegionSayTo(sender_id, session_chan, reply);
+        return;
+    }
+    if (command == "!version") {
+        string reply = "RLV," + (string)llGetKey() + ",!version," + PROTOCOL_VERSION;
+        llRegionSayTo(sender_id, session_chan, reply);
+        return;
+    }
+    if (command == "!implversion") {
+        string reply = "RLV," + (string)llGetKey() + ",!implversion," + IMPL_VERSION;
+        llRegionSayTo(sender_id, session_chan, reply);
+        return;
+    }
+    if (command == "!x-orgversions") {
+        string reply = "RLV," + (string)llGetKey() + ",!x-orgversions," + ORG_VERSIONS;
         llRegionSayTo(sender_id, session_chan, reply);
         return;
     }
@@ -876,33 +954,50 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
             return;
         }
 
-        // ASK mode: provisional accept. Apply and ack on arrival so the
-        // object's state machine doesn't time out while the wearer reads
-        // the prompt. Wearer's Deny (or timeout) reverts via @clear +
-        // !release. Removal commands (=y, @clear) bypass the prompt.
-        // Objects already trusted this session skip the prompt entirely.
+        // ASK mode: ack on arrival but defer apply until consent. Source
+        // sees ,ok immediately (its state machine doesn't time out), but
+        // the viewer doesn't see the restriction until the wearer Allows.
+        // On Deny we send !release,ok to the source — no ,ko for the
+        // already-acked commands. Removal commands (=y, @clear) and
+        // already-trusted sources skip the queue and apply directly.
         if (Mode == MODE_ASK && !is_removal_command(command)) {
             integer already_trusted = (llListFindList(SessionTrustedKeys, [(string)sender_id]) != -1);
             if (!already_trusted) {
                 if (PendingAskKey == NULL_KEY) {
-                    // No active prompt — open one for this object
+                    // No active prompt — open one for this object, queue
+                    // the command, and ack it on the source's channel.
                     PendingAskKey = sender_id;
                     PendingAskName = sender_name;
                     PendingAskChan = session_chan;
-                    show_ask_dialog();
-                }
-                else if (PendingAskKey != sender_id) {
-                    // Different object arrived while a prompt is open — reject
+                    PendingAskCommands = [command];
                     llRegionSayTo(sender_id, session_chan,
-                        "RLV," + (string)llGetKey() + "," + command + ",ko");
+                        "RLV," + (string)llGetKey() + "," + command + ",ok");
+                    show_ask_dialog();
                     return;
                 }
-                // Fall through to apply (provisional accept)
+                if (PendingAskKey == sender_id) {
+                    // Same source, more commands while waiting — append to
+                    // queue and ack. Past the cap, ,ko (the only path that
+                    // legitimately ko's an in-ASK command).
+                    if (llGetListLength(PendingAskCommands) >= MAX_PENDING) {
+                        llRegionSayTo(sender_id, session_chan,
+                            "RLV," + (string)llGetKey() + "," + command + ",ko");
+                        return;
+                    }
+                    PendingAskCommands += [command];
+                    llRegionSayTo(sender_id, session_chan,
+                        "RLV," + (string)llGetKey() + "," + command + ",ok");
+                    return;
+                }
+                // Different object arrived while a prompt is open — reject
+                llRegionSayTo(sender_id, session_chan,
+                    "RLV," + (string)llGetKey() + "," + command + ",ko");
+                return;
             }
         }
 
-        // Apply command. Reached in MODE_ON, or MODE_ASK either provisionally
-        // (untrusted object, prompt just opened) or directly (trusted / removal).
+        // Apply command. Reached in MODE_ON, or in MODE_ASK for a session-
+        // trusted source or a removal command (=y / @clear).
         add_relay(sender_id, sender_name, session_chan);
         store_restriction(sender_id, command);
         llOwnerSay(command);  // Forward to viewer
@@ -952,7 +1047,7 @@ default
     timer() {
         // ASK dialog timed out — treat as denial
         if (PendingAskKey != NULL_KEY) {
-            llRegionSayTo(WearerKey, 0, "[RELAY] Request timed out: " + PendingAskName);
+            llRegionSayTo(WearerKey, 0, "Request timed out: " + PendingAskName);
             decline_ask();
         }
     }

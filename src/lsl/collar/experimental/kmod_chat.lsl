@@ -1,13 +1,19 @@
 /*--------------------
 MODULE: kmod_chat.lsl
 VERSION: 1.10
-REVISION: 17
+REVISION: 18
 PURPOSE: Local chat command receiver. Listens on channel 1 (always) and
          optionally channel 0 (public chat) for prefixed commands from
          authorised speakers. Sends ui.chat.command to UI_BUS so kmod_ui
          can route the request; plugins never receive the raw dispatch.
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 18: speaker_authorised now validates the per-avatar ACL cache
+  against the global acl.timestamp epoch and treats entries older than
+  the last settings change as stale. Defends against the touch-vs-chat
+  asymmetry observed when public.mode toggled but the cache wipe didn't
+  propagate (root cause was the dual-write bug fixed elsewhere; this is
+  belt-and-suspenders for any future regression of the wipe chain).
 - v1.1 rev 17: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
@@ -258,9 +264,12 @@ dispatch_command(key speaker, string head, string tail) {
 }
 
 // Validate that a speaker is authorised to send chat commands.
-// Wearer is always allowed. Every non-wearer must have cached ACL >= 1
-// (public or higher), regardless of channel — protects the private channel
-// from griefers who guess the channel number, as well as public chat.
+// Wearer is always allowed. Every non-wearer must have a CACHE-FRESH cached
+// ACL >= 1 (public or higher), regardless of channel — protects the private
+// channel from griefers who guess the channel number, as well as public
+// chat. A cache entry is fresh when its timestamp >= the global
+// acl.timestamp epoch written by kmod_auth on every settings change. Stale
+// entries (e.g. left over if the wipe chain ever regresses) are rejected.
 integer speaker_authorised(key speaker) {
     key wearer = llGetOwner();
     if (speaker == wearer) return TRUE;
@@ -269,6 +278,9 @@ integer speaker_authorised(key speaker) {
     if (raw == "") return FALSE;
     integer sep = llSubStringIndex(raw, "|");
     if (sep == -1) return FALSE;
+    integer cache_ts = (integer)llGetSubString(raw, sep + 1, -1);
+    integer global_ts = (integer)llLinksetDataRead("acl.timestamp");
+    if (cache_ts < global_ts) return FALSE;  // pre-dates last ACL change
     integer level = (integer)llGetSubString(raw, 0, sep - 1);
     return (level >= 1);
 }

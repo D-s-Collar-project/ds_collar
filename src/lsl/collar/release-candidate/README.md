@@ -1,4 +1,4 @@
-# D/s Collar Modular
+# D/s Collar
 
 A modern, modular D/s (Dominant/submissive) collar system for Second Life.
 

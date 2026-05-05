@@ -1,11 +1,18 @@
 /*--------------------
 PLUGIN: plugin_public.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Toggle public access mode directly from main menu
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 13: persist_public_mode no longer pre-writes public.mode to LSD
+  before sending settings.set. The pre-write made kmod_settings.handle_set's
+  idempotency guard short-circuit (LSD already matches the requested value),
+  so broadcast_settings_changed never fired, kmod_auth never re-synced its
+  PublicMode global, the per-avatar ACL cache never cleared, and toggling
+  Public on/off had no observable effect on stranger access. kmod_settings
+  is now the canonical writer for public.mode.
 - v1.1 rev 12: Toggle state now written to plugin.state.<ctx> in LSD
   (via idempotent write_plugin_state helper) instead of pushed via
   ui.state.update link_message. kmod_ui rev 17 reads plugin.state.<ctx>
@@ -207,8 +214,9 @@ apply_settings_sync() {
 persist_public_mode(integer new_value) {
     if (new_value != 0) new_value = 1;
 
-    llLinksetDataWrite(KEY_PUBLIC_MODE, (string)new_value);
-
+    // kmod_settings is the canonical writer. Pre-writing here would make
+    // kmod_settings.handle_set's idempotency guard short-circuit before
+    // broadcast_settings_changed fires, leaving kmod_auth out of sync.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", KEY_PUBLIC_MODE,

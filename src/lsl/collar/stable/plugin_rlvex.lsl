@@ -1,10 +1,13 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 11
 PURPOSE: Manage RLV teleport and IM exceptions for owners and trustees
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 11: persist_setting stops pre-writing LSD before sending
+  settings.set. Aligns with project rule that kmod_settings is the
+  canonical writer for shared LSD keys.
 - v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -315,7 +318,7 @@ apply_settings_sync() {
 }
 
 persist_setting(string setting_key, integer value) {
-    llLinksetDataWrite(setting_key, (string)value);
+    // kmod_settings is the canonical writer. See rev 11 changelog.
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", setting_key,

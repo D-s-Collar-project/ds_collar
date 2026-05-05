@@ -1,10 +1,16 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.10
-REVISION: 17
+REVISION: 18
 PURPOSE: Session management, LSD policy filtering, and plugin list orchestration
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 18: try_cached_session and handle_start's chat-cache-hit path
+  now validate the per-avatar acl.<uuid>.cache entry against the global
+  acl.timestamp epoch and treat entries older than the last settings
+  change as stale (cache miss). Falls through to a fresh AUTH_BUS query
+  if so. Defends against any future regression of the
+  clear_acl_query_cache wipe chain on settings.sync.
 - v1.1 rev 17: Sort plugin list by label, not by context key. Previous rev
   sorted plugin.reg.<ctx> keys lexicographically, which put plugin_access
   (context "ui.core.owner", label "Access") between Maintenance and Public
@@ -222,6 +228,11 @@ integer try_cached_session(key user_key, string context_filter) {
     if (raw == "") return FALSE;
     integer sep = llSubStringIndex(raw, "|");
     if (sep == -1) return FALSE;
+    // Reject entries older than the last settings change (stale cache,
+    // e.g. if the wipe chain regresses). Fall through to AUTH_BUS query.
+    integer cache_ts = (integer)llGetSubString(raw, sep + 1, -1);
+    integer global_ts = (integer)llLinksetDataRead("acl.timestamp");
+    if (cache_ts < global_ts) return FALSE;
     integer level = (integer)llGetSubString(raw, 0, sep - 1);
     integer is_blacklisted = (level == ACL_BLACKLIST);
     create_session(user_key, level, is_blacklisted, context_filter);
@@ -801,15 +812,21 @@ handle_start(string msg, key user_key) {
     }
 
     // LSD cache hit — create root session for navigation then dispatch.
+    // Stale entries (timestamp older than the global epoch) are skipped
+    // here too so chat dispatch matches touch on freshness semantics.
     string raw = llLinksetDataRead(LSD_ACL_CACHE_PREFIX + (string)user_key + LSD_ACL_CACHE_SUFFIX);
     if (raw != "") {
         integer sep = llSubStringIndex(raw, "|");
         if (sep != -1) {
-            integer level = (integer)llGetSubString(raw, 0, sep - 1);
-            create_session(user_key, level, (level == ACL_BLACKLIST), ROOT_CONTEXT);
-            session_idx = find_session_idx(user_key);
-            if (session_idx != -1) dispatch_to_plugin(user_key, matched, subpath, session_idx);
-            return;
+            integer cache_ts = (integer)llGetSubString(raw, sep + 1, -1);
+            integer global_ts = (integer)llLinksetDataRead("acl.timestamp");
+            if (cache_ts >= global_ts) {
+                integer level = (integer)llGetSubString(raw, 0, sep - 1);
+                create_session(user_key, level, (level == ACL_BLACKLIST), ROOT_CONTEXT);
+                session_idx = find_session_idx(user_key);
+                if (session_idx != -1) dispatch_to_plugin(user_key, matched, subpath, session_idx);
+                return;
+            }
         }
     }
 

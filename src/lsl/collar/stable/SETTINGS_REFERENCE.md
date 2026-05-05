@@ -1,6 +1,6 @@
-# DS Collar Settings Card Reference Guide
+# D/s Collar Settings Card Reference Guide
 
-**Version 1.1** — Comprehensive reference for the DS Collar Modular settings system
+**Version 1.1** — Comprehensive reference for the D/s Collar settings system
 
 ---
 
@@ -16,7 +16,7 @@
 
 ## Overview
 
-The DS Collar Modular system uses a persistent **settings store** for
+The D/s Collar system uses a persistent **settings store** for
 configuration management. As of v1.1 rev 3, the store is a **flat key-value
 scheme backed by Linkset Data (LSD)** — there is no JSON object payload
 layer. Each setting is either a scalar value or a parallel CSV. The store:
@@ -85,7 +85,7 @@ all settings:
 ### Example Settings Notecard
 
 ```
-# DS Collar Settings
+# D/s Collar Settings
 # Lines starting with # are comments
 
 # Owner Settings (Single Owner Mode)
@@ -421,7 +421,7 @@ format, or the consuming plugin not reading it.
 
 ```
 # ============================================================================
-# DS Collar Settings Notecard
+# D/s Collar Settings Notecard
 # Complete template with all available keys
 # ============================================================================
 

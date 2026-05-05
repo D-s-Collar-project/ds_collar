@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_sos.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 11
 PURPOSE: Emergency wearer-accessible actions (OOC safety hatch)
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 11: Drop "[SOS]" source prefix from the four user-facing
+  notices. Brings this plugin into line with the project convention.
 - v1.1 rev 10: Gate Runaway at ACL 2 by access.enablerunaway. An owned
   wearer whose owner has left in-scene Runaway enabled already has the
   Access → Runaway path; SOS Runaway in that case is a redundant
@@ -270,7 +272,7 @@ action_unleash() {
         "type", "sos.leash.release"
     ]), CurrentUser);
 
-    llRegionSayTo(CurrentUser, 0, "[SOS] Leash released.");
+    llRegionSayTo(CurrentUser, 0, "Leash released.");
 }
 
 action_clear_rlv() {
@@ -282,7 +284,7 @@ action_clear_rlv() {
     // Also send @clear directly to viewer as fallback
     llOwnerSay("@clear");
 
-    llRegionSayTo(CurrentUser, 0, "[SOS] All RLV restrictions cleared.");
+    llRegionSayTo(CurrentUser, 0, "All RLV restrictions cleared.");
 }
 
 action_clear_relay() {
@@ -291,7 +293,7 @@ action_clear_relay() {
         "type", "sos.relay.clear"
     ]), CurrentUser);
 
-    llRegionSayTo(CurrentUser, 0, "[SOS] All relay restrictions cleared.");
+    llRegionSayTo(CurrentUser, 0, "All relay restrictions cleared.");
 }
 
 // SOS Runaway: nuclear, irreversible, unconditional. settings.runaway hits
@@ -300,7 +302,7 @@ action_clear_relay() {
 // access.enablerunaway gate by design — this is the OOC safety hatch and
 // must work even when an owner has trapped the wearer with runaway disabled.
 action_runaway() {
-    llRegionSayTo(CurrentUser, 0, "[SOS] Runaway initiated. Wiping collar...");
+    llRegionSayTo(CurrentUser, 0, "Runaway initiated. Wiping collar...");
 
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type", "settings.runaway"

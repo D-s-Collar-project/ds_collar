@@ -1,10 +1,19 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 18
+REVISION: 20
 PURPOSE: Provide ORG-compliant RLV relay with hardcore mode and safeword hooks
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 20: Correct product name in IMPL_VERSION reply — "D/s Collar
+  Relay v1.10" (was "DS Collar Modular Relay v1.10").
+- v1.1 rev 19: Add ORG capability-probe handlers (!version, !implversion,
+  !x-orgversions). Modern furniture uses these to detect the relay;
+  without them they conclude no relay exists and never attempt to bind,
+  which made the wearer's relay feel non-existent until ASK was already
+  consented. All three auto-reply without going through ASK (they're
+  queries, not binds). Wildcard target whitelist expanded to include
+  them, matching Satomi's Damn Fast Relay and Multi-Relay behaviour.
 - v1.1 rev 18: Drop "[RELAY]" source prefix from the remaining 13 sites
   (12 user notices + 1 ASK-dialog body). The rev 8 cleanup only caught
   3 of them; the rest were missed. Brings this plugin into line with
@@ -103,6 +112,13 @@ integer DIALOG_BUS = 950;
 /* -------------------- PLUGIN IDENTITY -------------------- */
 string PLUGIN_CONTEXT = "ui.core.relay";
 string PLUGIN_LABEL = "RLV Relay";
+
+/* -------------------- ORG CAPABILITY-PROBE REPLIES -------------------- */
+// Sources use these probes to detect that a relay is present. Without
+// the replies, sources conclude "no relay" and never attempt to bind.
+string PROTOCOL_VERSION = "1100";                              // RLV API version
+string IMPL_VERSION     = "ORG=0003/D/s Collar Relay v1.10";
+string ORG_VERSIONS     = "ORG=0003";                          // ORG protocol version
 
 /* ACL levels for reference:
    -1 = Blacklisted
@@ -885,16 +901,37 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
     // refuse that. Wearer-targeted commands proceed; non-wearer non-probe
     // wildcard commands are dropped.
     if (target_uuid == WILDCARD_UUID) {
-        if (command != "@version" && command != "@versionnew") return;
+        if (command != "@version"
+            && command != "@versionnew"
+            && command != "!version"
+            && command != "!implversion"
+            && command != "!x-orgversions") return;
     }
     else if (target_uuid != WearerKey) {
         return;
     }
 
-    // Handle version queries
+    // Handle ORG capability probes — auto-reply without going through ASK.
+    // These are queries, not binds; sources poll them to detect that a
+    // relay is present and learn what protocol level it speaks.
     if (command == "@version" || command == "@versionnew") {
         add_relay(sender_id, sender_name, session_chan);
         string reply = "RLV," + (string)llGetKey() + "," + command + ",ok";
+        llRegionSayTo(sender_id, session_chan, reply);
+        return;
+    }
+    if (command == "!version") {
+        string reply = "RLV," + (string)llGetKey() + ",!version," + PROTOCOL_VERSION;
+        llRegionSayTo(sender_id, session_chan, reply);
+        return;
+    }
+    if (command == "!implversion") {
+        string reply = "RLV," + (string)llGetKey() + ",!implversion," + IMPL_VERSION;
+        llRegionSayTo(sender_id, session_chan, reply);
+        return;
+    }
+    if (command == "!x-orgversions") {
+        string reply = "RLV," + (string)llGetKey() + ",!x-orgversions," + ORG_VERSIONS;
         llRegionSayTo(sender_id, session_chan, reply);
         return;
     }
