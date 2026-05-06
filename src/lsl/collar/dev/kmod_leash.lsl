@@ -1,10 +1,19 @@
 /*--------------------
 MODULE: kmod_leash.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 20
 PURPOSE: Leashing engine providing leash services to plugins
 ARCHITECTURE: Shared infra + per-mode sections (avatar / coffle / post)
 CHANGES:
+- v1.1 rev 20: Permission request now combined as
+  PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA. CONTROL_CAMERA
+  is preemptive (no current consumer; held for future leash-camera work).
+  run_time_permissions now actually calls llTakeControls — without it,
+  every script in the collar prim halts on no-script parcels because
+  the takecontrols-sticky exemption never fires. We hold a single
+  unobtrusive control (CONTROL_ML_LBUTTON, accept=FALSE pass_on=TRUE)
+  so the wearer's input is unaffected; the exemption applies to every
+  script in the same prim.
 - v1.1 rev 19: Body reorganized into shared infrastructure followed by
   three per-mode sections (avatar / coffle / post) and a settings
   section. Behavior unchanged. setLengthInternal now reuses
@@ -805,7 +814,7 @@ startFollow() {
     }
     // Post mode: no RLV follow (we enforce distance manually)
 
-    llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS);
+    llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA);
 }
 
 stopFollow() {
@@ -1160,7 +1169,7 @@ default
 
         applySettingsSync();
         llSetTimerEvent(FOLLOW_TICK);
-        llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS);
+        llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA);
     }
 
     on_rez(integer start_param) {
@@ -1174,6 +1183,12 @@ default
     run_time_permissions(integer perm) {
         if (perm & PERMISSION_TAKE_CONTROLS) {
             ControlsOk = TRUE;
+            // Hold a single unobtrusive control so this prim's scripts
+            // (the entire collar) keep running on no-script parcels.
+            // accept=FALSE pass_on=TRUE means the wearer's input is
+            // unaffected; we just register interest so the takecontrols-
+            // sticky exemption fires for every script in this prim.
+            llTakeControls(CONTROL_ML_LBUTTON, FALSE, TRUE);
         }
     }
 
