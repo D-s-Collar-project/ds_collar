@@ -1,6 +1,6 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
-VERSION: 1.1
+VERSION: 1.10
 REVISION: 21
 PURPOSE: ORG-compliant RLV relay for the D/s Collar plugin system
 ARCHITECTURE: RLV relay based on Satomi Ahn's multirelay implementation, with D/s Collar patches.
