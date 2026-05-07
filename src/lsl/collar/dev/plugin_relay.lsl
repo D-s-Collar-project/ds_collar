@@ -112,7 +112,7 @@ string PLUGIN_LABEL = "RLV Relay";
 
 /* -------------------- ORG CAPABILITY-PROBE REPLIES -------------------- */
 string PROTOCOL_VERSION = "1100";
-string IMPL_VERSION     = "ORG=0003/D/s Collar Relay v1.1 (port of Satomi Ahn's Multi-Relay)";
+string IMPL_VERSION     = "ORG=0003/D/s Collar Relay v1.1";
 string ORG_VERSIONS     = "ORG=0003";
 
 /* ACL levels for reference:
