@@ -1,105 +1,102 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
-VERSION: 1.10
-REVISION: 20
-PURPOSE: Provide ORG-compliant RLV relay with hardcore mode and safeword hooks
-ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+VERSION: 1.1
+REVISION: 21
+PURPOSE: ORG-compliant RLV relay for the D/s Collar plugin system
+ARCHITECTURE: Satomi Ahn's multirelay implementation, with D/s Collar patches.
+              Single-script consolidation of Satomi's gatekeeper +
+              bookkeeper + pigeonkeeper, adapted for the collar's
+              plugin model, ACL gates, LSD-backed settings, and SOS
+              hooks. Email, HTTP, !x-handover, !x-channel agent listen,
+              !x-delay, !x-email, !who user-tier auth, and persistent
+              trust lists are intentionally not ported.
 CHANGES:
-- v1.1 rev 20: Correct product name in IMPL_VERSION reply — "D/s Collar
-  Relay v1.10" (was "DS Collar Modular Relay v1.10").
-- v1.1 rev 19: Add ORG capability-probe handlers (!version, !implversion,
-  !x-orgversions). Modern furniture uses these to detect the relay;
-  without them they conclude no relay exists and never attempt to bind,
-  which made the wearer's relay feel non-existent until ASK was already
-  consented. All three auto-reply without going through ASK (they're
-  queries, not binds). Wildcard target whitelist expanded to include
-  them, matching Satomi's Damn Fast Relay and Multi-Relay behaviour.
-- v1.1 rev 18: Drop "[RELAY]" source prefix from the remaining 13 sites
-  (12 user notices + 1 ASK-dialog body). The rev 8 cleanup only caught
-  3 of them; the rest were missed. Brings this plugin into line with
-  the project convention applied to plugin_folders / plugin_sos.
-- v1.1 rev 17: ASK mode now acks on arrival but still defers apply until
-  consent. Source's state machine doesn't time out (it sees ,ok
-  immediately), but the viewer doesn't see the restriction until the
-  wearer clicks Allow. On Deny we don't ,ko the already-acked commands;
-  we send !release,ok so the source tears down its session as if the
-  wearer escaped. Fixes the rev 16 regression where Allow could arrive
-  after the source had given up, requiring re-capture.
-- v1.1 rev 16: ASK mode no longer provisionally applies. Untrusted sources
-  now have their commands queued (capped at MAX_PENDING) until the wearer
-  responds; Allow flushes the queue (apply + ack each), Deny / timeout
-  ko's each queued command and sends !release with no @clear. Replaces
-  the rev 9 provisional-accept behaviour, which applied before consent
-  and used @clear on Deny — both surprising the wearer and stomping on
-  direct-RLV plugins' restrictions.
-- v1.1 rev 15: persist_mode and persist_hardcore stop pre-writing LSD
-  before sending settings.set. The pre-write tripped kmod_settings's
-  idempotency guard, swallowing broadcast_settings_changed. Aligns this
-  plugin with the project rule: kmod_settings is the canonical writer
-  for shared LSD keys.
-- v1.1 rev 14: Tighten parser. Require strict ORG format (exactly three
-  comma-separated fields with a 36-char UUID in field 2); messages that
-  don't match are dropped instead of being treated as raw commands.
-  Wildcard target (ffffffff-...) is now honoured only for @version /
-  @versionnew capability probes — for any other command the target must
-  match this wearer specifically. Closes a real exposure where a
-  third-party piece of furniture broadcast a restriction to wildcard
-  and our relay applied (or ASK-prompted) it on every wearer in range.
-- v1.1 rev 13: write_plugin_reg guards idempotent writes (read-before-
-  write). Same-value re-registrations on state_entry and
-  kernel.register.refresh no longer fire linkset_data, so kmod_ui's
-  debounced rebuild + session invalidation stops triggering on
-  register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 12: apply_settings_sync now mirrors the Mode-change side effects
-  from the menu handlers — calls clear_pending_ask() on any Mode change and
-  empties SessionTrustedKeys when Mode transitions to OFF. Previously a
-  notecard reload flipping Mode ASK→OFF left a live ASK dialog and stale
-  session-trusted senders in place; the wearer could click Allow on the
-  dialog and restore restrictions the reload was meant to block.
-- v1.1 rev 11: Add dormancy guard in state_entry — script parks itself
-  if the prim's object description is "COLLAR_UPDATER" so it stays dormant
-  when staged in an updater installer prim.
-- v1.1 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
-  Label updates write the same LSD key directly; ui.label.update link_messages
-  are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
-  before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 9: ASK mode now accepts provisionally — commands apply and
-  ack on arrival, the wearer dialog offers Allow (keep) or Deny
-  (revert via @clear + !release). Fixes capture-furniture having to
-  be re-used after authorization because its state machine timed out
-  while the wearer was reading the prompt.
-- v1.1 rev 8: Consistency pass — 3 user-facing notices (relay off,
-  reattach, SOS safeword) converted from llOwnerSay to
-  llRegionSayTo(llGetOwner(), 0, ...); "[RELAY]" and "[SOS]" source
-  prefixes dropped per project convention. RLV command forwarding and
-  @clear still use llOwnerSay (required by RLV delivery protocol).
-- v1.1 rev 7: Chat command support (Phase 3). Registers "relay" and
-  "safeword" aliases. "relay [on|off|ask]" sets mode (gated by
-  btn_allowed("Mode")); "safeword" performs emergency clear, bypasses
-  Hardcore, gated by btn_allowed("Safeword") OR btn_allowed("Unbind").
-- v1.1 rev 6: Wire sos.relay.clear handler on UI_BUS — triggers
-  safeword_clear_all() (bypasses Hardcore, matching the emergency intent).
-  Removed the orphan SOS_MSG_NUM=555 lane and its "sos.release" handler;
-  both were unreachable (no producer) since an earlier design that never
-  connected.
-- v1.1 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
-  kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
-  kernel.resetall→kernel.reset.factory.
-- v1.1 rev 4: Fix handle_ground_rez called on detach showing "rezzed on
-  ground" message. Now takes a reason string; detach passes "Collar detached"
-  and ground-rez passes "Collar rezzed on ground".
-- v1.1 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
-  field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 2: Namespace internal message type strings (kernel.*, ui.*, settings.*, sos.*).
-- v1.1 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
-  Remove apply_settings_delta(); fold side effects into apply_settings_sync()
-  via previous-state comparison. Both settings_sync and settings_delta call
-  parameterless apply_settings_sync(). Remove settings_get request; call
-  apply_settings_sync() directly from state_entry.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
-  Replaces hardcoded ACL checks with policy reads via get_policy_buttons()
-  and btn_allowed(). Removed PLUGIN_MIN_ACL and min_acl from kernel
-  registration message.
+- v1.1 rev 21: Full rewrite as port of Satomi Ahn's multirelay.
+  Replaces the prior custom multi-source implementation, which had
+  two real bugs:
+  (1) Channel commands (@version, @get*, @findfolder) fell through to
+      the auth path and triggered a fresh ASK dialog on every
+      furniture probe — wearer was prompted continuously even after
+      consenting.
+  (2) accept_ask added the source to Sources[] only, not to a session
+      trust list. The moment a source cleared its restrictions
+      (entering and re-entering the relay's view) the wearer was
+      re-prompted.
+  Rather than patch the prior implementation, this is a port of
+  Satomi's multirelay, which solves both correctly:
+  - ischannelcommand auto-allows queries that respond on a positive
+    chat channel.
+  - The 6-button ASK dialog's Yes adds the source to TempObjWhite
+    so re-entering after self-clear is silent.
+  Other ported MR semantics:
+  - Multi-source: Sources / SourceNames / SourceChans /
+    SourceRestrictions parallel lists; Baked refcount tracks the set
+    of behaviours actually applied to the viewer; per-source @clear
+    and !release release that source's contribution only.
+  - Distance-based liveness: 10s timer calls llGetObjectDetails on
+    each source key and drops anything beyond 100m. No llSensor.
+  - Distance-tiered outbound chat: llWhisper/llSay/llShout/
+    llRegionSay chosen by measured distance.
+  - Multi-command per message: command field can be "|"-separated
+    sub-commands; each is processed in order with an END ack.
+  - Source ident echoed back in acks (MR-spec; prior code hardcoded "RLV").
+  - Queue with re-entrant cleanqueue: when wearer answers the auth
+    dialog, the queue is re-walked and any items now passing auth
+    are processed without a new prompt; items now failing auth are
+    ko'd. Cap at MAX_QUEUE = 8 (MR's MAXLOAD).
+  - 6-button auth dialog: Yes / No / Trust Object / Ban Object /
+    Trust Owner / Ban Owner. All four trust/ban variants populate
+    session-only TempObj{White,Black} / TempAv{White,Black}.
+  - 120s auth dialog timeout (MR's value; prior code used 30s).
+  D/s Collar patches on top of MR:
+  - Single-script consolidation; no inter-script link_message lanes
+    for the relay's own state.
+  - Hardcore mode (collar concept, not MR's "evil safeword"):
+    suppresses the Safeword button on the main menu when active.
+    Orthogonal to OFF/ASK/ON.
+  - ACL-gated menu visibility via acl.policycontext:<ctx> LSD policy.
+  - Plugin registration with the kernel for ping/pong health
+    tracking.
+  - Chat aliases ("relay [on|off|ask]" and "safeword").
+  - SOS hook: sos.relay.clear on UI_BUS triggers a full clear,
+    bypassing Hardcore (matches the emergency-exit intent).
+  - Dormancy guard: if object description is COLLAR_UPDATER, the
+    script parks itself.
+  - Ground-rez handler: turns relay OFF and clears state on detach.
+  - settings.set is the canonical write path (kmod_settings owns
+    the LSD); we never pre-write the keys.
+  Intentionally not ported:
+  - !who user-tier auth (no compelling case without persistent trust)
+  - "Restricted" mode (deny-by-default doesn't fit)
+  - Manual lock (plugin_lock owns @detach=n)
+  - Playful (one-shot bypass; complexity not justified)
+  - Persistent trust lists (drift / silent-grant risk)
+  - Sandkeeper (!x-delay scheduled commands)
+  - Pigeonkeeper email & HTTP transports
+  - Outfitkeeper, 3rdviewkeeper, statuskeeper, versionkeeper
+    (collar handles these via dedicated plugins)
+- v1.1 rev 20: Correct product name in IMPL_VERSION reply.
+- v1.1 rev 19: Add ORG capability-probe handlers (!version,
+  !implversion, !x-orgversions).
+- v1.1 rev 18: Drop "[RELAY]" source prefix from user-facing notices.
+- v1.1 rev 17: ASK early-ack-deferred-apply (later replaced in rev 21).
+- v1.1 rev 16: ASK queue + cap (later replaced in rev 21).
+- v1.1 rev 15: persist_mode / persist_hardcore stop pre-writing LSD.
+- v1.1 rev 14: Strict ORG parser; wildcard reserved for capability probes.
+- v1.1 rev 13: write_plugin_reg guards idempotent writes.
+- v1.1 rev 12: apply_settings_sync mirrors mode-change side effects.
+- v1.1 rev 11: Dormancy guard for COLLAR_UPDATER object description.
+- v1.1 rev 10: Self-declare menu presence via plugin.reg.<ctx> LSD key.
+- v1.1 rev 9: ASK provisional-accept (superseded by rev 17/21).
+- v1.1 rev 8: User notices via llRegionSayTo, drop "[RELAY]" / "[SOS]".
+- v1.1 rev 7: Chat command support — "relay [on|off|ask]", "safeword".
+- v1.1 rev 6: sos.relay.clear handler on UI_BUS.
+- v1.1 rev 5: Wire-type rename (kernel.* / ui.* / settings.* / sos.*).
+- v1.1 rev 4: handle_ground_rez takes a reason string.
+- v1.1 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts.
+- v1.1 rev 2: Namespace internal message type strings.
+- v1.1 rev 1: Migrate settings reads from JSON broadcast to direct LSD.
+- v1.1 rev 0: Self-declared button visibility policy via LSD.
 --------------------*/
 
 
@@ -114,36 +111,37 @@ string PLUGIN_CONTEXT = "ui.core.relay";
 string PLUGIN_LABEL = "RLV Relay";
 
 /* -------------------- ORG CAPABILITY-PROBE REPLIES -------------------- */
-// Sources use these probes to detect that a relay is present. Without
-// the replies, sources conclude "no relay" and never attempt to bind.
-string PROTOCOL_VERSION = "1100";                              // RLV API version
-string IMPL_VERSION     = "ORG=0003/D/s Collar Relay v1.10";
-string ORG_VERSIONS     = "ORG=0003";                          // ORG protocol version
+string PROTOCOL_VERSION = "1100";
+string IMPL_VERSION     = "ORG=0003/D/s Collar Relay v1.1 (port of Satomi Ahn's Multi-Relay)";
+string ORG_VERSIONS     = "ORG=0003";
 
 /* ACL levels for reference:
-   -1 = Blacklisted
-    0 = No Access
-    1 = Public
-    2 = Owned (wearer when owner set)
-    3 = Trustee
-    4 = Unowned (wearer when no owner)
-    5 = Primary Owner
+   -1 Blacklisted
+    0 No Access
+    1 Public
+    2 Owned (wearer when owner set)
+    3 Trustee
+    4 Unowned (wearer when no owner)
+    5 Primary Owner
 */
 
 /* -------------------- RELAY CONSTANTS -------------------- */
 integer RELAY_CHANNEL = -1812221819;
 integer RLV_RESP_CHANNEL = 4711;
-integer MAX_RELAYS = 5;
+
+integer MAX_SOURCES = 8;
+integer MAX_QUEUE = 8;            // anti-flood cap on auth queue (MR's MAXLOAD)
 
 integer MODE_OFF = 0;
 integer MODE_ON  = 1;
 integer MODE_ASK = 2;
 
-integer ASK_TIMEOUT_SEC = 30;  // Wearer has 30 seconds to respond to an ASK dialog
-integer MAX_PENDING = 8;       // Anti-flood cap on ASK queue per pending source
+integer ASK_TIMEOUT_SEC = 120;    // MR-faithful auth dialog timeout
+float   GC_INTERVAL = 10.0;       // distance-based liveness sweep cadence
+float   DISTANCE_MAX = 100.0;     // shout range; sources beyond are released
 
+string  END_MARKER = "$$";        // batch terminator (MR convention)
 
-// ORG relay spec wildcard UUID (accepts commands from any avatar)
 key WILDCARD_UUID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
 /* -------------------- SETTINGS KEYS -------------------- */
@@ -151,37 +149,56 @@ string KEY_RELAY_MODE = "relay.mode";
 string KEY_RELAY_HARDCORE = "relay.hardcoremode";
 
 /* -------------------- STATE -------------------- */
-// Relay state
+
+// Mode + flags
 integer Mode = MODE_ASK;
 integer Hardcore = FALSE;
 integer IsAttached = FALSE;
 integer RelayListenHandle = 0;
-key WearerKey = NULL_KEY;  // Cached owner UUID for performance
+key WearerKey = NULL_KEY;
 
-// Relays: [obj_key, obj_name, session_chan, restrictions_csv] * N
-list Relays = [];
+// Source tracking — parallel lists indexed by source position.
+// Sources[i]            = captor object UUID
+// SourceNames[i]        = display name at time of grab
+// SourceChans[i]        = session reply channel for that source
+// SourceRestrictions[i] = "/"-joined behaviour list for that source
+list Sources = [];
+list SourceNames = [];
+list SourceChans = [];
+list SourceRestrictions = [];
 
-// ASK mode: objects the wearer has accepted this session (not re-prompted)
-list SessionTrustedKeys = [];
+// Refcount set: behaviours currently applied to the viewer. A behaviour
+// stays in Baked iff at least one source (or LocalRestrictions) wants it.
+list Baked = [];
 
-// ASK mode: one pending prompt at a time. Untrusted-source commands are
-// queued in PendingAskCommands until the wearer responds — Allow flushes
-// and applies, Deny / timeout ko's each and !releases the source. The
-// queue is per-source (only PendingAskKey can append).
-key PendingAskKey = NULL_KEY;
-string PendingAskName = "";
-integer PendingAskChan = 0;
-list PendingAskCommands = [];
+// Relay-internal restrictions — phantom-source slot for relay-owned
+// restrictions. Reserved; no producers in this version.
+list LocalRestrictions = [];
+
+// Session-only trust lists. Populated by the auth dialog's six buttons;
+// cleared on safeword, mode-off, detach, and reset. Not persisted.
+list TempObjWhite = [];   // object UUIDs the wearer trusts this session
+list TempObjBlack = [];   // object UUIDs the wearer denies this session
+list TempAvWhite = [];    // owner UUIDs the wearer trusts this session
+list TempAvBlack = [];    // owner UUIDs the wearer denies this session
+
+// Auth queue. Stride 3:
+//   Queue[3i]   = ident string from source
+//   Queue[3i+1] = object UUID as string
+//   Queue[3i+2] = "|"-separated remaining commands (END appended)
+list Queue = [];
+integer QSTRIDE = 3;
+
+// Auth dialog state
 integer AskListenHandle = 0;
 integer AskDialogChan = 0;
+integer AskExpireAt = 0;          // unix ts; 0 = no pending dialog
 
-// Session management
+// Menu session state
 key CurrentUser = NULL_KEY;
 integer UserAcl = -999;
 list gPolicyButtons = [];
 string SessionId = "";
-
-// Menu state for object list pagination
 integer ObjectListPage = 0;
 
 /* -------------------- HELPERS -------------------- */
@@ -201,7 +218,6 @@ string truncate_name(string name, integer max_len) {
     return llGetSubString(name, 0, max_len - 4) + "...";
 }
 
-/* -------------------- LSD POLICY HELPER -------------------- */
 list get_policy_buttons(string ctx, integer acl) {
     string policy = llLinksetDataRead("acl.policycontext:" + ctx);
     if (policy == "") return [];
@@ -216,24 +232,17 @@ integer btn_allowed(string label) {
 
 /* -------------------- LIFECYCLE MANAGEMENT -------------------- */
 
-// Self-declared menu presence. kmod_ui enumerates via llLinksetDataFindKeys
-// and rebuilds its view tables on linkset_data events touching this key.
 write_plugin_reg(string label) {
     string k = "plugin.reg." + PLUGIN_CONTEXT;
     string v = llList2Json(JSON_OBJECT, [
         "label",  label,
         "script", llGetScriptName()
     ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
     if (llLinksetDataRead(k) == v) return;
     llLinksetDataWrite(k, v);
 }
 
 register_self() {
-    // Write button visibility policy to LSD (default-deny per ACL level)
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
         "2", "Mode,Bound by...,Safeword",
         "3", "Mode,Bound by...,Unbind,HC OFF,HC ON",
@@ -241,10 +250,8 @@ register_self() {
         "5", "Mode,Bound by...,Unbind,HC OFF,HC ON"
     ]));
 
-    // Self-declared menu presence for kmod_ui.
     write_plugin_reg(PLUGIN_LABEL);
 
-    // Register with kernel (for ping/pong health tracking and alias table).
     string msg = llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
@@ -253,7 +260,6 @@ register_self() {
     ]);
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, msg, NULL_KEY);
 
-    // Declare chat aliases.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type",    "chat.alias.declare",
         "alias",   "relay",
@@ -277,8 +283,7 @@ send_pong() {
 /* -------------------- RELAY LISTEN MANAGEMENT -------------------- */
 
 start_relay_listen() {
-    if (RelayListenHandle) return;  // Already listening
-
+    if (RelayListenHandle) return;
     RelayListenHandle = llListen(RELAY_CHANNEL, "", NULL_KEY, "");
 }
 
@@ -290,186 +295,515 @@ stop_relay_listen() {
 }
 
 update_relay_listen_state() {
-    // Only listen if: Mode != OFF AND IsAttached
-    if (Mode != MODE_OFF && IsAttached) {
-        start_relay_listen();
-    }
-    else {
-        stop_relay_listen();
+    if (Mode != MODE_OFF && IsAttached) start_relay_listen();
+    else stop_relay_listen();
+}
+
+/* -------------------- TIMER MANAGEMENT -------------------- */
+
+// Single timer multiplexes auth-dialog timeout and source distance GC.
+// Runs at GC_INTERVAL whenever sources or a pending auth dialog exist.
+rearm_timer() {
+    if (llGetListLength(Sources) > 0 || AskExpireAt != 0) {
+        llSetTimerEvent(GC_INTERVAL);
+    } else {
+        llSetTimerEvent(0.0);
     }
 }
 
-/* -------------------- RELAY MANAGEMENT -------------------- */
+/* -------------------- OUTBOUND CHAT (DISTANCE-TIERED) -------------------- */
 
-integer relay_idx(key obj) {
-    return llListFindList(Relays, [obj]);
+// MR-faithful: pick whisper / say / shout / regionsay by the source's
+// actual distance. Conserves region chat budget when sources are close.
+say_to_source(key src, integer chan, string text) {
+    list det = llGetObjectDetails(src, [OBJECT_POS]);
+    vector pos = llList2Vector(det, 0);
+    if (pos == ZERO_VECTOR) {
+        llRegionSayTo(src, chan, text);
+        return;
+    }
+    float d = llVecDist(pos, llGetRootPosition());
+    if (d < 10.0)       llWhisper(chan, text);
+    else if (d < 20.0)  llSay(chan, text);
+    else if (d < 100.0) llShout(chan, text);
+    else                llRegionSay(chan, text);
 }
 
-integer add_relay(key obj, string obj_name, integer chan) {
-    integer idx = relay_idx(obj);
+// Wire-format an ack to a source: <ident>,<wearer>,<command>,<ack>
+ack_source(string ident, key src, integer chan, string command, string ack) {
+    say_to_source(src, chan,
+        ident + "," + (string)WearerKey + "," + command + "," + ack);
+}
+
+/* -------------------- SOURCE MANAGEMENT -------------------- */
+
+integer source_idx(key obj) {
+    return llListFindList(Sources, [obj]);
+}
+
+integer add_source(key obj, string obj_name, integer chan) {
+    integer idx = source_idx(obj);
     if (idx != -1) {
-        // Update existing relay
-        Relays = llListReplaceList(Relays, [obj, obj_name, chan, ""], idx, idx + 3);
+        SourceNames = llListReplaceList(SourceNames, [obj_name], idx, idx);
+        SourceChans = llListReplaceList(SourceChans, [chan], idx, idx);
         return TRUE;
     }
-
-    // Check max relays
-    if (llGetListLength(Relays) >= (MAX_RELAYS * 4)) {
-        return FALSE;
-    }
-
-    // Add new relay
-    Relays += [obj, obj_name, chan, ""];
+    if (llGetListLength(Sources) >= MAX_SOURCES) return FALSE;
+    Sources += [obj];
+    SourceNames += [obj_name];
+    SourceChans += [chan];
+    SourceRestrictions += [""];
+    rearm_timer();
     return TRUE;
 }
 
-integer remove_relay(key obj) {
-    integer idx = relay_idx(obj);
-    if (idx != -1) {
-        Relays = llDeleteSubList(Relays, idx, idx + 3);
-        return TRUE;
-    }
-    return FALSE;
+/* -------------------- BAKED REFCOUNT (apply / release) -------------------- */
+
+// Apply a behaviour to the viewer iff it is not already in Baked. Refcount
+// discipline: double-add from two sources sends "@behav=n" only once.
+apply_add(string behav) {
+    if (llListFindList(Baked, [behav]) != -1) return;
+    Baked += [behav];
+    llOwnerSay("@" + behav + "=n");
 }
 
-integer store_restriction(key obj, string rlv_cmd) {
-    integer idx = relay_idx(obj);
-    if (idx != -1) {
-        string current_csv = llList2String(Relays, idx + 3);
-        if (current_csv == "") {
-            current_csv = rlv_cmd;
-        }
-        else {
-            current_csv += "," + rlv_cmd;
-        }
-        Relays = llListReplaceList(Relays, [current_csv], idx + 3, idx + 3);
-        return TRUE;
+// Release a behaviour from the viewer iff no source nor LocalRestrictions
+// still wants it. Walks all SourceRestrictions to check.
+apply_rem(string behav) {
+    integer baked_idx = llListFindList(Baked, [behav]);
+    if (baked_idx == -1) return;
+    if (llListFindList(LocalRestrictions, [behav]) != -1) return;
+    integer n = llGetListLength(SourceRestrictions);
+    integer i = 0;
+    while (i < n) {
+        list per_src = llParseString2List(llList2String(SourceRestrictions, i), ["/"], []);
+        if (llListFindList(per_src, [behav]) != -1) return;
+        i += 1;
     }
-    return FALSE;
+    Baked = llDeleteSubList(Baked, baked_idx, baked_idx);
+    llOwnerSay("@" + behav + "=y");
 }
 
-clear_restrictions(key obj) {
-    integer idx = relay_idx(obj);
-    if (idx != -1) {
-        // Use @clear per RLV spec - safer than manual reversal
-        llOwnerSay("@clear");
-        Relays = llListReplaceList(Relays, [""], idx + 3, idx + 3);
+// Add a per-source restriction. Caller must add_source first if needed.
+add_restriction(key src, string behav) {
+    integer idx = source_idx(src);
+    if (idx == -1) return;
+    list per_src = llParseString2List(llList2String(SourceRestrictions, idx), ["/"], []);
+    if (llListFindList(per_src, [behav]) == -1) {
+        per_src += [behav];
+        SourceRestrictions = llListReplaceList(SourceRestrictions,
+            [llDumpList2String(per_src, "/")], idx, idx);
     }
+    apply_add(behav);
 }
 
+// Remove a per-source restriction. apply_rem handles refcount; if any
+// other source still wants it, the viewer keeps it.
+rem_restriction(key src, string behav) {
+    integer idx = source_idx(src);
+    if (idx == -1) return;
+    list per_src = llParseString2List(llList2String(SourceRestrictions, idx), ["/"], []);
+    integer pos = llListFindList(per_src, [behav]);
+    if (pos == -1) return;
+    per_src = llDeleteSubList(per_src, pos, pos);
+    SourceRestrictions = llListReplaceList(SourceRestrictions,
+        [llDumpList2String(per_src, "/")], idx, idx);
+    apply_rem(behav);
+}
+
+// Release ALL restrictions held by one source, then drop the source.
+release_source(key src) {
+    integer idx = source_idx(src);
+    if (idx == -1) return;
+    list per_src = llParseString2List(llList2String(SourceRestrictions, idx), ["/"], []);
+    // Drop source first so apply_rem's walk sees only the survivors.
+    Sources = llDeleteSubList(Sources, idx, idx);
+    SourceNames = llDeleteSubList(SourceNames, idx, idx);
+    SourceChans = llDeleteSubList(SourceChans, idx, idx);
+    SourceRestrictions = llDeleteSubList(SourceRestrictions, idx, idx);
+    integer n = llGetListLength(per_src);
+    integer i = 0;
+    while (i < n) {
+        apply_rem(llList2String(per_src, i));
+        i += 1;
+    }
+    rearm_timer();
+}
+
+// Total wipe — Safeword and detach use this. Atomic @clear to viewer
+// rather than walking Baked (wearer wants instant release).
 safeword_clear_all() {
     clear_pending_ask();
-    SessionTrustedKeys = [];
-
-    integer relay_count = llGetListLength(Relays);
-    integer i = 0;
-    while (i < relay_count) {
-        key obj = llList2Key(Relays, i);
-        clear_restrictions(obj);
-        i = i + 4;
-    }
-    Relays = [];
+    drop_queue();
+    llOwnerSay("@clear");
+    Sources = [];
+    SourceNames = [];
+    SourceChans = [];
+    SourceRestrictions = [];
+    Baked = [];
+    LocalRestrictions = [];
+    TempObjWhite = [];
+    TempObjBlack = [];
+    TempAvWhite = [];
+    TempAvBlack = [];
+    rearm_timer();
 }
 
-/* -------------------- ASK MODE HELPERS -------------------- */
+/* -------------------- AUTH DECISION -------------------- */
 
-// Returns TRUE if a command removes restrictions rather than adding them.
-// Removal commands are always auto-accepted in ASK mode per ORG spec.
-integer is_removal_command(string cmd) {
-    if (llGetSubString(cmd, -2, -1) == "=y") return TRUE;
-    if (llSubStringIndex(cmd, "@clear") == 0) return TRUE;
+// Returns -1 deny, 0 ask, 1 allow. Mode-OFF can't reach here — listener
+// is removed in update_relay_listen_state.
+integer auth(key obj_key) {
+    if (source_idx(obj_key) != -1) return 1;
+    key owner = llGetOwnerKey(obj_key);
+    if (llListFindList(TempObjBlack, [obj_key]) != -1) return -1;
+    if (llListFindList(TempAvBlack, [owner]) != -1) return -1;
+    if (llListFindList(TempObjWhite, [obj_key]) != -1) return 1;
+    if (llListFindList(TempAvWhite, [owner]) != -1) return 1;
+    if (Mode == MODE_ON) return 1;
+    return 0;
+}
+
+/* -------------------- CHANNEL-COMMAND DETECTOR -------------------- */
+
+// MR's ischannelcommand: queries that respond on a positive chat channel.
+// These are inventory/state probes with no restriction effect; auto-allow.
+// This is the fix for v1.x bug #1 (re-asking on every furniture probe).
+integer is_channel_command(string cmd) {
+    if (llSubStringIndex(cmd, "@version") == 0) return TRUE;
+    if (llSubStringIndex(cmd, "@get") == 0) return TRUE;
+    if (llSubStringIndex(cmd, "@findfolder") == 0) return TRUE;
     return FALSE;
 }
 
-// Opens a direct llDialog prompt to the wearer for an incoming ASK request.
-// Uses its own private negative channel — independent of the collar UI dialog system.
+/* -------------------- COMMAND HANDLER (MR-style) -------------------- */
+
+// Process a "|"-separated command chain for one source. The auth flag
+// is the wearer's-already-said-yes signal: when FALSE, hitting an
+// auth-required command returns the unprocessed remainder for the
+// dequeue path to re-queue under an auth dialog.
+//
+// Returns "" when the entire chain was processed; otherwise the
+// remaining unprocessed sub-string for re-queueing.
+string handle_command(string ident, key src, integer chan, string com, integer auth_ok) {
+    list commands = llParseString2List(com, ["|"], []);
+    integer n = llGetListLength(commands);
+    integer i = 0;
+    while (i < n) {
+        string command = llList2String(commands, i);
+
+        if (command == END_MARKER) {
+            // End of batch — echo END to source (MR convention).
+            ack_source(ident, src, chan, END_MARKER, END_MARKER);
+            return "";
+        }
+
+        // Capability probes — no auth, auto-reply with version data.
+        if (command == "!release" || command == "!release_fail") {
+            release_source(src);
+            ack_source(ident, src, chan, command, "ok");
+            i += 1;
+            jump after_send;
+        }
+        if (command == "!version") {
+            ack_source(ident, src, chan, command, PROTOCOL_VERSION);
+            i += 1;
+            jump after_send;
+        }
+        if (command == "!implversion") {
+            ack_source(ident, src, chan, command, IMPL_VERSION);
+            i += 1;
+            jump after_send;
+        }
+        if (command == "!x-orgversions") {
+            ack_source(ident, src, chan, command, ORG_VERSIONS);
+            i += 1;
+            jump after_send;
+        }
+        // Unknown !-meta: ko and continue
+        if (llGetSubString(command, 0, 0) == "!") {
+            ack_source(ident, src, chan, command, "ko");
+            i += 1;
+            jump after_send;
+        }
+        // Anything not @-prefixed at this point is ill-formed; bail.
+        if (llGetSubString(command, 0, 0) != "@") {
+            // Return remainder; dequeue treats this as "needs decision",
+            // but matching MR we just stop processing the chain.
+            return llDumpList2String(llList2List(commands, i, -1), "|");
+        }
+
+        // Channel commands — auto-allow, fix for v1.x bug #1.
+        if (is_channel_command(command)) {
+            integer eq = llSubStringIndex(command, "=");
+            integer chan_val = 0;
+            if (eq != -1) chan_val = (integer)llGetSubString(command, eq + 1, -1);
+            if (chan_val > 0) {
+                llOwnerSay(command);
+                ack_source(ident, src, chan, command, "ok");
+            } else {
+                ack_source(ident, src, chan, command, "ko");
+            }
+            i += 1;
+            jump after_send;
+        }
+
+        // @clear is per-source release; doesn't disturb other sources.
+        if (command == "@clear") {
+            release_source(src);
+            ack_source(ident, src, chan, command, "ok");
+            i += 1;
+            jump after_send;
+        }
+
+        // From here, behav=val parsing required.
+        list subargs = llParseString2List(command, ["="], []);
+        if (llGetListLength(subargs) != 2) {
+            // Ill-formed; return remainder.
+            return llDumpList2String(llList2List(commands, i, -1), "|");
+        }
+        string behav = llGetSubString(llList2String(subargs, 0), 1, -1);
+        string val = llList2String(subargs, 1);
+
+        // =y / =rem : removal — auto-allowed (any source can release its own).
+        if (val == "y" || val == "rem") {
+            rem_restriction(src, behav);
+            ack_source(ident, src, chan, command, "ok");
+            i += 1;
+            jump after_send;
+        }
+
+        // From here on the command requires auth.
+        if (!auth_ok) {
+            return llDumpList2String(llList2List(commands, i, -1), "|");
+        }
+
+        // =force : one-shot to viewer; doesn't track as a restriction.
+        if (val == "force") {
+            llOwnerSay(command);
+            ack_source(ident, src, chan, command, "ok");
+            i += 1;
+            jump after_send;
+        }
+        // =n / =add : restricting — store + apply via refcount.
+        if (val == "n" || val == "add") {
+            add_source(src, llKey2Name(src), chan);
+            add_restriction(src, behav);
+            ack_source(ident, src, chan, command, "ok");
+            i += 1;
+            jump after_send;
+        }
+        // behav == "clear" with a value pattern: not supported here.
+        // Fall through to ko for unrecognised value forms.
+        ack_source(ident, src, chan, command, "ko");
+        i += 1;
+        @after_send;
+    }
+    return "";
+}
+
+/* -------------------- QUEUE MANAGEMENT -------------------- */
+
+integer queue_length() {
+    return llGetListLength(Queue) / QSTRIDE;
+}
+
+string q_ident(integer i)   { return llList2String(Queue, QSTRIDE * i); }
+key    q_obj(integer i)     { return (key)llList2String(Queue, QSTRIDE * i + 1); }
+string q_command(integer i) { return llList2String(Queue, QSTRIDE * i + 2); }
+
+drop_queue_item(integer i) {
+    Queue = llDeleteSubList(Queue, QSTRIDE * i, QSTRIDE * i + QSTRIDE - 1);
+}
+
+drop_queue() {
+    Queue = [];
+}
+
+// Entry point from the wire. Decides immediate-handle, queue-and-prompt,
+// or reject based on auth.
+enqueue(string ident, key src, integer chan, string command_chain) {
+    integer decision = auth(src);
+    if (decision == 1) {
+        handle_command(ident, src, chan, command_chain, TRUE);
+        return;
+    }
+    if (decision == -1 || queue_length() >= MAX_QUEUE) {
+        // MR sends ko + END marker when rejecting.
+        ack_source(ident, src, chan, command_chain, "ko");
+        ack_source(ident, src, chan, END_MARKER, "");
+        return;
+    }
+    // decision == 0 (ASK) and queue has room.
+    Queue += [ident, (string)src, command_chain];
+    if (AskListenHandle == 0) dequeue();
+}
+
+// Pop the next pending item, run handle_command(auth=FALSE), and either
+// continue (if entire chain auto-handled — channel commands etc.) or
+// open the auth dialog with the remainder re-queued at the front.
+dequeue() {
+    string remainder = "";
+    string cur_ident;
+    key cur_src;
+    integer cur_chan = RLV_RESP_CHANNEL;
+    while (remainder == "") {
+        if (queue_length() == 0) return;
+        cur_ident = q_ident(0);
+        cur_src   = q_obj(0);
+        // Look up source's reply channel if known, else default.
+        integer sidx = source_idx(cur_src);
+        if (sidx != -1) cur_chan = llList2Integer(SourceChans, sidx);
+        else cur_chan = RLV_RESP_CHANNEL;
+        remainder = handle_command(cur_ident, cur_src, cur_chan, q_command(0), FALSE);
+        drop_queue_item(0);
+    }
+    // Re-queue the remainder at the front and open the dialog.
+    Queue = [cur_ident, (string)cur_src, remainder] + Queue;
+    show_ask_dialog();
+}
+
+// Re-walk queue after wearer answers the auth dialog. Items now
+// matching auth=1 are processed; items now auth=-1 are ko'd. Items
+// still auth=0 are left in place.
+clean_queue() {
+    list on_hold = [];
+    integer i = 0;
+    while (i < queue_length()) {
+        string ident   = q_ident(i);
+        key    obj     = q_obj(i);
+        string command = q_command(i);
+        if (llListFindList(on_hold, [obj]) != -1) {
+            i += 1;
+            jump cq_continue;
+        }
+        integer decision = auth(obj);
+        integer chan = RLV_RESP_CHANNEL;
+        integer sidx = source_idx(obj);
+        if (sidx != -1) chan = llList2Integer(SourceChans, sidx);
+        if (decision == 1) {
+            drop_queue_item(i);
+            handle_command(ident, obj, chan, command, TRUE);
+        } else if (decision == -1) {
+            drop_queue_item(i);
+            ack_source(ident, obj, chan, command, "ko");
+            ack_source(ident, obj, chan, END_MARKER, "");
+        } else {
+            i += 1;
+            on_hold += [obj];
+        }
+        @cq_continue;
+    }
+}
+
+/* -------------------- ASK DIALOG -------------------- */
+
 show_ask_dialog() {
     AskDialogChan = -1000000 - (integer)llFrand(1000000000.0);
     if (AskListenHandle) llListenRemove(AskListenHandle);
     AskListenHandle = llListen(AskDialogChan, "", WearerKey, "");
 
-    string body = "" + PendingAskName +
-                  " applied RLV restrictions.\n\nAllow to keep them, or Deny to release.";
+    key src = q_obj(0);
+    string obj_name = llKey2Name(src);
+    string owner_name = llKey2Name(llGetOwnerKey(src));
+    string body = obj_name;
+    if (owner_name != "") body += ", owned by " + owner_name + ",";
+    body += " wants to apply RLV restrictions.\n\nAllow this?";
 
-    // Three buttons: Deny left, Allow right, blank centre for spacing
-    llDialog(WearerKey, body, ["Deny", " ", "Allow"], AskDialogChan);
-    llSetTimerEvent((float)ASK_TIMEOUT_SEC);
+    // 6 functional buttons + 3 spacers for grid alignment.
+    list buttons = ["No", " ", "Yes",
+                    "Ban Object", " ", "Trust Object",
+                    "Ban Owner",  " ", "Trust Owner"];
+
+    AskExpireAt = llGetUnixTime() + ASK_TIMEOUT_SEC;
+    llDialog(WearerKey, body, buttons, AskDialogChan);
+    rearm_timer();
 }
 
-// Wearer confirmed: flush the queue — forward each command to the viewer
-// and trust the source for the rest of the session. ,ok was already sent
-// on arrival (rev 17 early-ack), so we don't re-ack here.
+// Wearer accepted: trust source for the session (fix for v1.x bug #2),
+// then re-walk queue. If a Trust-Object/Trust-Owner button was used,
+// the listen handler populates the appropriate temp list before calling
+// accept_ask, so cleanqueue's auth() will resolve them too.
 accept_ask() {
-    integer count = llGetListLength(PendingAskCommands);
-    integer i = 0;
-    while (i < count) {
-        string command = llList2String(PendingAskCommands, i);
-        add_relay(PendingAskKey, PendingAskName, PendingAskChan);
-        store_restriction(PendingAskKey, command);
-        llOwnerSay(command);
-        i += 1;
+    key cur_src = q_obj(0);
+    // Plain Yes adds source to TempObjWhite — without this, source
+    // re-prompts the moment it self-clears and re-enters our view.
+    if (llListFindList(TempObjWhite, [cur_src]) == -1) {
+        TempObjWhite += [cur_src];
     }
-    if (llListFindList(SessionTrustedKeys, [(string)PendingAskKey]) == -1) {
-        SessionTrustedKeys += [(string)PendingAskKey];
-    }
-    llRegionSayTo(WearerKey, 0, "Allowed: " + PendingAskName);
+    clean_queue();
     clear_pending_ask();
+    if (queue_length() > 0) dequeue();
 }
 
-// Wearer declined or dialog timed out: send !release,ok to the source so
-// it tears down its session as if the wearer escaped. We don't ,ko the
-// queued commands — they were already acked ,ok on arrival (rev 17). The
-// viewer never saw them, so there's nothing to clear, and other plugins'
-// direct-RLV restrictions stay intact.
+// Wearer declined or dialog timed out: ko the front item's commands and
+// re-walk queue (the temp blacklist may now resolve other queued items).
 decline_ask() {
-    if (PendingAskKey != NULL_KEY) {
-        llRegionSayTo(PendingAskKey, PendingAskChan,
-            "RLV," + (string)llGetKey() + ",!release,ok");
+    integer chan = RLV_RESP_CHANNEL;
+    if (queue_length() > 0) {
+        string ident = q_ident(0);
+        key obj = q_obj(0);
+        string command = q_command(0);
+        integer sidx = source_idx(obj);
+        if (sidx != -1) chan = llList2Integer(SourceChans, sidx);
+        ack_source(ident, obj, chan, command, "ko");
+        ack_source(ident, obj, chan, END_MARKER, "");
+        drop_queue_item(0);
     }
-    llRegionSayTo(WearerKey, 0, "Denied: " + PendingAskName);
+    clean_queue();
     clear_pending_ask();
+    if (queue_length() > 0) dequeue();
 }
 
-// Cleans up ASK listener, timer, and all pending state.
 clear_pending_ask() {
     if (AskListenHandle) {
         llListenRemove(AskListenHandle);
         AskListenHandle = 0;
     }
-    llSetTimerEvent(0.0);
-    PendingAskKey = NULL_KEY;
-    PendingAskName = "";
-    PendingAskChan = 0;
-    PendingAskCommands = [];
     AskDialogChan = 0;
+    AskExpireAt = 0;
+    rearm_timer();
 }
 
-/* -------------------- SETTINGS CONSUMPTION -------------------- */
+/* -------------------- DISTANCE-BASED LIVENESS GC -------------------- */
+
+gc_distant_sources() {
+    integer i = llGetListLength(Sources) - 1;
+    vector me = llGetRootPosition();
+    while (i >= 0) {
+        key src = llList2Key(Sources, i);
+        list det = llGetObjectDetails(src, [OBJECT_POS]);
+        vector pos = llList2Vector(det, 0);
+        integer drop = FALSE;
+        if (pos == ZERO_VECTOR) drop = TRUE;
+        else if (llVecDist(pos, me) > DISTANCE_MAX) drop = TRUE;
+        if (drop) release_source(src);
+        i -= 1;
+    }
+}
+
+/* -------------------- SETTINGS -------------------- */
 
 apply_settings_sync() {
-    // Read all settings directly from LSD; compare with previous state
-    // and trigger side effects only when values actually change.
     integer prev_mode = Mode;
 
     Mode = lsd_int(KEY_RELAY_MODE, Mode);
     Hardcore = lsd_int(KEY_RELAY_HARDCORE, Hardcore);
 
-    // Side effects on Mode change — must mirror the OFF/ASK/ON menu handlers.
-    // Any live ASK dialog is stale once the mode changes, and an OFF
-    // transition clears session-trusted senders the same way the menu does.
     if (Mode != prev_mode) {
         clear_pending_ask();
+        drop_queue();
         if (Mode == MODE_OFF) {
-            SessionTrustedKeys = [];
+            TempObjWhite = [];
+            TempObjBlack = [];
+            TempAvWhite = [];
+            TempAvBlack = [];
         }
         update_relay_listen_state();
     }
 }
 
-/* -------------------- SETTINGS MODIFICATION -------------------- */
-
 persist_mode(integer new_mode) {
-    // kmod_settings is the canonical writer. See rev 15 changelog.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", KEY_RELAY_MODE,
@@ -479,7 +813,6 @@ persist_mode(integer new_mode) {
 }
 
 persist_hardcore(integer new_hardcore) {
-    // kmod_settings is the canonical writer. See rev 15 changelog.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "settings.set",
         "key", KEY_RELAY_HARDCORE,
@@ -492,45 +825,27 @@ persist_hardcore(integer new_hardcore) {
 
 show_main_menu() {
     SessionId = generate_session_id();
-
-    // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
     string mode_str;
-    if (!IsAttached) {
-        mode_str = "OFF (not worn)";
-    }
-    else if (Mode == MODE_OFF) {
-        mode_str = "OFF";
-    }
-    else if (Mode == MODE_ASK) {
-        mode_str = "ASK";
-    }
-    else if (Hardcore) {
-        mode_str = "HARDCORE";
-    }
-    else {
-        mode_str = "ON";
-    }
+    if (!IsAttached)              mode_str = "OFF (not worn)";
+    else if (Mode == MODE_OFF)    mode_str = "OFF";
+    else if (Mode == MODE_ASK)    mode_str = "ASK";
+    else if (Hardcore)            mode_str = "HARDCORE";
+    else                          mode_str = "ON";
 
-    integer relay_count = llGetListLength(Relays) / 4;
-
-    string message = "RLV Relay Menu\nMode: " + mode_str + "\nActive Relays: " + (string)relay_count;
+    integer source_count = llGetListLength(Sources);
+    string message = "RLV Relay Menu\nMode: " + mode_str
+                   + "\nBound by: " + (string)source_count + " object";
+    if (source_count != 1) message += "s";
 
     list buttons = ["Back"];
-
-    if (btn_allowed("Mode"))        buttons += ["Mode"];
-    if (btn_allowed("Bound by...")) buttons += ["Bound by..."];
-
-    // Safeword only when not hardcore
-    if (btn_allowed("Safeword") && !Hardcore) {
-        buttons += ["Safeword"];
-    }
-
-    if (btn_allowed("Unbind")) buttons += ["Unbind"];
+    if (btn_allowed("Mode"))                       buttons += ["Mode"];
+    if (btn_allowed("Bound by..."))                buttons += ["Bound by..."];
+    if (btn_allowed("Safeword") && !Hardcore)      buttons += ["Safeword"];
+    if (btn_allowed("Unbind"))                     buttons += ["Unbind"];
 
     string buttons_json = llList2Json(JSON_ARRAY, buttons);
-
     string msg = llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
         "session_id", SessionId,
@@ -540,7 +855,6 @@ show_main_menu() {
         "buttons", buttons_json,
         "timeout", 60
     ]);
-
     llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
 }
 
@@ -548,38 +862,24 @@ show_mode_menu() {
     SessionId = generate_session_id();
 
     string mode_str;
-    if (!IsAttached) {
-        mode_str = "OFF (not worn)";
-    }
-    else if (Mode == MODE_OFF) {
-        mode_str = "OFF";
-    }
-    else if (Mode == MODE_ASK) {
-        mode_str = "ASK";
-    }
-    else if (Hardcore) {
-        mode_str = "HARDCORE";
-    }
-    else {
-        mode_str = "ON";
-    }
+    if (!IsAttached)              mode_str = "OFF (not worn)";
+    else if (Mode == MODE_OFF)    mode_str = "OFF";
+    else if (Mode == MODE_ASK)    mode_str = "ASK";
+    else if (Hardcore)            mode_str = "HARDCORE";
+    else                          mode_str = "ON";
 
     string message = "RLV Relay Mode: " + mode_str;
 
     list buttons = ["Back", "OFF", "ASK", "ON"];
-
-    // Hardcore toggle only available in ON mode, and only if policy allows
     if (Mode == MODE_ON) {
         if (Hardcore) {
             if (btn_allowed("HC OFF")) buttons += ["HC OFF"];
-        }
-        else {
-            if (btn_allowed("HC ON")) buttons += ["HC ON"];
+        } else {
+            if (btn_allowed("HC ON"))  buttons += ["HC ON"];
         }
     }
 
     string buttons_json = llList2Json(JSON_ARRAY, buttons);
-
     string msg = llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
         "session_id", SessionId,
@@ -589,43 +889,43 @@ show_mode_menu() {
         "buttons", buttons_json,
         "timeout", 60
     ]);
-
     llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
 }
 
 show_object_list() {
     SessionId = generate_session_id();
 
-    integer relay_count = llGetListLength(Relays) / 4;
-
+    integer source_count = llGetListLength(Sources);
     string message;
-    if (relay_count == 0) {
-        message = "No active relays.";
-    }
-    else {
-        message = "Active Relays:\n";
+    if (source_count == 0) {
+        message = "No active sources.";
+    } else {
+        message = "Bound by:\n";
         integer i = 0;
-        while (i < relay_count) {
-            integer idx = i * 4;
-            string obj_name = llList2String(Relays, idx + 1);
-            message += (string)(i + 1) + ". " + truncate_name(obj_name, 20) + "\n";
-            i++;
+        while (i < source_count) {
+            string nm = llList2String(SourceNames, i);
+            string restr = llList2String(SourceRestrictions, i);
+            message += (string)(i + 1) + ". " + truncate_name(nm, 24);
+            if (restr != "") {
+                list per_src = llParseString2List(restr, ["/"], []);
+                message += " [" + (string)llGetListLength(per_src) + "]";
+            }
+            message += "\n";
+            i += 1;
         }
     }
 
     list buttons = ["Back"];
     string buttons_json = llList2Json(JSON_ARRAY, buttons);
-
     string msg = llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
         "session_id", SessionId,
         "user", (string)CurrentUser,
-        "title", "Active Relays",
+        "title", "Bound by",
         "message", message,
         "buttons", buttons_json,
         "timeout", 60
     ]);
-
     llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
 }
 
@@ -654,7 +954,11 @@ handle_button_click(string button) {
     }
     else if (button == "OFF") {
         clear_pending_ask();
-        SessionTrustedKeys = [];
+        drop_queue();
+        TempObjWhite = [];
+        TempObjBlack = [];
+        TempAvWhite = [];
+        TempAvBlack = [];
         Mode = MODE_OFF;
         Hardcore = FALSE;
         persist_mode(MODE_OFF);
@@ -665,6 +969,7 @@ handle_button_click(string button) {
     }
     else if (button == "ASK") {
         clear_pending_ask();
+        drop_queue();
         Mode = MODE_ASK;
         Hardcore = FALSE;
         persist_mode(MODE_ASK);
@@ -678,9 +983,7 @@ handle_button_click(string button) {
         Mode = MODE_ON;
         persist_mode(MODE_ON);
         update_relay_listen_state();
-        if (!Hardcore) {
-            llRegionSayTo(CurrentUser, 0, "Mode set to ON");
-        }
+        if (!Hardcore) llRegionSayTo(CurrentUser, 0, "Mode set to ON");
         show_mode_menu();
     }
     else if (button == "HC ON") {
@@ -707,7 +1010,6 @@ handle_button_click(string button) {
         return_to_root();
     }
     else {
-        // Unknown button, reshow menu
         show_main_menu();
     }
 }
@@ -721,11 +1023,8 @@ return_to_root() {
         "user", (string)CurrentUser
     ]);
     llMessageLinked(LINK_SET, UI_BUS, msg, CurrentUser);
-
     cleanup_session();
 }
-
-/* -------------------- SESSION MANAGEMENT -------------------- */
 
 cleanup_session() {
     if (SessionId != "") {
@@ -744,28 +1043,26 @@ cleanup_session() {
 /* -------------------- GROUND REZ HANDLER -------------------- */
 
 handle_ground_rez(string reason) {
-    // Dismiss any outstanding ASK prompt and clear session trust
     clear_pending_ask();
-    SessionTrustedKeys = [];
+    drop_queue();
+    TempObjWhite = [];
+    TempObjBlack = [];
+    TempAvWhite = [];
+    TempAvBlack = [];
 
-    // Turn off relay mode
     Mode = MODE_OFF;
     Hardcore = FALSE;
     persist_mode(MODE_OFF);
     persist_hardcore(FALSE);
 
-    // Clear any active restrictions
-    if (llGetListLength(Relays) > 0) {
-        safeword_clear_all();
-    }
+    if (llGetListLength(Sources) > 0) safeword_clear_all();
 
-    // Update listen state
     update_relay_listen_state();
 
     if (reason != "") llRegionSayTo(llGetOwner(), 0, reason + " - Relay turned OFF");
 }
 
-/* -------------------- MESSAGE HANDLERS -------------------- */
+/* -------------------- MENU MESSAGE HANDLERS -------------------- */
 
 handle_start(string msg) {
     if (llJsonGetValue(msg, ["acl"]) == JSON_INVALID) return;
@@ -787,17 +1084,14 @@ handle_start(string msg) {
         return;
     }
 
-    // Start new session
     CurrentUser = user;
     UserAcl = acl;
     show_main_menu();
 }
 
-// Chat subcommand handler. Called from handle_start when subpath is non-empty.
 handle_subpath(key user, integer acl_level, string subpath) {
     CurrentUser = user;
     UserAcl = acl_level;
-
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, acl_level);
 
     if (subpath == "on" || subpath == "off" || subpath == "ask") {
@@ -807,8 +1101,12 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         clear_pending_ask();
+        drop_queue();
         if (subpath == "off") {
-            SessionTrustedKeys = [];
+            TempObjWhite = [];
+            TempObjBlack = [];
+            TempAvWhite = [];
+            TempAvBlack = [];
             Mode = MODE_OFF;
             Hardcore = FALSE;
             persist_mode(MODE_OFF);
@@ -831,8 +1129,6 @@ handle_subpath(key user, integer acl_level, string subpath) {
     }
 
     if (subpath == "safeword") {
-        // Emergency panic verb. Bypasses Hardcore, matching the sos.relay.clear
-        // semantic. Gate: any user who could Safeword or Unbind via the menu.
         if (!btn_allowed("Safeword") && !btn_allowed("Unbind")) {
             llRegionSayTo(user, 0, "Access denied.");
             gPolicyButtons = [];
@@ -866,13 +1162,12 @@ handle_dialog_timeout(string msg) {
     cleanup_session();
 }
 
-/* -------------------- RELAY PROTOCOL HANDLERS -------------------- */
+/* -------------------- RELAY PROTOCOL ENTRY -------------------- */
 
-handle_relay_message(key sender_id, string sender_name, string raw_msg) {
-    // Only process relay commands when attached
+handle_relay_message(key sender_id, string raw_msg) {
     if (!IsAttached) return;
 
-    // Parse message format: "command|channel" or just "command"
+    // Optional "|<session-channel>" suffix on the chat line itself.
     list parsed = llParseString2List(raw_msg, ["|"], []);
     string raw_cmd = llList2String(parsed, 0);
     integer session_chan = RLV_RESP_CHANNEL;
@@ -880,12 +1175,10 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
         session_chan = (integer)llList2String(parsed, 1);
     }
 
-    // Parse ORG standard format: "<ident>,<target_uuid>,<command>".
-    // Strict — exactly three fields, with a real 36-char UUID in field 2.
-    // Anything else is silently dropped; we have no business processing
-    // chat that wasn't addressed to us in the protocol's own terms.
+    // Strict ORG wire format: ident,target_uuid,command (3 fields).
     list parts = llParseString2List(raw_cmd, [","], []);
     if (llGetListLength(parts) != 3) return;
+    string ident = llList2String(parts, 0);
     string potential_uuid = llList2String(parts, 1);
     if (llStringLength(potential_uuid) != 36) return;
     if (llGetSubString(potential_uuid,  8,  8) != "-") return;
@@ -895,11 +1188,8 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
     key target_uuid = (key)potential_uuid;
     string command = llList2String(parts, 2);
 
-    // Wildcard target is reserved for capability probes per ORG spec.
-    // Some furniture vendors broadcast actual restrictions to wildcard so
-    // a single rezzed object catches whoever happens to be in range; we
-    // refuse that. Wearer-targeted commands proceed; non-wearer non-probe
-    // wildcard commands are dropped.
+    // Wildcard target reserved for capability probes (rev 14 hardening
+    // preserved). Other commands must match this wearer.
     if (target_uuid == WILDCARD_UUID) {
         if (command != "@version"
             && command != "@versionnew"
@@ -911,101 +1201,9 @@ handle_relay_message(key sender_id, string sender_name, string raw_msg) {
         return;
     }
 
-    // Handle ORG capability probes — auto-reply without going through ASK.
-    // These are queries, not binds; sources poll them to detect that a
-    // relay is present and learn what protocol level it speaks.
-    if (command == "@version" || command == "@versionnew") {
-        add_relay(sender_id, sender_name, session_chan);
-        string reply = "RLV," + (string)llGetKey() + "," + command + ",ok";
-        llRegionSayTo(sender_id, session_chan, reply);
-        return;
-    }
-    if (command == "!version") {
-        string reply = "RLV," + (string)llGetKey() + ",!version," + PROTOCOL_VERSION;
-        llRegionSayTo(sender_id, session_chan, reply);
-        return;
-    }
-    if (command == "!implversion") {
-        string reply = "RLV," + (string)llGetKey() + ",!implversion," + IMPL_VERSION;
-        llRegionSayTo(sender_id, session_chan, reply);
-        return;
-    }
-    if (command == "!x-orgversions") {
-        string reply = "RLV," + (string)llGetKey() + ",!x-orgversions," + ORG_VERSIONS;
-        llRegionSayTo(sender_id, session_chan, reply);
-        return;
-    }
-
-    // Handle release commands
-    if (command == "!release" || command == "!release_fail") {
-        clear_restrictions(sender_id);
-        remove_relay(sender_id);
-        string reply = "RLV," + (string)llGetKey() + "," + command + ",ok";
-        llRegionSayTo(sender_id, session_chan, reply);
-        return;
-    }
-
-    // Handle RLV commands
-    if (llSubStringIndex(command, "@") == 0) {
-        // Reject if mode is OFF
-        if (Mode == MODE_OFF) {
-            string reply_ko = "RLV," + (string)llGetKey() + "," + command + ",ko";
-            llRegionSayTo(sender_id, session_chan, reply_ko);
-            return;
-        }
-
-        // ASK mode: ack on arrival but defer apply until consent. Source
-        // sees ,ok immediately (its state machine doesn't time out), but
-        // the viewer doesn't see the restriction until the wearer Allows.
-        // On Deny we send !release,ok to the source — no ,ko for the
-        // already-acked commands. Removal commands (=y, @clear) and
-        // already-trusted sources skip the queue and apply directly.
-        if (Mode == MODE_ASK && !is_removal_command(command)) {
-            integer already_trusted = (llListFindList(SessionTrustedKeys, [(string)sender_id]) != -1);
-            if (!already_trusted) {
-                if (PendingAskKey == NULL_KEY) {
-                    // No active prompt — open one for this object, queue
-                    // the command, and ack it on the source's channel.
-                    PendingAskKey = sender_id;
-                    PendingAskName = sender_name;
-                    PendingAskChan = session_chan;
-                    PendingAskCommands = [command];
-                    llRegionSayTo(sender_id, session_chan,
-                        "RLV," + (string)llGetKey() + "," + command + ",ok");
-                    show_ask_dialog();
-                    return;
-                }
-                if (PendingAskKey == sender_id) {
-                    // Same source, more commands while waiting — append to
-                    // queue and ack. Past the cap, ,ko (the only path that
-                    // legitimately ko's an in-ASK command).
-                    if (llGetListLength(PendingAskCommands) >= MAX_PENDING) {
-                        llRegionSayTo(sender_id, session_chan,
-                            "RLV," + (string)llGetKey() + "," + command + ",ko");
-                        return;
-                    }
-                    PendingAskCommands += [command];
-                    llRegionSayTo(sender_id, session_chan,
-                        "RLV," + (string)llGetKey() + "," + command + ",ok");
-                    return;
-                }
-                // Different object arrived while a prompt is open — reject
-                llRegionSayTo(sender_id, session_chan,
-                    "RLV," + (string)llGetKey() + "," + command + ",ko");
-                return;
-            }
-        }
-
-        // Apply command. Reached in MODE_ON, or in MODE_ASK for a session-
-        // trusted source or a removal command (=y / @clear).
-        add_relay(sender_id, sender_name, session_chan);
-        store_restriction(sender_id, command);
-        llOwnerSay(command);  // Forward to viewer
-
-        string reply_ok = "RLV," + (string)llGetKey() + "," + command + ",ok";
-        llRegionSayTo(sender_id, session_chan, reply_ok);
-        return;
-    }
+    // Append END marker so handle_command's iteration ends with a $$ ack.
+    string command_chain = llToLower(command) + "|" + END_MARKER;
+    enqueue(ident, sender_id, session_chan, command_chain);
 }
 
 /* -------------------- EVENTS -------------------- */
@@ -1020,18 +1218,24 @@ default
 
         cleanup_session();
         clear_pending_ask();
-        SessionTrustedKeys = [];
+        drop_queue();
+        Sources = [];
+        SourceNames = [];
+        SourceChans = [];
+        SourceRestrictions = [];
+        Baked = [];
+        LocalRestrictions = [];
+        TempObjWhite = [];
+        TempObjBlack = [];
+        TempAvWhite = [];
+        TempAvBlack = [];
 
-        // Check attachment state
         IsAttached = (llGetAttached() != 0);
         WearerKey = llGetOwner();
 
         if (!IsAttached) {
-            // Ground rez: reset to safe defaults (LSD will be updated via handle_ground_rez)
             handle_ground_rez("Collar rezzed on ground");
-        }
-        else {
-            // Attached: restore runtime state from LSD immediately
+        } else {
             Mode = lsd_int(KEY_RELAY_MODE, MODE_ASK);
             Hardcore = lsd_int(KEY_RELAY_HARDCORE, FALSE);
             update_relay_listen_state();
@@ -1045,25 +1249,29 @@ default
     }
 
     timer() {
-        // ASK dialog timed out — treat as denial
-        if (PendingAskKey != NULL_KEY) {
-            llRegionSayTo(WearerKey, 0, "Request timed out: " + PendingAskName);
+        // Auth-dialog timeout (deadline-based, granularity = GC_INTERVAL).
+        if (AskExpireAt != 0 && llGetUnixTime() >= AskExpireAt) {
+            llRegionSayTo(WearerKey, 0, "Auth request timed out");
             decline_ask();
         }
+        // Distance-based source GC.
+        if (llGetListLength(Sources) > 0) gc_distant_sources();
+        rearm_timer();
     }
 
     attach(key id) {
         if (id == NULL_KEY) {
-            // Detached — dismiss any pending ASK and reset session trust
             clear_pending_ask();
-            SessionTrustedKeys = [];
+            drop_queue();
+            TempObjWhite = [];
+            TempObjBlack = [];
+            TempAvWhite = [];
+            TempAvBlack = [];
             IsAttached = FALSE;
             handle_ground_rez("");
-        }
-        else {
-            // Attached
+        } else {
             IsAttached = TRUE;
-            WearerKey = id;  // Update cached wearer UUID
+            WearerKey = id;
             update_relay_listen_state();
             llRegionSayTo(llGetOwner(), 0, "Collar attached - Relay state restored");
         }
@@ -1073,7 +1281,6 @@ default
         string msg_type = llJsonGetValue(msg, ["type"]);
         if (msg_type == JSON_INVALID) return;
 
-        /* -------------------- LIFECYCLE -------------------- */
         if (num == KERNEL_LIFECYCLE) {
             if (msg_type == "kernel.register.refresh") {
                 register_self();
@@ -1087,29 +1294,20 @@ default
                 llResetScript();
             }
         }
-
-        /* -------------------- SETTINGS -------------------- */
         else if (num == SETTINGS_BUS) {
             if (msg_type == "settings.sync" || msg_type == "settings.delta") {
                 apply_settings_sync();
             }
         }
-
-        /* -------------------- UI -------------------- */
         else if (num == UI_BUS) {
             if (msg_type == "ui.menu.start") {
                 handle_start(msg);
             }
             else if (msg_type == "sos.relay.clear") {
-                // Emergency safeword from plugin_sos (wearer-only gate
-                // enforced upstream). Bypasses Hardcore, matching the
-                // emergency-exit intent.
                 safeword_clear_all();
                 llRegionSayTo(llGetOwner(), 0, "All RLV restrictions cleared.");
             }
         }
-
-        /* -------------------- DIALOG -------------------- */
         else if (num == DIALOG_BUS) {
             if (msg_type == "ui.dialog.response") {
                 handle_dialog_response(msg);
@@ -1122,13 +1320,42 @@ default
 
     listen(integer chan, string name, key id, string msg) {
         if (chan == RELAY_CHANNEL) {
-            handle_relay_message(id, name, msg);
+            handle_relay_message(id, msg);
         }
         else if (chan == AskDialogChan && id == WearerKey) {
-            if (msg == "Allow") {
+            // Six-button MR dialog. Trust/Ban variants populate temp
+            // lists *before* accept/decline so cleanqueue resolves
+            // any other queued items from the same source/owner too.
+            key cur_src = q_obj(0);
+            key cur_owner = llGetOwnerKey(cur_src);
+            if (msg == "Yes") {
                 accept_ask();
             }
-            else if (msg == "Deny") {
+            else if (msg == "No") {
+                decline_ask();
+            }
+            else if (msg == "Trust Object") {
+                if (llListFindList(TempObjWhite, [cur_src]) == -1) {
+                    TempObjWhite += [cur_src];
+                }
+                accept_ask();
+            }
+            else if (msg == "Ban Object") {
+                if (llListFindList(TempObjBlack, [cur_src]) == -1) {
+                    TempObjBlack += [cur_src];
+                }
+                decline_ask();
+            }
+            else if (msg == "Trust Owner") {
+                if (llListFindList(TempAvWhite, [cur_owner]) == -1) {
+                    TempAvWhite += [cur_owner];
+                }
+                accept_ask();
+            }
+            else if (msg == "Ban Owner") {
+                if (llListFindList(TempAvBlack, [cur_owner]) == -1) {
+                    TempAvBlack += [cur_owner];
+                }
                 decline_ask();
             }
         }
