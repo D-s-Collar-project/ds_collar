@@ -1,29 +1,28 @@
 /*--------------------
 SCRIPT: update_shim.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 3
 PURPOSE: Transient payload deposited into the collar by updater_driver via
-  llRemoteLoadScriptPin. Runs inside the collar, negotiates per-script
-  install/skip/delete with updater_bundler over the start_param channel,
-  then self-deletes on DONE or inactivity timeout.
+  llRemoteLoadScriptPin. Runs inside the collar, answers inventory and
+  ship-decision queries from updater_bundler over the start_param channel,
+  and sweeps stale collar-namespace scripts on demand. Self-deletes on
+  DONE or inactivity timeout.
 ARCHITECTURE: No link_message interaction with the rest of the collar.
   Orphaned plugin.reg.<ctx> / acl.policycontext:<ctx> entries left by
-  removed scripts are swept by collar_kernel's prune_missing_scripts on
-  its next inventory tick — the shim does not clean up LSD itself.
+  swept scripts are cleaned up by collar_kernel's prune_missing_scripts on
+  its next inventory tick — the shim does not touch LSD itself.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
-- v1.1 rev 2: Add CONDITIONAL mode. Bundler may now query with mode
-  CONDITIONAL and an optional gate script name; shim answers SKIP if
-  neither the named script nor the gate is in collar inventory, and
-  otherwise treats the query like REQUIRED. Lets the updater preserve
-  the wearer's installed-plugin set rather than force-installing every
-  plugin in the bundle, while still healing paired-kmod gaps when the
-  gating plugin is present.
-- v1.1 rev 1: Hold @detach=n while the shim is resident if the collar was
-  locked at update start. Keyed to the shim's script UUID so it drops
-  automatically on self-delete; bridges the ~3s window during plugin_lock
-  replacement when the old plugin_lock's @detach=n is already gone and the
-  new one hasn't arrived yet. Wearer can't yank a locked collar mid-update.
+- v1.1 rev 3: Drop notecard-mode protocol. Replace with inventory-driven
+  flow: LIST → INV|<csv> reports collar's collar-namespace inventory;
+  QUERY|<name>|<uuid> → REPLY|<name>|GIVE|SKIP compares UUID; SWEEP|<csv>
+  → SWEPT|<csv> removes any collar-namespace script not in the supplied
+  manifest. Mode/CONDITIONAL/DEPRECATED branches deleted; ship/skip/keep
+  decisions all originate in the bundler now. Collar-namespace prefix
+  list: collar_, kmod_, plugin_, control_, plus literal leash_holder.
+- v1.1 rev 2: Add CONDITIONAL mode (superseded by rev 3).
+- v1.1 rev 1: Hold @detach=n while shim is resident if collar was locked
+  at update start; bridges the ~3s window during plugin_lock replacement.
 - v1.1 rev 0: Initial implementation.
 --------------------*/
 
@@ -46,65 +45,86 @@ integer ListenHandle = 0;
 
 
 /* -------------------- PROTOCOL -------------------- */
-// Installer → shim: "QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]"
-//                   mode: REQUIRED | CONDITIONAL | DEPRECATED
-//                   gate: optional script name; CONDITIONAL with gate ships
-//                         when gate is present in collar even if name isn't
-// Installer → shim: "DONE"
-// Shim → installer: "READY"                              (shim is listening)
-// Shim → installer: "REPLY|<name>|<verdict>"             verdict: GIVE|SKIP|OK
+// Bundler → shim: "LIST"
+// Shim → bundler: "INV|<csv of collar-namespace script names>"
+// Bundler → shim: "QUERY|<name>|<uuid>"
+// Shim → bundler: "REPLY|<name>|GIVE"  (missing or stale)
+// Shim → bundler: "REPLY|<name>|SKIP"  (already current)
+// Bundler → shim: "SWEEP|<csv of names to keep>"
+// Shim → bundler: "SWEPT|<csv of names removed>"
+// Driver  → shim: "DONE"
 
 
 /* -------------------- HELPERS -------------------- */
 
-reply(string target_name, string verdict) {
-    llWhisper(SecureChannel, "REPLY|" + target_name + "|" + verdict);
+// Collar-namespace test. Sweep and inventory-report use this filter to
+// avoid touching unrelated user scripts that may happen to live in the
+// collar inventory.
+integer is_collar_script(string name) {
+    if (name == "leash_holder") return TRUE;
+    if (llSubStringIndex(name, "collar_") == 0) return TRUE;
+    if (llSubStringIndex(name, "kmod_") == 0) return TRUE;
+    if (llSubStringIndex(name, "plugin_") == 0) return TRUE;
+    if (llSubStringIndex(name, "control_") == 0) return TRUE;
+    return FALSE;
 }
 
-// Handle a single QUERY line from the bundler. Mutates local inventory
-// when a stale script needs to be removed or a deprecated item is present.
-handle_query(string target_name, key target_uuid, string mode, string gate) {
-    if (mode == "DEPRECATED") {
-        if (llGetInventoryType(target_name) != INVENTORY_NONE) {
-            llRemoveInventory(target_name);
-        }
-        reply(target_name, "OK");
-        return;
+// Build CSV of collar-namespace scripts in our prim, for the bundler to
+// diff against its own inventory.
+string list_inventory() {
+    list names = [];
+    integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
+    integer i = 0;
+    while (i < count) {
+        string name = llGetInventoryName(INVENTORY_SCRIPT, i);
+        if (is_collar_script(name)) names += [name];
+        i += 1;
     }
+    return llDumpList2String(names, ",");
+}
 
-    // CONDITIONAL: ship only if the wearer already has this script, or the
-    // optional gate script. The gate covers paired kmods (e.g. kmod_leash
-    // gated on plugin_leash) so they get restored even if the kmod itself
-    // was somehow lost while the gating plugin remains.
-    if (mode == "CONDITIONAL") {
-        integer name_present = (llGetInventoryType(target_name) != INVENTORY_NONE);
-        integer gate_present = FALSE;
-        if (gate != "") gate_present = (llGetInventoryType(gate) != INVENTORY_NONE);
-        if (!name_present && !gate_present) {
-            reply(target_name, "SKIP");
-            return;
-        }
-        // fall through to REQUIRED-style handling below
-    }
-
-    // REQUIRED (or CONDITIONAL with name/gate present). Script-only for v1.
-    if (llGetInventoryType(target_name) == INVENTORY_NONE) {
-        reply(target_name, "GIVE");
-        return;
-    }
-
-    // Present — compare asset UUID. A mismatched UUID means a stale version
-    // that must be deleted before llRemoteLoadScriptPin can deposit the new
-    // one. (Platform does silently-replace on same-name, but deleting first
-    // keeps the UUID comparison honest on the next update pass.)
+// Compare a single named script: GIVE if missing or UUID-mismatched,
+// SKIP if present and matches.
+string verdict_for(string target_name, key target_uuid) {
+    if (llGetInventoryType(target_name) == INVENTORY_NONE) return "GIVE";
     key local_uuid = llGetInventoryKey(target_name);
-    if (local_uuid == target_uuid && target_uuid != NULL_KEY) {
-        reply(target_name, "SKIP");
-        return;
-    }
-
+    if (local_uuid == target_uuid && target_uuid != NULL_KEY) return "SKIP";
+    // Stale version present. Remove first so the bundler's
+    // llRemoteLoadScriptPin lands on a clean slot.
     llRemoveInventory(target_name);
-    reply(target_name, "GIVE");
+    return "GIVE";
+}
+
+// Remove any collar-namespace script not in the supplied keep-list.
+// Returns CSV of removed names so the bundler can log/report.
+string sweep_inventory(list keep) {
+    list removed = [];
+    integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
+    integer i = 0;
+    list current = [];
+    // Snapshot first; removing during iteration shifts indices.
+    while (i < count) {
+        current += [llGetInventoryName(INVENTORY_SCRIPT, i)];
+        i += 1;
+    }
+    integer n = llGetListLength(current);
+    i = 0;
+    while (i < n) {
+        string name = llList2String(current, i);
+        if (is_collar_script(name)) {
+            if (llListFindList(keep, [name]) < 0) {
+                llRemoveInventory(name);
+                removed += [name];
+            }
+        }
+        i += 1;
+    }
+    return llDumpList2String(removed, ",");
+}
+
+reply(string verb, string body) {
+    if (body == "") llWhisper(SecureChannel, verb);
+    else llWhisper(SecureChannel, verb + "|" + body);
 }
 
 cleanup_and_die() {
@@ -160,8 +180,7 @@ default {
         // Arm the inactivity watchdog.
         llSetTimerEvent(INACTIVITY_TIMEOUT);
 
-        // Signal to the bundler that we are listening and ready to answer
-        // queries.
+        // Signal to the bundler that we are listening and ready to answer.
         llWhisper(SecureChannel, "READY");
     }
 
@@ -180,17 +199,34 @@ default {
             return;
         }
 
+        if (verb == "LIST") {
+            reply("INV", list_inventory());
+            return;
+        }
+
         if (verb == "QUERY") {
-            // QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]
-            if (llGetListLength(parts) < 5) return;
-            string target_type = llList2String(parts, 1);
-            if (target_type != "SCRIPT") return;  // v1: scripts only
-            string target_name = llList2String(parts, 2);
-            key target_uuid = (key)llList2String(parts, 3);
-            string mode = llList2String(parts, 4);
-            string gate = "";
-            if (llGetListLength(parts) >= 6) gate = llList2String(parts, 5);
-            handle_query(target_name, target_uuid, mode, gate);
+            // QUERY|<name>|<uuid>
+            if (llGetListLength(parts) < 3) return;
+            string target_name = llList2String(parts, 1);
+            key target_uuid = (key)llList2String(parts, 2);
+            string v = verdict_for(target_name, target_uuid);
+            reply("REPLY", target_name + "|" + v);
+            return;
+        }
+
+        if (verb == "SWEEP") {
+            // SWEEP|<csv of names to keep>. Empty CSV would mean "remove
+            // everything"; refuse that as a footgun guard — the bundler
+            // should already skip SWEEP when its own inventory was empty.
+            string csv = "";
+            if (llGetListLength(parts) >= 2) csv = llList2String(parts, 1);
+            list keep = [];
+            if (csv != "") keep = llCSV2List(csv);
+            if (llGetListLength(keep) == 0) {
+                reply("SWEPT", "");
+                return;
+            }
+            reply("SWEPT", sweep_inventory(keep));
             return;
         }
     }

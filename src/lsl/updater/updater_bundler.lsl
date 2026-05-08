@@ -1,31 +1,28 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: Installer child-prim script. Holds the staged collar scripts in
-  its own inventory. On LM_BUNDLE_BEGIN from updater_driver, reads the
-  named bundle notecard one line at a time, asks update_shim (running in
-  the collar) whether each named script is already current, and for each
-  GIVE response calls llRemoteLoadScriptPin to deposit the new version.
+  its own inventory. On LM_BUNDLE_BEGIN from updater_driver, asks update_shim
+  for the collar's current collar-namespace inventory, iterates THIS prim's
+  scripts, asks the shim per-script whether to ship, deposits new/stale
+  scripts via llRemoteLoadScriptPin, and finally tells the shim which names
+  to keep — anything in collar inventory not in that manifest is swept.
 ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   updater_driver runs in the root prim. Chat protocol with the shim uses
   the per-session secure channel passed in LM_BUNDLE_BEGIN. Scripts to be
   transferred must exist in THIS prim's inventory — llRemoteLoadScriptPin
   can only send items from the calling script's own prim.
 CHANGES:
-- v1.1 rev 1: Add CONDITIONAL bundle mode. Bundle whose name contains
-  "CONDITIONAL" ships items only if the collar already has them; lets us
-  preserve the wearer's installed-plugin set rather than force-installing
-  every plugin in our bundle. Per-line optional 3rd field carries a gate
-  script name (for paired kmods like kmod_leash gated on plugin_leash) so
-  the kmod ships when the gating plugin is present even if the kmod
-  itself was lost. Protocol extended:
-    QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]
-  Notecard line: SCRIPT|<name>[|<gate>]   (gate only meaningful in CONDITIONAL).
-- v1.1 rev 0: Initial implementation. Single-bundle loop with dataserver
-  line-reading and per-script shim handshake. Returns LM_BUNDLE_DONE to
-  the driver when the notecard is exhausted; driver iterates across
-  multiple bundles.
+- v1.1 rev 2: Drop notecard manifest. Replaced by inventory diff: enumerate
+  this prim's collar-namespace scripts, ask shim for collar's collar-namespace
+  inventory via LIST, ship missing/stale ones, then SWEEP collar of any
+  collar-namespace script not in the keep-manifest. Conditional pairs
+  (kmod_leash, kmod_particles, leash_holder all gated on plugin_leash) are
+  hardcoded here — gated kmods only ship if the gate plugin is present in
+  collar OR being shipped this update. Removed dataserver/notecard reader.
+- v1.1 rev 1: Add CONDITIONAL bundle mode (superseded by rev 2).
+- v1.1 rev 0: Initial implementation.
 --------------------*/
 
 
@@ -41,156 +38,136 @@ integer LM_BUNDLE_DONE  = 91002;
 // instead of trying to run here.
 string UPDATER_MARKER = "COLLAR_UPDATER";
 
+// Conditional pairs: <gated_script>, <gate_plugin>. The gated script ships
+// only if the gate plugin is present in collar OR is itself in this prim's
+// inventory and about to ship. This preserves the wearer's installed-set
+// while still healing paired-kmod gaps when the gating plugin is staged.
+list ConditionalPairs = [
+    "kmod_leash",      "plugin_leash",
+    "kmod_particles",  "plugin_leash",
+    "leash_holder",    "plugin_leash"
+];
+integer PAIR_STRIDE = 2;
+
 
 /* -------------------- STATE -------------------- */
 // Per-bundle context, populated from LM_BUNDLE_BEGIN and cleared on DONE.
-string  BundleName = "";
 key     CollarKey = NULL_KEY;
 integer CollarPin = 0;
 integer SecureChannel = 0;
-string  BundleMode = "";   // REQUIRED or DEPRECATED — derived from name
 
-// Notecard reader.
-integer LineIdx = 0;
-key     LineRequest = NULL_KEY;
+// Collar's current collar-namespace inventory, learned via LIST/INV.
+list    CollarInv = [];
 
-// Current query in flight. While this is non-empty we are awaiting a
-// REPLY|<name>|<verdict> from the shim before reading the next line.
+// Local candidates (this prim's collar-namespace scripts, in iteration order).
+list    Candidates = [];
+integer CandIdx = 0;
+
+// Names the bundler has decided should remain in collar after the update —
+// shipped or acknowledged-current. Sent verbatim to shim as the SWEEP
+// keep-list.
+list    Manifest = [];
+
+// Name of the script currently awaiting a REPLY from the shim.
 string  PendingName = "";
 
-// Optional gate parameter for the in-flight CONDITIONAL query. Cached
-// alongside PendingName because handle_reply needs to know whether a GIVE
-// is even possible (no gate / no local copy ⇒ skip silently).
-string  PendingGate = "";
-
-// Listen on SecureChannel for shim REPLYs.
+// Listen on SecureChannel for shim INV / REPLY / SWEPT messages.
 integer SecureListen = 0;
 
 
 /* -------------------- HELPERS -------------------- */
 
-// Derive mode from bundle name. OpenCollar convention: BUNDLE_##_MODE.
-string derive_mode(string bundle_name) {
-    if (llSubStringIndex(bundle_name, "DEPRECATED") != -1) return "DEPRECATED";
-    if (llSubStringIndex(bundle_name, "CONDITIONAL") != -1) return "CONDITIONAL";
-    return "REQUIRED";
+// Collar-namespace test. Mirrors update_shim's filter so the two ends
+// agree on what "ours to manage" means.
+integer is_collar_script(string name) {
+    if (name == "leash_holder") return TRUE;
+    if (llSubStringIndex(name, "collar_") == 0) return TRUE;
+    if (llSubStringIndex(name, "kmod_") == 0) return TRUE;
+    if (llSubStringIndex(name, "plugin_") == 0) return TRUE;
+    if (llSubStringIndex(name, "control_") == 0) return TRUE;
+    return FALSE;
+}
+
+// Look up the gate plugin for a given script name. Returns "" if the
+// script isn't gated (which is the common case).
+string lookup_gate(string name) {
+    integer i = 0;
+    integer n = llGetListLength(ConditionalPairs);
+    while (i < n) {
+        if (llList2String(ConditionalPairs, i) == name) {
+            return llList2String(ConditionalPairs, i + 1);
+        }
+        i += PAIR_STRIDE;
+    }
+    return "";
+}
+
+// Build the candidates list: every collar-namespace script in this prim,
+// excluding self. update_shim is filtered out by namespace anyway, but
+// guard explicitly in case a packager dropped it here by mistake.
+build_candidates() {
+    Candidates = [];
+    string self = llGetScriptName();
+    integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
+    integer i = 0;
+    while (i < count) {
+        string name = llGetInventoryName(INVENTORY_SCRIPT, i);
+        if (name != self && name != "update_shim" && is_collar_script(name)) {
+            Candidates += [name];
+        }
+        i += 1;
+    }
 }
 
 cleanup_bundle() {
     if (SecureListen) llListenRemove(SecureListen);
     SecureListen = 0;
-    BundleName = "";
     CollarKey = NULL_KEY;
     CollarPin = 0;
     SecureChannel = 0;
-    BundleMode = "";
-    LineIdx = 0;
-    LineRequest = NULL_KEY;
+    CollarInv = [];
+    Candidates = [];
+    CandIdx = 0;
+    Manifest = [];
     PendingName = "";
-    PendingGate = "";
 }
 
 notify_driver_done() {
-    string payload = llList2Json(JSON_OBJECT, ["bundle", BundleName]);
-    llMessageLinked(LINK_SET, LM_BUNDLE_DONE, payload, NULL_KEY);
+    llMessageLinked(LINK_SET, LM_BUNDLE_DONE, "", NULL_KEY);
     cleanup_bundle();
 }
 
-// Read the next line. When the dataserver callback returns EOF, the
-// bundle is complete.
-read_next_line() {
-    LineRequest = llGetNotecardLine(BundleName, LineIdx);
-}
-
-// Send a QUERY to the shim for the named script. Format mirrors
-// update_shim.lsl's protocol:
-//   QUERY|SCRIPT|<name>|<uuid>|<mode>[|<gate>]
-// gate is only emitted for CONDITIONAL mode entries that supplied one.
-send_query(string script_name, string gate) {
-    key uuid = llGetInventoryKey(script_name);
-    PendingName = script_name;
-    PendingGate = gate;
-    string q = "QUERY|SCRIPT|" + script_name
-        + "|" + (string)uuid
-        + "|" + BundleMode;
-    if (gate != "") q += "|" + gate;
-    llWhisper(SecureChannel, q);
-}
-
-
-/* -------------------- LINE PROCESSING -------------------- */
-
-// A notecard line looks like "SCRIPT|<name>" or is blank / a comment.
-// Comments start with '#'. Only SCRIPT type is supported in v1.
-process_line(string line) {
-    line = llStringTrim(line, STRING_TRIM);
-    if (line == "") {
-        LineIdx += 1;
-        read_next_line();
-        return;
-    }
-    if (llGetSubString(line, 0, 0) == "#") {
-        LineIdx += 1;
-        read_next_line();
-        return;
-    }
-
-    list parts = llParseString2List(line, ["|"], []);
-    string type = llList2String(parts, 0);
-    string name = llList2String(parts, 1);
-    if (type != "SCRIPT" || name == "") {
-        // Unknown or malformed — skip.
-        LineIdx += 1;
-        read_next_line();
-        return;
-    }
-
-    // Optional 3rd field: gate script name. Only meaningful in CONDITIONAL
-    // bundles; for paired kmods (e.g. kmod_leash gated on plugin_leash)
-    // shim ships the kmod when the gate is in collar inventory.
-    string gate = "";
-    if (llGetListLength(parts) >= 3) gate = llList2String(parts, 2);
-
-    // For REQUIRED and CONDITIONAL modes the script MUST exist in this prim
-    // (shim may answer GIVE in either case). For DEPRECATED the shim does
-    // all the work and we don't need a local copy.
-    if (BundleMode == "REQUIRED" || BundleMode == "CONDITIONAL") {
-        if (llGetInventoryType(name) != INVENTORY_SCRIPT) {
-            // Missing script in installer inventory — can't deliver. Skip
-            // with a warning on DEBUG_CHANNEL; continue with the next line.
-            llShout(DEBUG_CHANNEL,
-                "updater_bundler: " + BundleName + " references missing script '"
-                + name + "'; skipping.");
-            LineIdx += 1;
-            read_next_line();
+// Advance the candidate cursor, applying gate-checks and sending the next
+// QUERY to the shim. When the cursor exhausts, transition to SWEEP.
+start_next_query() {
+    integer n = llGetListLength(Candidates);
+    while (CandIdx < n) {
+        string name = llList2String(Candidates, CandIdx);
+        string gate = lookup_gate(name);
+        integer gated_out = FALSE;
+        if (gate != "") {
+            integer gate_in_collar = (llListFindList(CollarInv, [gate]) >= 0);
+            integer gate_in_bundler = (llGetInventoryType(gate) == INVENTORY_SCRIPT);
+            if (!gate_in_collar && !gate_in_bundler) gated_out = TRUE;
+        }
+        if (!gated_out) {
+            PendingName = name;
+            key uuid = llGetInventoryKey(name);
+            llWhisper(SecureChannel,
+                "QUERY|" + name + "|" + (string)uuid);
             return;
         }
+        CandIdx += 1;
     }
-
-    send_query(name, gate);
-}
-
-
-/* -------------------- REPLY HANDLING -------------------- */
-
-// Shim REPLY format: REPLY|<name>|<verdict>  where verdict is GIVE|SKIP|OK.
-handle_reply(string verdict) {
-    if (verdict == "GIVE") {
-        // Ship the script. llRemoteLoadScriptPin sleeps 3 s.
-        llRemoteLoadScriptPin(CollarKey, PendingName, CollarPin, TRUE, 0);
-        PendingName = "";
-        PendingGate = "";
-        LineIdx += 1;
-        read_next_line();
+    // Exhausted. If we have a non-empty manifest, request the sweep;
+    // otherwise skip sweep entirely (footgun guard against an empty
+    // installer accidentally nuking the collar).
+    if (llGetListLength(Manifest) == 0) {
+        notify_driver_done();
         return;
     }
-
-    // SKIP (already current, or CONDITIONAL with neither name nor gate
-    // present in collar) or OK (deprecated item removed or absent).
-    PendingName = "";
-    PendingGate = "";
-    LineIdx += 1;
-    read_next_line();
+    llWhisper(SecureChannel,
+        "SWEEP|" + llDumpList2String(Manifest, ","));
 }
 
 
@@ -216,35 +193,25 @@ default {
     link_message(integer sender, integer num, string msg, key id) {
         if (num != LM_BUNDLE_BEGIN) return;
 
-        // Refuse if a bundle is already in progress; driver should serialise.
-        if (BundleName != "") return;
+        // Refuse if a session is already in progress; driver should serialise.
+        if (SecureChannel != 0) return;
 
-        BundleName    = llJsonGetValue(msg, ["bundle"]);
         CollarKey     = (key)llJsonGetValue(msg, ["collar"]);
         CollarPin     = (integer)llJsonGetValue(msg, ["pin"]);
         SecureChannel = (integer)llJsonGetValue(msg, ["channel"]);
-        BundleMode    = derive_mode(BundleName);
 
-        // Sanity — driver shouldn't dispatch a missing notecard, but guard
-        // anyway so we don't loop on a bogus llGetNotecardLine forever.
-        if (llGetInventoryType(BundleName) != INVENTORY_NOTECARD) {
+        build_candidates();
+        if (llGetListLength(Candidates) == 0) {
+            // Empty installer — nothing to ship. Skip the sweep so we
+            // don't accidentally wipe the collar from a misconfigured
+            // bundler prim, and report done.
             notify_driver_done();
             return;
         }
 
         SecureListen = llListen(SecureChannel, "", CollarKey, "");
-        LineIdx = 0;
-        read_next_line();
-    }
-
-    dataserver(key req, string data) {
-        if (req != LineRequest) return;
-        if (data == EOF) {
-            // Bundle complete.
-            notify_driver_done();
-            return;
-        }
-        process_line(data);
+        // Ask the shim what's currently in the collar.
+        llWhisper(SecureChannel, "LIST");
     }
 
     listen(integer channel, string name, key id, string message) {
@@ -253,11 +220,42 @@ default {
 
         list parts = llParseString2List(message, ["|"], []);
         string verb = llList2String(parts, 0);
-        if (verb != "REPLY") return;
-        // REPLY|<name>|<verdict>
-        string replied_name = llList2String(parts, 1);
-        string verdict = llList2String(parts, 2);
-        if (replied_name != PendingName) return;  // stale or crossed message
-        handle_reply(verdict);
+
+        if (verb == "INV") {
+            string csv = "";
+            if (llGetListLength(parts) >= 2) csv = llList2String(parts, 1);
+            CollarInv = [];
+            if (csv != "") CollarInv = llCSV2List(csv);
+            CandIdx = 0;
+            start_next_query();
+            return;
+        }
+
+        if (verb == "REPLY") {
+            // REPLY|<name>|<verdict>
+            if (llGetListLength(parts) < 3) return;
+            string replied_name = llList2String(parts, 1);
+            string verdict = llList2String(parts, 2);
+            if (replied_name != PendingName) return;
+            PendingName = "";
+            if (verdict == "GIVE") {
+                // Ship. llRemoteLoadScriptPin sleeps 3s.
+                llRemoteLoadScriptPin(CollarKey, replied_name, CollarPin, TRUE, 0);
+                Manifest += [replied_name];
+            } else if (verdict == "SKIP") {
+                Manifest += [replied_name];
+            }
+            // Any other verdict: drop silently, do not add to manifest.
+            CandIdx += 1;
+            start_next_query();
+            return;
+        }
+
+        if (verb == "SWEPT") {
+            // Sweep complete. Body (CSV of removed names) is informational
+            // only — we trust the shim. Tell driver we're done.
+            notify_driver_done();
+            return;
+        }
     }
 }

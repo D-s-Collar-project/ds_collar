@@ -1,27 +1,26 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   driver broadcasts remote.updatediscover on kmod_remote's well-known
   external channel, receives the collar's PIN + session via remote.collarready,
-  deposits update_shim via llRemoteLoadScriptPin, then dispatches each
-  bundle notecard to updater_bundler (child prim) until all are applied.
+  deposits update_shim via llRemoteLoadScriptPin, then signals the bundler
+  (child prim) to run a single inventory-driven update pass.
 ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   runs in a child prim and holds the staged collar scripts. Chat protocol
   with collar uses kmod_remote's EXTERNAL_ACL_QUERY_CHAN / REPLY_CHAN; chat
   protocol with shim uses a random per-session secure channel passed as
   llRemoteLoadScriptPin's start_param.
 CHANGES:
+- v1.1 rev 2: Drop multi-bundle iteration. Bundler is invoked once and
+  diffs its inventory against the collar's; no Bundles list, no BundleIdx,
+  no per-bundle notice. Bundle payload to bundler no longer carries a
+  bundle name. Single LM_BUNDLE_DONE ends the update.
 - v1.1 rev 1: Add collar-driven invitation entry. Permanent listener on
   REPLY_CHAN; in Phase=idle, remote.updateravailable triggers a
-  remote.updaterhere reply on QUERY_CHAN and we cache the session/collar/
-  wearer. The collar's confirm path then sends remote.collarready directly
-  to us; on session match we skip the discovery broadcast and go straight
-  to load_shim. Touch-driven path still works.
-- v1.1 rev 0: Initial implementation. Single-bundle dispatch for now; the
-  bundler-side loop supports multiple bundle notecards via link_message
-  iteration but this v1 driver only enumerates one REQUIRED bundle.
+  remote.updaterhere reply on QUERY_CHAN and we cache session/collar/wearer.
+- v1.1 rev 0: Initial implementation.
 --------------------*/
 
 
@@ -32,9 +31,9 @@ integer EXTERNAL_ACL_REPLY_CHAN = -8675310;
 
 
 /* -------------------- LINK-MESSAGE NUMBERS -------------------- */
-// Driver → bundler: begin processing a bundle notecard.
+// Driver → bundler: begin update pass.
 integer LM_BUNDLE_BEGIN = 91001;
-// Bundler → driver: bundle complete (success or exhausted).
+// Bundler → driver: pass complete (or empty).
 integer LM_BUNDLE_DONE  = 91002;
 
 
@@ -44,26 +43,17 @@ integer LM_BUNDLE_DONE  = 91002;
 // off in the installer's inventory until they're shipped to the collar.
 string UPDATER_MARKER = "COLLAR_UPDATER";
 
-// Version this installer ships. Shown to the wearer at completion; may be
-// displayed on floating text in a future revision.
+// Version this installer ships. Shown to the wearer at completion.
 string BUILD_VERSION = "1.1";
 
 // Name of the payload script to deposit into the collar. Must exist in
 // THIS prim's inventory so llRemoteLoadScriptPin can find it.
 string SHIM_SCRIPT = "update_shim";
 
-// Bundle notecards we iterate through. Naming mirrors OpenCollar's
-// BUNDLE_##_MODE pattern; ## gives ordering, MODE is REQUIRED / DEPRECATED.
-// Order in this list is the execution order.
-list Bundles = [
-    "BUNDLE_01_REQUIRED",
-    "BUNDLE_99_DEPRECATED"
-];
-
 // Timeouts.
 float DISCOVERY_TIMEOUT = 10.0;    // wait for remote.collarready
 float SHIM_READY_TIMEOUT = 15.0;   // wait for READY from shim after load
-float BUNDLE_TIMEOUT = 180.0;      // wait for each bundle to complete
+float BUNDLE_TIMEOUT = 240.0;      // wait for the bundler pass to finish
 float INVITE_TIMEOUT = 60.0;       // wait for collar's confirm after we replied to invite
 
 
@@ -74,8 +64,8 @@ float INVITE_TIMEOUT = 60.0;       // wait for collar's confirm after we replied
 //                    confirm (delivered as remote.collarready with PIN)
 //   discovering    — we touched and broadcast remote.updatediscover, waiting for reply
 //   shim_loading   — shim has been deposited, waiting for READY whisper
-//   bundling       — bundler is iterating a notecard
-//   done           — all bundles applied
+//   bundling       — bundler is running its inventory diff
+//   done           — update applied
 string Phase = "idle";
 
 key CollarKey = NULL_KEY;
@@ -85,8 +75,6 @@ integer SecureChannel = 0;
 
 integer ReplyListen = 0;   // permanent listen on EXTERNAL_ACL_REPLY_CHAN
 integer SecureListen = 0;  // listen on SecureChannel
-
-integer BundleIdx = 0;
 
 key Wearer = NULL_KEY;   // who rezzed / touched / was named in invite
 
@@ -125,7 +113,6 @@ cleanup_all() {
     CollarPin = 0;
     Session = "";
     SecureChannel = 0;
-    BundleIdx = 0;
     Wearer = NULL_KEY;
     InviteSession = "";
     InviteCollar = NULL_KEY;
@@ -148,7 +135,6 @@ begin_discovery(key toucher) {
     Wearer = toucher;
     Phase = "discovering";
     Session = new_session();
-    BundleIdx = 0;
 
     // ReplyListen stays open permanently from state_entry; no re-open here.
 
@@ -216,7 +202,6 @@ accept_invitation(string msg) {
     CollarKey = InviteCollar;
     CollarPin = (integer)pin_str;
     Session = InviteSession;
-    BundleIdx = 0;
 
     if (llGetOwnerKey(CollarKey) != llGetOwner()) {
         notice("Collar is owned by a different avatar. Aborting.");
@@ -278,38 +263,28 @@ load_shim() {
 
 /* -------------------- BUNDLE DISPATCH -------------------- */
 
-dispatch_next_bundle() {
-    if (BundleIdx >= llGetListLength(Bundles)) {
-        // All bundles applied. Tell the shim we're done.
-        llWhisper(SecureChannel, "DONE");
-        Phase = "done";
-        llSetTimerEvent(0.0);
-        notice("Update complete. Collar is now at version " + BUILD_VERSION + ".");
-        // Give the shim a moment to self-delete and the collar to stabilise.
-        llSleep(2.0);
-        cleanup_all();
-        return;
-    }
-
-    string bundle_name = llList2String(Bundles, BundleIdx);
-    // Skip missing bundles (DEPRECATED card might not exist on first release).
-    if (llGetInventoryType(bundle_name) != INVENTORY_NOTECARD) {
-        BundleIdx += 1;
-        dispatch_next_bundle();
-        return;
-    }
-
+dispatch_bundle() {
     Phase = "bundling";
     llSetTimerEvent(BUNDLE_TIMEOUT);
 
     string payload = llList2Json(JSON_OBJECT, [
-        "bundle",     bundle_name,
-        "collar",     (string)CollarKey,
-        "pin",        (string)CollarPin,
-        "channel",    (string)SecureChannel
+        "collar",  (string)CollarKey,
+        "pin",     (string)CollarPin,
+        "channel", (string)SecureChannel
     ]);
     llMessageLinked(LINK_SET, LM_BUNDLE_BEGIN, payload, NULL_KEY);
-    notice("Applying " + bundle_name + "...");
+    notice("Applying update...");
+}
+
+finish_update() {
+    // Tell the shim we're done. Shim self-deletes and disarms the PIN.
+    llWhisper(SecureChannel, "DONE");
+    Phase = "done";
+    llSetTimerEvent(0.0);
+    notice("Update complete. Collar is now at version " + BUILD_VERSION + ".");
+    // Give the shim a moment to self-delete and the collar to stabilise.
+    llSleep(2.0);
+    cleanup_all();
 }
 
 
@@ -378,9 +353,8 @@ default {
             if (id != CollarKey) return;
             if (message == "READY") {
                 if (Phase != "shim_loading") return;
-                // Shim is listening. Start the first bundle.
-                BundleIdx = 0;
-                dispatch_next_bundle();
+                // Shim is listening. Hand off to the bundler.
+                dispatch_bundle();
             }
             return;
         }
@@ -389,8 +363,7 @@ default {
     link_message(integer sender, integer num, string msg, key id) {
         if (num != LM_BUNDLE_DONE) return;
         if (Phase != "bundling") return;
-        BundleIdx += 1;
-        dispatch_next_bundle();
+        finish_update();
     }
 
     timer() {
@@ -413,7 +386,7 @@ default {
             return;
         }
         if (Phase == "bundling") {
-            notice("Update stalled during bundle dispatch. Collar is in an indeterminate state; reattach the installer to retry.");
+            notice("Update stalled. Collar is in an indeterminate state; reattach the installer to retry.");
             cleanup_all();
             return;
         }
