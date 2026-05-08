@@ -1,10 +1,14 @@
 /*--------------------
 MODULE: kmod_leash.lsl
 VERSION: 1.10
-REVISION: 20
+REVISION: 21
 PURPOSE: Leashing engine providing leash services to plugins
 ARCHITECTURE: Shared infra + per-mode sections (avatar / coffle / post)
 CHANGES:
+- v1.1 rev 21: Listen for kernel.reset.factory / kernel.reset.soft on
+  KERNEL_LIFECYCLE and llResetScript on receipt — flushes in-memory
+  leash/coffle state on the kernel's owner-change wipe (collar_kernel
+  rev 6). Adds the KERNEL_LIFECYCLE bus constant.
 - v1.1 rev 20: Permission request now combined as
   PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA. CONTROL_CAMERA
   is preemptive (no current consumer; held for future leash-camera work).
@@ -134,6 +138,7 @@ CHANGES:
    ------------------------------------------------------------ */
 
 /* -------------------- BUS CHANNELS -------------------- */
+integer KERNEL_LIFECYCLE = 500;
 integer AUTH_BUS = 700;
 integer SETTINGS_BUS = 800;
 integer UI_BUS = 900;
@@ -1195,6 +1200,15 @@ default
     link_message(integer sender, integer num, string msg, key id) {
         string msg_type = llJsonGetValue(msg, ["type"]);
         if (msg_type == JSON_INVALID) return;
+
+        if (num == KERNEL_LIFECYCLE) {
+            // Owner-change wipe / external soft reset from collar_kernel.
+            // Just llResetScript — clears in-memory leash/coffle state.
+            if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
+                llResetScript();
+            }
+            return;
+        }
 
         if (num == UI_BUS) {
 
