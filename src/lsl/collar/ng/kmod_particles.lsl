@@ -1,10 +1,13 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 10: Hoist chain particle knobs into top-level constants
+  (CHAIN_BURST_RATE, CHAIN_MAX_AGE, CHAIN_ACCEL, etc.). Soften
+  gravity from -3.95→-2.0 to reduce ribbon stretching.
 - v1.1 rev 9: Drop PSYS_PART_FOLLOW_VELOCITY_MASK from chain flags. Per
   the LSL wiki it has no effect on ribbon-mode particles, but a particle
   that occasionally escapes ribbon rendering would fall back to
@@ -49,12 +52,24 @@ integer UI_BUS = 900;
 /* -------------------- CONSTANTS -------------------- */
 float PARTICLE_UPDATE_RATE = 0.25;  // Update every 0.5 seconds
 
-// Default chain texture
-string CHAIN_TEXTURE = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
-
 // Lockmeister protocol
 integer LEASH_CHAN_LM = -8888;
 integer LM_PING_INTERVAL = 8;  // Ping every 8 seconds
+
+/* -------------------- CHAIN PARTICLE TUNING -------------------- */
+// All visual knobs for the leash chain live here. Edit these without
+// touching render_chain_particles.
+string   CHAIN_TEXTURE     = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
+float    CHAIN_BURST_RATE  = 0.015;                 // seconds between bursts
+integer  CHAIN_PART_COUNT  = 1;                     // particles per burst
+float    CHAIN_MAX_AGE     = 1.125;                 // particle lifetime (s)
+vector   CHAIN_START_SCALE = <0.05, 0.05, 0.05>;
+vector   CHAIN_END_SCALE   = <0.05, 0.05, 0.05>;
+vector   CHAIN_START_COLOR = <1.0, 1.0, 1.0>;
+vector   CHAIN_END_COLOR   = <1.0, 1.0, 1.0>;
+float    CHAIN_START_ALPHA = 1.0;
+float    CHAIN_END_ALPHA   = 1.0;
+vector   CHAIN_ACCEL       = <0.0, 0.0, -2.0>;      // gravity on each particle
 
 /* -------------------- STATE -------------------- */
 integer ParticlesActive = FALSE;
@@ -254,16 +269,16 @@ render_chain_particles(key target) {
     llLinkParticleSystem(LeashpointLink, [
         PSYS_SRC_PATTERN, PSYS_SRC_PATTERN_DROP,
         PSYS_SRC_TEXTURE, CHAIN_TEXTURE,
-        PSYS_SRC_BURST_RATE, 0.015,
-        PSYS_SRC_BURST_PART_COUNT, 1,
-        PSYS_PART_START_ALPHA, 1.0,
-        PSYS_PART_END_ALPHA, 1.0,
-        PSYS_PART_MAX_AGE, 1.125,
-        PSYS_PART_START_SCALE, <0.05, 0.05, 0.05>,
-        PSYS_PART_END_SCALE, <0.05, 0.05, 0.05>,
-        PSYS_PART_START_COLOR, <1, 1, 1>,
-        PSYS_PART_END_COLOR, <1, 1, 1>,
-        PSYS_SRC_ACCEL, <0.00, 0.00, -3.95>,
+        PSYS_SRC_BURST_RATE, CHAIN_BURST_RATE,
+        PSYS_SRC_BURST_PART_COUNT, CHAIN_PART_COUNT,
+        PSYS_PART_START_ALPHA, CHAIN_START_ALPHA,
+        PSYS_PART_END_ALPHA, CHAIN_END_ALPHA,
+        PSYS_PART_MAX_AGE, CHAIN_MAX_AGE,
+        PSYS_PART_START_SCALE, CHAIN_START_SCALE,
+        PSYS_PART_END_SCALE, CHAIN_END_SCALE,
+        PSYS_PART_START_COLOR, CHAIN_START_COLOR,
+        PSYS_PART_END_COLOR, CHAIN_END_COLOR,
+        PSYS_SRC_ACCEL, CHAIN_ACCEL,
         PSYS_PART_FLAGS,
             PSYS_PART_INTERP_COLOR_MASK |
             PSYS_PART_FOLLOW_SRC_MASK |
