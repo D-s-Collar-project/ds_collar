@@ -1,10 +1,16 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 9: Drop PSYS_PART_FOLLOW_VELOCITY_MASK from chain flags. Per
+  the LSL wiki it has no effect on ribbon-mode particles, but a particle
+  that occasionally escapes ribbon rendering would fall back to
+  FOLLOW_VELOCITY orientation — drawn as an elongated streak along its
+  velocity. That matches the "stray straight particle" symptom seen
+  alongside the ribbon. Removing the flag eliminates the fallback path.
 - v1.1 rev 8: Retune chain particles — burst rate 0.05→0.015, scale
   0.06→0.05, max_age 1.5→1.125, accel z -1.75→-3.95 (denser, snappier
   fall with shorter trail).
@@ -262,7 +268,6 @@ render_chain_particles(key target) {
             PSYS_PART_INTERP_COLOR_MASK |
             PSYS_PART_FOLLOW_SRC_MASK |
             PSYS_PART_TARGET_POS_MASK |
-            PSYS_PART_FOLLOW_VELOCITY_MASK |
             PSYS_PART_RIBBON_MASK,
         PSYS_SRC_TARGET_KEY, target
     ]);

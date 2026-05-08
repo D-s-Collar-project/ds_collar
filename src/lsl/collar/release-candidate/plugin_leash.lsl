@@ -1,10 +1,14 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: User interface and configuration for the leashing system
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 15: Post sensor mask drops ACTIVE (was PASSIVE|ACTIVE|SCRIPTED).
+  ACTIVE matches avatars in llSensor, so the post picker was surfacing
+  bystanders alongside hitching posts. Posts are stationary, so
+  PASSIVE|SCRIPTED is sufficient.
 - v1.1 rev 14: Pass/Offer selection now matches the raw clicked button
   label (the listen message) against SensorCandidates instead of parsing
   "sel:<name>" out of the routing context. kmod_dialogs' storage_map
@@ -420,8 +424,10 @@ showPostMenu() {
     MenuContext = "post";
     SensorPage = 0;
     SensorCandidates = [];  // Clear previous results
-    // Scan for all objects (posts) within range
-    llSensor("", NULL_KEY, PASSIVE | ACTIVE | SCRIPTED, 96.0, PI);
+    // Scan for stationary objects (posts) within range. ACTIVE is
+    // omitted because llSensor returns avatars on the ACTIVE bit, and
+    // posts are by definition non-physical / non-moving.
+    llSensor("", NULL_KEY, PASSIVE | SCRIPTED, 96.0, PI);
 }
 
 // Display paginated object menu from existing SensorCandidates

@@ -1,12 +1,18 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 22
+REVISION: 23
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
              no text input required. Only the locked-folder list is persisted.
+             Folder locks (@detachallthis:<folder>=n/y) and force-actions are
+             routed through kmod_rlv on UI_BUS so refcount coordinates with
+             any relay-source that asks for the same folder lock.
 CHANGES:
+- v1.1 rev 23: Migrate RLV emission to kmod_rlv. Folder locks use
+  rlv.apply / rlv.release with consumer="folders"; attach/detach/
+  getinvworn use rlv.force passthrough. No direct llOwnerSay of @-commands.
 - v1.1 rev 22: Drop "[Folders]" source prefix from the two user-facing
   llRegionSayTo notices, matching the project convention applied to
   plugin_relay / plugin_sos in earlier revs.
@@ -242,18 +248,20 @@ apply_settings_sync() {
     while (i < len) {
         string folder_name = llList2String(LockedNames, i);
         if (llListFindList(new_locked, [folder_name]) == -1) {
-            llOwnerSay("@detachallthis:" + folder_name + "=y");
+            unlock_folder(folder_name);
         }
         i += 1;
     }
 
     LockedNames = new_locked;
 
-    // Reapply all current locks
+    // Reapply all current locks. kmod_rlv's claim_add is idempotent so
+    // re-claiming an already-claimed behav is a no-op; this is safe to
+    // call on every settings.sync to (re)establish state after a reset.
     i = 0;
     len = llGetListLength(LockedNames);
     while (i < len) {
-        llOwnerSay("@detachallthis:" + llList2String(LockedNames, i) + "=n");
+        lock_folder(llList2String(LockedNames, i));
         i += 1;
     }
 }
@@ -270,20 +278,40 @@ persist_locked() {
 
 /* -------------------- RLV FOLDER COMMANDS -------------------- */
 
+// Common consumer-id under kmod_rlv's Claims; relay sources can ask for
+// the same @detachallthis:<folder> behav and the refcount engine
+// coordinates without either side seeing the other's apply/release.
+string RLV_CONSUMER = "folders";
+
+rlv_op(string op, string behav) {
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",     op,
+        "consumer", RLV_CONSUMER,
+        "behav",    behav
+    ]), NULL_KEY);
+}
+
+rlv_force(string command) {
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",    "rlv.force",
+        "command", command
+    ]), NULL_KEY);
+}
+
 attach_folder(string folder_name) {
-    llOwnerSay("@attachall:" + folder_name + "=force");
+    rlv_force("@attachall:" + folder_name + "=force");
 }
 
 detach_folder(string folder_name) {
-    llOwnerSay("@detachall:" + folder_name + "=force");
+    rlv_force("@detachall:" + folder_name + "=force");
 }
 
 lock_folder(string folder_name) {
-    llOwnerSay("@detachallthis:" + folder_name + "=n");
+    rlv_op("rlv.apply", "detachallthis:" + folder_name);
 }
 
 unlock_folder(string folder_name) {
-    llOwnerSay("@detachallthis:" + folder_name + "=y");
+    rlv_op("rlv.release", "detachallthis:" + folder_name);
 }
 
 /* -------------------- UI -------------------- */
@@ -325,7 +353,7 @@ scan_current_path() {
     MenuContext       = "scanning";
     stop_rlv_listen();
     RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
-    llOwnerSay("@getinvworn:" + CurrentPath + "=" + (string)RLV_CHAN);
+    rlv_force("@getinvworn:" + CurrentPath + "=" + (string)RLV_CHAN);
     llSetTimerEvent(RLV_TIMEOUT);
     string where = "#RLV";
     if (CurrentPath != "") where = "#RLV/" + CurrentPath;

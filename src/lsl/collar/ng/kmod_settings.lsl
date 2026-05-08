@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 11
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -11,6 +11,12 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               Trustees and blacklist always use CSVs. Display names are
               resolved asynchronously via llRequestDisplayName.
 CHANGES:
+- v1.1 rev 11: Listen for kernel.reset.factory / kernel.reset.soft on
+  KERNEL_LIFECYCLE and llResetScript on receipt. Notecard NOT touched
+  in this path — that's exclusive to handle_runaway/factory_reset.
+  Lets the kernel's owner-change wipe (collar_kernel rev 6) flush
+  kmod_settings's stale in-memory state cleanly so the next state_entry
+  re-parses the notecard against fresh LSD.
 - v1.1 rev 10: Notecard parsing gated by settings.bootstrapped sentinel —
   state_entry no longer re-parses card after first bootstrap. New
   settings.reset.config message snapshots owner+lock keys, llLinksetDataReset,
@@ -904,9 +910,21 @@ default
     }
 
     link_message(integer sender, integer num, string msg, key id) {
-        if (num != SETTINGS_BUS) return;
         string msg_type = get_msg_type(msg);
         if (msg_type == "") return;
+
+        if (num == KERNEL_LIFECYCLE) {
+            // External kernel-driven reset (e.g., owner-change wipe in
+            // collar_kernel). Just llResetScript — do NOT remove the
+            // notecard. Notecard removal stays exclusive to the wearer
+            // Runaway path (handle_runaway → factory_reset).
+            if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
+                llResetScript();
+            }
+            return;
+        }
+
+        if (num != SETTINGS_BUS) return;
 
         if      (msg_type == "settings.get")            handle_settings_get();
         else if (msg_type == "settings.set")            handle_set(msg);

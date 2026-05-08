@@ -1,10 +1,19 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 9
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 9: Drop PSYS_PART_FOLLOW_VELOCITY_MASK from chain flags. Per
+  the LSL wiki it has no effect on ribbon-mode particles, but a particle
+  that occasionally escapes ribbon rendering would fall back to
+  FOLLOW_VELOCITY orientation — drawn as an elongated streak along its
+  velocity. That matches the "stray straight particle" symptom seen
+  alongside the ribbon. Removing the flag eliminates the fallback path.
+- v1.1 rev 8: Retune chain particles — burst rate 0.05→0.015, scale
+  0.06→0.05, max_age 1.5→1.125, accel z -1.75→-3.95 (denser, snappier
+  fall with shorter trail).
 - v1.1 rev 7: Reviewed burst and scale for particles.
 - v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
@@ -245,21 +254,20 @@ render_chain_particles(key target) {
     llLinkParticleSystem(LeashpointLink, [
         PSYS_SRC_PATTERN, PSYS_SRC_PATTERN_DROP,
         PSYS_SRC_TEXTURE, CHAIN_TEXTURE,
-        PSYS_SRC_BURST_RATE, 0.05,
+        PSYS_SRC_BURST_RATE, 0.015,
         PSYS_SRC_BURST_PART_COUNT, 1,
         PSYS_PART_START_ALPHA, 1.0,
         PSYS_PART_END_ALPHA, 1.0,
-        PSYS_PART_MAX_AGE, 1.5,
-        PSYS_PART_START_SCALE, <0.06, 0.06, 0.06>,
-        PSYS_PART_END_SCALE, <0.06, 0.06, 0.06>,
+        PSYS_PART_MAX_AGE, 1.125,
+        PSYS_PART_START_SCALE, <0.05, 0.05, 0.05>,
+        PSYS_PART_END_SCALE, <0.05, 0.05, 0.05>,
         PSYS_PART_START_COLOR, <1, 1, 1>,
         PSYS_PART_END_COLOR, <1, 1, 1>,
-        PSYS_SRC_ACCEL, <0.00, 0.00, -1.75>,
-        PSYS_PART_FLAGS, 
+        PSYS_SRC_ACCEL, <0.00, 0.00, -3.95>,
+        PSYS_PART_FLAGS,
             PSYS_PART_INTERP_COLOR_MASK |
             PSYS_PART_FOLLOW_SRC_MASK |
             PSYS_PART_TARGET_POS_MASK |
-            PSYS_PART_FOLLOW_VELOCITY_MASK |
             PSYS_PART_RIBBON_MASK,
         PSYS_SRC_TARGET_KEY, target
     ]);

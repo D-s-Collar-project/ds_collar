@@ -1,10 +1,19 @@
 /*--------------------
 MODULE: collar_kernel.lsl
 VERSION: 1.10
-REVISION: 5
+REVISION: 6
 PURPOSE: Plugin registry, lifecycle management, heartbeat monitoring
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 6: Owner-change LSD wipe safeguard. On any detected owner
+  change (runtime CHANGED_OWNER OR cold-start mismatch between the
+  persisted safeguard.last_owner key and llGetOwner()), kernel calls
+  llLinksetDataReset(), re-writes safeguard.last_owner with the new
+  owner, broadcasts kernel.reset.factory so plugins clear their
+  in-memory state, then resets itself. Ensures customers get a clean
+  slate when the collar is transferred from creator to customer
+  through inventory (the path that doesn't fire CHANGED_OWNER on a
+  running script).
 - v1.1 rev 5: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
@@ -415,16 +424,35 @@ broadcast_ping() {
 
 /* -------------------- OWNER CHANGE DETECTION -------------------- */
 
+// Sentinel LSD key carrying the owner UUID that owned the collar at the
+// time of the last successful state_entry. Compared on cold start to
+// detect an inventory-transfer ownership change (CHANGED_OWNER does not
+// fire when the owner changes while the script is not running). Written
+// fresh after every wipe so the next cold start sees a matching value.
+string KEY_LAST_OWNER = "safeguard.last_owner";
+
+// Wipe all LSD, broadcast a factory reset so plugins clear in-memory
+// state, and reset the kernel itself. Called from CHANGED_OWNER and from
+// state_entry's cold-start owner mismatch check. Does not return.
+do_owner_change_wipe() {
+    llLinksetDataReset();
+    llLinksetDataWrite(KEY_LAST_OWNER, (string)llGetOwner());
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type", "kernel.reset.factory"
+    ]), NULL_KEY);
+    llResetScript();
+}
+
 integer check_owner_changed() {
     key current_owner = llGetOwner();
     if (current_owner == NULL_KEY) return FALSE;
-    
+
     if (LastOwner != NULL_KEY && current_owner != LastOwner) {
         LastOwner = current_owner;
-        llResetScript();
-        return TRUE;
+        do_owner_change_wipe();
+        return TRUE;  // unreachable; do_owner_change_wipe resets
     }
-    
+
     LastOwner = current_owner;
     return FALSE;
 }
@@ -471,6 +499,20 @@ default
         if (llGetObjectDesc() == "COLLAR_UPDATER") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
+        }
+
+        // Cold-start owner-change detection. CHANGED_OWNER doesn't fire
+        // when ownership transfers while the script isn't running (the
+        // typical creator-to-customer inventory transfer path), so we
+        // compare against a persistent LSD sentinel. First-ever run on
+        // a fresh collar simply records the current owner.
+        string saved = llLinksetDataRead(KEY_LAST_OWNER);
+        string current = (string)llGetOwner();
+        if (saved == "") {
+            llLinksetDataWrite(KEY_LAST_OWNER, current);
+        } else if (saved != current) {
+            do_owner_change_wipe();
+            return;  // unreachable; reset above
         }
 
         LastOwner = llGetOwner();

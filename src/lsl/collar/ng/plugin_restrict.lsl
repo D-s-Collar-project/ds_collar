@@ -1,10 +1,21 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 11
 PURPOSE: Manage RLV restriction toggles grouped by functional category
-ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
+              RLV emission routed through kmod_rlv on UI_BUS so refcount
+              coordinates with relay sources that may request the same
+              behav.
 CHANGES:
+- v1.1 rev 11: Migrate RLV emission to kmod_rlv (rlv.apply / rlv.release /
+  rlv.clear / rlv.force on UI_BUS, consumer="restrict"). Fixes a
+  long-standing bug: the apply path emitted "@<behav>=y" (canonical
+  RLV release form) instead of "=n" — restrictions in restrict.list
+  were tracked in LSD and shown as [X] in the UI but never actually
+  applied to the viewer. Wearers with non-empty restrict.list will now
+  see their saved restrictions take effect on next state_entry. Force
+  sit/unsit unchanged in semantics; routed via rlv.force.
 - v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -208,6 +219,35 @@ persist_restrictions() {
     ]), NULL_KEY);
 }
 
+/* -------------------- KMOD_RLV PROXY -------------------- */
+
+string RLV_CONSUMER = "restrict";
+
+// Restrictions list stores commands with the leading "@" (e.g., "@shownames");
+// kmod_rlv expects the bare behav string. Strip the prefix on emission.
+rlv_op(string op, string restr_cmd) {
+    string behav = llGetSubString(restr_cmd, 1, -1);
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",     op,
+        "consumer", RLV_CONSUMER,
+        "behav",    behav
+    ]), NULL_KEY);
+}
+
+rlv_clear_all() {
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",     "rlv.clear",
+        "consumer", RLV_CONSUMER
+    ]), NULL_KEY);
+}
+
+rlv_force(string command) {
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",    "rlv.force",
+        "command", command
+    ]), NULL_KEY);
+}
+
 apply_settings_sync() {
     string csv = llLinksetDataRead(KEY_RESTRICTIONS);
     list new_list = [];
@@ -218,21 +258,24 @@ apply_settings_sync() {
     // Compare with current state; if unchanged, nothing to do
     if (llDumpList2String(new_list, ",") == llDumpList2String(Restrictions, ",")) return;
 
-    // Clear all current restrictions
+    // Release any current restriction not in the new list
     integer i = 0;
     integer count = llGetListLength(Restrictions);
     while (i < count) {
         string restr_cmd = llList2String(Restrictions, i);
-        llOwnerSay("@clear=" + llGetSubString(restr_cmd, 1, -1));
+        if (llListFindList(new_list, [restr_cmd]) == -1) {
+            rlv_op("rlv.release", restr_cmd);
+        }
         i = i + 1;
     }
 
-    // Apply new restrictions
+    // Apply the new list. claim_add is idempotent in kmod_rlv so applying
+    // an already-claimed behav is a no-op; safe to call on every sync.
     Restrictions = new_list;
     i = 0;
     count = llGetListLength(Restrictions);
     while (i < count) {
-        llOwnerSay(llList2String(Restrictions, i) + "=y");
+        rlv_op("rlv.apply", llList2String(Restrictions, i));
         i = i + 1;
     }
 }
@@ -249,7 +292,7 @@ toggle_restriction(string restr_cmd) {
     if (idx != -1) {
         // Remove restriction
         Restrictions = llDeleteSubList(Restrictions, idx, idx);
-        llOwnerSay("@clear=" + llGetSubString(restr_cmd, 1, -1));
+        rlv_op("rlv.release", restr_cmd);
     }
     else {
         // Add restriction
@@ -259,21 +302,14 @@ toggle_restriction(string restr_cmd) {
         }
 
         Restrictions += [restr_cmd];
-        llOwnerSay(restr_cmd + "=y");
+        rlv_op("rlv.apply", restr_cmd);
     }
 
     persist_restrictions();
 }
 
 remove_all_restrictions() {
-    integer i = 0;
-    integer count = llGetListLength(Restrictions);
-    while (i < count) {
-        string restr_cmd = llList2String(Restrictions, i);
-        llOwnerSay("@clear=" + llGetSubString(restr_cmd, 1, -1));
-        i = i + 1;
-    }
-
+    rlv_clear_all();
     Restrictions = [];
     persist_restrictions();
 }
@@ -368,12 +404,12 @@ display_sit_targets() {
 force_sit_on(key target) {
     if (target == NULL_KEY) return;
 
-    llOwnerSay("@sit:" + (string)target + "=force");
+    rlv_force("@sit:" + (string)target + "=force");
     llRegionSayTo(CurrentUser, 0, "Forcing sit...");
 }
 
 force_unsit() {
-    llOwnerSay("@unsit=force");
+    rlv_force("@unsit=force");
     llRegionSayTo(CurrentUser, 0, "Forcing unsit...");
 }
 

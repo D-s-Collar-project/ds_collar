@@ -1,10 +1,13 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Menu rendering and visual presentation service
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 4: Listen for kernel.reset.factory / kernel.reset.soft on
+  KERNEL_LIFECYCLE and llResetScript on receipt — flushes in-memory
+  state on the kernel's owner-change wipe (collar_kernel rev 6).
 - v1.1 rev 3: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
@@ -17,6 +20,7 @@ CHANGES:
 
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
+integer KERNEL_LIFECYCLE = 500;
 integer UI_BUS = 900;
 integer DIALOG_BUS = 950;
 
@@ -177,6 +181,14 @@ default
     link_message(integer sender_num, integer num, string msg, key id) {
         string msg_type = get_msg_type(msg);
         if (msg_type == "") return;
+
+        if (num == KERNEL_LIFECYCLE) {
+            // Owner-change wipe / external soft reset from collar_kernel.
+            if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
+                llResetScript();
+            }
+            return;
+        }
 
         if (num == UI_BUS) {
             if (msg_type == "ui.menu.render") {

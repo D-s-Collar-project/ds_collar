@@ -1,10 +1,23 @@
 /*--------------------
 MODULE: kmod_leash.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 21
 PURPOSE: Leashing engine providing leash services to plugins
 ARCHITECTURE: Shared infra + per-mode sections (avatar / coffle / post)
 CHANGES:
+- v1.1 rev 21: Listen for kernel.reset.factory / kernel.reset.soft on
+  KERNEL_LIFECYCLE and llResetScript on receipt — flushes in-memory
+  leash/coffle state on the kernel's owner-change wipe (collar_kernel
+  rev 6). Adds the KERNEL_LIFECYCLE bus constant.
+- v1.1 rev 20: Permission request now combined as
+  PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA. CONTROL_CAMERA
+  is preemptive (no current consumer; held for future leash-camera work).
+  run_time_permissions now actually calls llTakeControls — without it,
+  every script in the collar prim halts on no-script parcels because
+  the takecontrols-sticky exemption never fires. We hold a single
+  unobtrusive control (CONTROL_ML_LBUTTON, accept=FALSE pass_on=TRUE)
+  so the wearer's input is unaffected; the exemption applies to every
+  script in the same prim.
 - v1.1 rev 19: Body reorganized into shared infrastructure followed by
   three per-mode sections (avatar / coffle / post) and a settings
   section. Behavior unchanged. setLengthInternal now reuses
@@ -125,6 +138,7 @@ CHANGES:
    ------------------------------------------------------------ */
 
 /* -------------------- BUS CHANNELS -------------------- */
+integer KERNEL_LIFECYCLE = 500;
 integer AUTH_BUS = 700;
 integer SETTINGS_BUS = 800;
 integer UI_BUS = 900;
@@ -805,7 +819,7 @@ startFollow() {
     }
     // Post mode: no RLV follow (we enforce distance manually)
 
-    llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS);
+    llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA);
 }
 
 stopFollow() {
@@ -1160,7 +1174,7 @@ default
 
         applySettingsSync();
         llSetTimerEvent(FOLLOW_TICK);
-        llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS);
+        llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA);
     }
 
     on_rez(integer start_param) {
@@ -1174,12 +1188,27 @@ default
     run_time_permissions(integer perm) {
         if (perm & PERMISSION_TAKE_CONTROLS) {
             ControlsOk = TRUE;
+            // Hold a single unobtrusive control so this prim's scripts
+            // (the entire collar) keep running on no-script parcels.
+            // accept=FALSE pass_on=TRUE means the wearer's input is
+            // unaffected; we just register interest so the takecontrols-
+            // sticky exemption fires for every script in this prim.
+            llTakeControls(CONTROL_ML_LBUTTON, FALSE, TRUE);
         }
     }
 
     link_message(integer sender, integer num, string msg, key id) {
         string msg_type = llJsonGetValue(msg, ["type"]);
         if (msg_type == JSON_INVALID) return;
+
+        if (num == KERNEL_LIFECYCLE) {
+            // Owner-change wipe / external soft reset from collar_kernel.
+            // Just llResetScript — clears in-memory leash/coffle state.
+            if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
+                llResetScript();
+            }
+            return;
+        }
 
         if (num == UI_BUS) {
 
