@@ -1,10 +1,12 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 16: Swap CHAIN_*_SCALE X/Y. FOLLOW_VELOCITY aligns the
+  particle's Y axis to motion, so link length goes on Y not X.
 - v1.1 rev 15: Switch chain from ribbon mode to a regular particle
   stream. Drops PSYS_PART_RIBBON_MASK, adds PSYS_PART_FOLLOW_VELOCITY_MASK
   so each chain-link sprite orients along its motion vector. Eliminates
@@ -109,8 +111,8 @@ string   CHAIN_TEXTURE     = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
 float    CHAIN_BURST_RATE  = 0.02;                  // ~50 sprites/sec
 integer  CHAIN_PART_COUNT  = 1;
 float    CHAIN_MAX_AGE     = 2.0;                   // travel time src->target
-vector   CHAIN_START_SCALE = <0.10, 0.04, 0.0>;     // length oriented by FOLLOW_VELOCITY
-vector   CHAIN_END_SCALE   = <0.10, 0.04, 0.0>;
+vector   CHAIN_START_SCALE = <0.04, 0.10, 0.0>;     // Y aligns to motion (FOLLOW_VELOCITY)
+vector   CHAIN_END_SCALE   = <0.04, 0.10, 0.0>;
 vector   CHAIN_START_COLOR = <1.0, 1.0, 1.0>;
 vector   CHAIN_END_COLOR   = <1.0, 1.0, 1.0>;
 float    CHAIN_START_ALPHA = 1.0;
