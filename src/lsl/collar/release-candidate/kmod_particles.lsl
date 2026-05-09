@@ -1,10 +1,28 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 15
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 15: Switch chain from ribbon mode to a regular particle
+  stream. Drops PSYS_PART_RIBBON_MASK, adds PSYS_PART_FOLLOW_VELOCITY_MASK
+  so each chain-link sprite orients along its motion vector. Eliminates
+  the ribbon-specific artifacts that drove revs 9–14: target-movement
+  segment-stretching, fresh-ribbon source→target snap, source-velocity
+  trail spacing. Each particle now course-corrects independently under
+  TARGET_POS instead of as a connected strip. Tradeoff: chain reads as
+  a stream of discrete link sprites rather than a continuous textured
+  ribbon. Tuning: BURST_RATE 0.0→0.02, MAX_AGE 3.0→2.0, SCALE
+  rectangular for FOLLOW_VELOCITY orientation, ACCEL -1.0→-1.5.
+- v1.1 rev 14: Restore PSYS_PART_FOLLOW_SRC_MASK — rev 13 removal was
+  wrong direction. Without FOLLOW_SRC, alive particles stay in
+  worldspace where they were emitted, so a moving wearer produces a
+  trail of emission points near the leashpoint that ribbon-stretches
+  between them (spacing = wearer-velocity × emission-interval). With
+  FOLLOW_SRC restored, alive particles translate with source as it
+  moves; chain shape is computed in source's reference frame, no
+  trail artifact. Matches the slua reference (no complaints there).
 - v1.1 rev 13: Drop PSYS_PART_FOLLOW_SRC_MASK from chain flags. Strays
   correlated with wearer movement: FOLLOW_SRC translates every alive
   particle by source_delta when the source moves, so the oldest
@@ -81,22 +99,23 @@ integer LM_PING_INTERVAL = 8;  // Ping every 8 seconds
 
 /* -------------------- CHAIN PARTICLE TUNING -------------------- */
 // All visual knobs for the leash chain live here. Edit these without
-// touching render_chain_particles. Defaults follow the LSL wiki's
-// catenary recipe: TARGET_POS makes each particle arrive at the target
-// by end-of-life, so MAX_AGE is effectively the travel time. Gentle
-// ACCEL creates the sag without overwhelming the TARGET_POS correction
-// (strong gravity here is what produces stretched/erratic ribbons).
+// touching render_chain_particles. Uses a regular (non-ribbon) particle
+// stream: each particle is an independent chain-link sprite oriented
+// along its motion vector by FOLLOW_VELOCITY. TARGET_POS pulls each
+// particle toward the holder over its lifetime; ACCEL adds gravity for
+// catenary sag. No ribbon-mode connectivity, so target movement makes
+// each particle individually course-correct — no segment-stretch snap.
 string   CHAIN_TEXTURE     = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
-float    CHAIN_BURST_RATE  = 0.0;                   // 0 = max sim rate
+float    CHAIN_BURST_RATE  = 0.02;                  // ~50 sprites/sec
 integer  CHAIN_PART_COUNT  = 1;
-float    CHAIN_MAX_AGE     = 3.0;                   // travel time src->target
-vector   CHAIN_START_SCALE = <0.05, 0.05, 0.0>;
-vector   CHAIN_END_SCALE   = <0.05, 0.05, 0.0>;
+float    CHAIN_MAX_AGE     = 2.0;                   // travel time src->target
+vector   CHAIN_START_SCALE = <0.10, 0.04, 0.0>;     // length oriented by FOLLOW_VELOCITY
+vector   CHAIN_END_SCALE   = <0.10, 0.04, 0.0>;
 vector   CHAIN_START_COLOR = <1.0, 1.0, 1.0>;
 vector   CHAIN_END_COLOR   = <1.0, 1.0, 1.0>;
 float    CHAIN_START_ALPHA = 1.0;
 float    CHAIN_END_ALPHA   = 1.0;
-vector   CHAIN_ACCEL       = <0.0, 0.0, -1.0>;      // gentle catenary sag
+vector   CHAIN_ACCEL       = <0.0, 0.0, -1.5>;      // gentle catenary sag
 
 /* -------------------- STATE -------------------- */
 integer ParticlesActive = FALSE;
@@ -308,8 +327,9 @@ render_chain_particles(key target) {
         PSYS_SRC_ACCEL, CHAIN_ACCEL,
         PSYS_PART_FLAGS,
             PSYS_PART_INTERP_COLOR_MASK |
-            PSYS_PART_TARGET_POS_MASK |
-            PSYS_PART_RIBBON_MASK,
+            PSYS_PART_FOLLOW_SRC_MASK |
+            PSYS_PART_FOLLOW_VELOCITY_MASK |
+            PSYS_PART_TARGET_POS_MASK,
         PSYS_SRC_TARGET_KEY, target
     ]);
     
