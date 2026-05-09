@@ -107,7 +107,7 @@ integer LM_PING_INTERVAL = 8;  // Ping every 8 seconds
 // particle toward the holder over its lifetime; ACCEL adds gravity for
 // catenary sag. No ribbon-mode connectivity, so target movement makes
 // each particle individually course-correct — no segment-stretch snap.
-string   CHAIN_TEXTURE     = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
+string   CHAIN_TEXTURE     = "ebe48305-8955-2b27-7656-3c39cee2cc1b";
 float    CHAIN_BURST_RATE  = 0.02;                  // ~50 sprites/sec
 integer  CHAIN_PART_COUNT  = 1;
 float    CHAIN_MAX_AGE     = 2.0;                   // travel time src->target
