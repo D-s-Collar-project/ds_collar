@@ -1,10 +1,33 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 13
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 13: Drop PSYS_PART_FOLLOW_SRC_MASK from chain flags. Strays
+  correlated with wearer movement: FOLLOW_SRC translates every alive
+  particle by source_delta when the source moves, so the oldest
+  particles (near target) get yanked with the wearer; TARGET_POS then
+  fights to re-acquire the target each frame, manifesting as a
+  straight-line snap from leashpoint to holder. Without FOLLOW_SRC,
+  alive particles stay in worldspace — the chain lags slightly behind
+  a moving wearer but settles smoothly under TARGET_POS alone, no
+  conflict.
+- v1.1 rev 12: handle_particles_start idempotence guard. Was unconditionally
+  re-issuing llLinkParticleSystem on every particles.start, which reset
+  the ribbon — for ~tens of ms after each reset only 1-2 particles
+  exist, and TARGET_POS pulls them straight at the holder, rendering as
+  a stretched straight segment. kmod_leash fires particles.start
+  multiple times (native + OC responders, 10s re-handshake), so the
+  user saw recurring straight-line strays. Now skips re-render when
+  source/target/active state are unchanged. handle_particles_update
+  already had this guard.
+- v1.1 rev 11: Adopt LSL wiki catenary recipe — BURST_RATE 0.015→0.0
+  (max sim emission), MAX_AGE 1.125→3.0 (TARGET_POS uses lifetime as
+  travel time, so longer life lets each particle traverse src→target
+  fully), ACCEL -2.0→-1.0 (gentle sag without overwhelming TARGET_POS
+  correction). Ribbon Z scale 0.05→0.0 per LSL convention.
 - v1.1 rev 10: Hoist chain particle knobs into top-level constants
   (CHAIN_BURST_RATE, CHAIN_MAX_AGE, CHAIN_ACCEL, etc.). Soften
   gravity from -3.95→-2.0 to reduce ribbon stretching.
@@ -58,18 +81,22 @@ integer LM_PING_INTERVAL = 8;  // Ping every 8 seconds
 
 /* -------------------- CHAIN PARTICLE TUNING -------------------- */
 // All visual knobs for the leash chain live here. Edit these without
-// touching render_chain_particles.
+// touching render_chain_particles. Defaults follow the LSL wiki's
+// catenary recipe: TARGET_POS makes each particle arrive at the target
+// by end-of-life, so MAX_AGE is effectively the travel time. Gentle
+// ACCEL creates the sag without overwhelming the TARGET_POS correction
+// (strong gravity here is what produces stretched/erratic ribbons).
 string   CHAIN_TEXTURE     = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
-float    CHAIN_BURST_RATE  = 0.015;                 // seconds between bursts
-integer  CHAIN_PART_COUNT  = 1;                     // particles per burst
-float    CHAIN_MAX_AGE     = 1.125;                 // particle lifetime (s)
-vector   CHAIN_START_SCALE = <0.05, 0.05, 0.05>;
-vector   CHAIN_END_SCALE   = <0.05, 0.05, 0.05>;
+float    CHAIN_BURST_RATE  = 0.0;                   // 0 = max sim rate
+integer  CHAIN_PART_COUNT  = 1;
+float    CHAIN_MAX_AGE     = 3.0;                   // travel time src->target
+vector   CHAIN_START_SCALE = <0.05, 0.05, 0.0>;
+vector   CHAIN_END_SCALE   = <0.05, 0.05, 0.0>;
 vector   CHAIN_START_COLOR = <1.0, 1.0, 1.0>;
 vector   CHAIN_END_COLOR   = <1.0, 1.0, 1.0>;
 float    CHAIN_START_ALPHA = 1.0;
 float    CHAIN_END_ALPHA   = 1.0;
-vector   CHAIN_ACCEL       = <0.0, 0.0, -2.0>;      // gravity on each particle
+vector   CHAIN_ACCEL       = <0.0, 0.0, -1.0>;      // gentle catenary sag
 
 /* -------------------- STATE -------------------- */
 integer ParticlesActive = FALSE;
@@ -281,7 +308,6 @@ render_chain_particles(key target) {
         PSYS_SRC_ACCEL, CHAIN_ACCEL,
         PSYS_PART_FLAGS,
             PSYS_PART_INTERP_COLOR_MASK |
-            PSYS_PART_FOLLOW_SRC_MASK |
             PSYS_PART_TARGET_POS_MASK |
             PSYS_PART_RIBBON_MASK,
         PSYS_SRC_TARGET_KEY, target
@@ -300,12 +326,23 @@ handle_particles_start(string msg) {
     string source = llJsonGetValue(msg, ["source"]);
     key target = (key)llJsonGetValue(msg, ["target"]);
 
+    // Idempotent: same source + target + already rendering → skip the
+    // re-issue. Each llLinkParticleSystem call resets the ribbon, and
+    // for the first few ms after a reset only 1-2 particles exist —
+    // TARGET_POS pulls them straight at the holder, so the leasher sees
+    // a stretched straight segment between source and target. kmod_leash
+    // fires particles.start multiple times during handshake (native + OC
+    // responders, periodic re-handshake), so this guard is load-bearing.
+    if (ParticlesActive && SourcePlugin == source && TargetKey == target) {
+        return;
+    }
+
     // Validate target exists in-world
     list details = llGetObjectDetails(target, [OBJECT_POS]);
     if (llGetListLength(details) == 0) {
         return;
     }
-    
+
     // Priority: Lockmeister < native leash
     if (SourcePlugin == "lockmeister" && source == "ui.core.leash") {
         if (LmActive) {
