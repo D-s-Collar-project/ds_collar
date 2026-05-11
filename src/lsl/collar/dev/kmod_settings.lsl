@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -11,10 +11,14 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               Trustees and blacklist always use CSVs. Display names are
               resolved asynchronously via llRequestDisplayName.
               kmod_settings is the SOLE LSD WRITER for keys listed in
-              is_writable_key — plugins request writes via the CSV-envelope
-              settings.delta / settings.delete protocol on SETTINGS_BUS.
+              MANAGED_SETTINGS_KEYS — plugins request writes via the
+              CSV-envelope settings.delta / settings.delete protocol on
+              SETTINGS_BUS. Managed keys are also reset to absent on
+              notecard reload; consumers fall back to in-script defaults
+              via lsd_int(key, fallback) when the notecard omits a key.
 CHANGES:
-- v1.1 rev 12: Add CSV-envelope settings.delta / settings.delete write protocol. Plugins request writes via `settings.delta:<key>:<value>` (or `settings.delete:<key>`); kmod_settings validates against is_writable_key whitelist, writes LSD, broadcasts settings.sync. Initial whitelist: lock.locked (plugin_lock PoC). Single-writer pattern eliminates LSD-ownership conflicts and routes settings changes through one authority.
+- v1.1 rev 13: Notecard reload reverts managed settings keys to "absent" before re-parsing. Any key listed in MANAGED_SETTINGS_KEYS that's not in the new notecard ends up deleted, so consumer plugins fall back to in-script defaults via their existing lsd_int(key, fallback) reads. Replaces ad-hoc reload preservation with a uniform "notecard is canonical" model for managed keys.
+- v1.1 rev 12: Add CSV-envelope settings.delta / settings.delete write protocol. Plugins request writes via `settings.delta:<key>:<value>` (or `settings.delete:<key>`); kmod_settings validates against MANAGED_SETTINGS_KEYS whitelist, writes LSD, broadcasts settings.sync. Initial whitelist: lock.locked (plugin_lock PoC). Single-writer pattern eliminates LSD-ownership conflicts and routes settings changes through one authority.
 - v1.1 rev 11: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt. Notecard NOT touched
   in this path — that's exclusive to handle_runaway/factory_reset.
@@ -200,10 +204,26 @@ delete, broadcast_settings_changed fires settings.sync so consumers re-read.
 
 -------------------- */
 
+// Canonical list of LSD keys that kmod_settings manages on behalf of consumer
+// plugins. These keys are:
+//   (1) writable via the settings.delta CSV protocol (is_writable_key gate)
+//   (2) reset to absent on notecard reload (clear_managed_settings) so consumers
+//       fall back to in-script defaults via lsd_int(key, fallback).
+// Grow this list as more plugins migrate to the single-writer protocol.
+list MANAGED_SETTINGS_KEYS = [
+    "lock.locked"
+];
+
 integer is_writable_key(string lsd_key) {
-    // Initial whitelist — plugin_lock is the PoC. Grow as plugins migrate.
-    if (lsd_key == KEY_LOCKED) return TRUE;
-    return FALSE;
+    return llListFindList(MANAGED_SETTINGS_KEYS, [lsd_key]) != -1;
+}
+
+clear_managed_settings() {
+    integer i;
+    integer n = llGetListLength(MANAGED_SETTINGS_KEYS);
+    for (i = 0; i < n; i++) {
+        llLinksetDataDelete(llList2String(MANAGED_SETTINGS_KEYS, i));
+    }
 }
 
 handle_settings_delta_csv(string msg) {
@@ -641,6 +661,10 @@ integer start_notecard_reading() {
     clear_owner_keys();
     clear_trustee_keys();
     llLinksetDataDelete(KEY_BLACKLIST);
+    // Same rule for the managed-settings family: any key absent from the new
+    // notecard reverts to its in-script default (consumer plugins read with
+    // lsd_int(key, fallback) so an empty LSD value resolves to the default).
+    clear_managed_settings();
 
     IsLoadingNotecard = TRUE;
     NotecardLine = 0;
