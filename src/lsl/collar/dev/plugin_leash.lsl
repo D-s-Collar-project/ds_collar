@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: User interface and configuration for the leashing system
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 16: Add Texture sub-menu under Settings — wearer picks Chain or Silk for the leash particle stream. New texture field in plugin.leash.state syncs LeashTexture from kmod_leash; Settings dialog body now displays the current selection; texture menu sends set_texture action with the chosen style. Returns to Settings menu after pick so the new selection is visible.
 - v1.1 rev 15: Post sensor mask drops ACTIVE (was PASSIVE|ACTIVE|SCRIPTED).
   ACTIVE matches avatars in llSensor, so the post picker was surfacing
   bystanders alongside hitching posts. Posts are stationary, so
@@ -91,6 +92,7 @@ integer Leashed = FALSE;
 key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
+string LeashTexture = "chain"; // "chain" or "silk"
 integer LeashMode = 0;       // 0=avatar, 1=coffle, 2=post
 key LeashTarget = NULL_KEY;  // Target for coffle/post
 
@@ -321,9 +323,21 @@ showSettingsMenu() {
     else {
         button_data += [btn("Turn: Off", "toggle_turn")];
     }
+    button_data += [btn("Texture", "texture")];
 
-    string body = "Leash Settings\nLength: " + (string)LeashLength + "m\nTurn to face: " + (string)TurnToFace;
+    string texture_label = "Chain";
+    if (LeashTexture == "silk") texture_label = "Silk";
+
+    string body = "Leash Settings\nLength: " + (string)LeashLength + "m\nTurn to face: " + (string)TurnToFace + "\nTexture: " + texture_label;
     showMenu("settings", "Settings", body, button_data);
+}
+
+showTextureMenu() {
+    string current = "Chain";
+    if (LeashTexture == "silk") current = "Silk";
+
+    showMenu("texture", "Texture", "Select leash texture\nCurrent: " + current,
+              [btn("Back", "back"), btn("Chain", "chain"), btn("Silk", "silk")]);
 }
 
 showLengthMenu() {
@@ -590,6 +604,14 @@ sendSetLength(integer length) {
     ]), CurrentUser);
 }
 
+sendSetTexture(string texture) {
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "plugin.leash.action",
+        "action", "set_texture",
+        "texture", texture
+    ]), CurrentUser);
+}
+
 /* -------------------- CHAT SUBCOMMAND HANDLING -------------------- */
 
 // kmod_leash does server-side ACL verification on each action, so we just
@@ -709,8 +731,20 @@ handleButtonClick(string ctx, string btn) {
             sendLeashAction("toggle_turn");
             scheduleStateQuery("settings");
         }
+        else if (ctx == "texture") {
+            showTextureMenu();
+        }
         else if (ctx == "back") {
             showMainMenu();
+        }
+    }
+    else if (MenuContext == "texture") {
+        if (ctx == "back") {
+            showSettingsMenu();
+        }
+        else if (ctx == "chain" || ctx == "silk") {
+            sendSetTexture(ctx);
+            scheduleStateQuery("settings");
         }
     }
     else if (MenuContext == "length") {
@@ -959,6 +993,10 @@ default
                 tmp = llJsonGetValue(msg, ["turnto"]);
                 if (tmp != JSON_INVALID) {
                     TurnToFace = (integer)tmp;
+                }
+                tmp = llJsonGetValue(msg, ["texture"]);
+                if (tmp != JSON_INVALID) {
+                    LeashTexture = tmp;
                 }
                 tmp = llJsonGetValue(msg, ["mode"]);
                 if (tmp != JSON_INVALID) {

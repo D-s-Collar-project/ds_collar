@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_leash.lsl
 VERSION: 1.10
-REVISION: 26
+REVISION: 27
 PURPOSE: Leashing engine providing leash services to plugins
 ARCHITECTURE: Shared infra + per-mode sections (avatar / coffle / post)
 CHANGES:
+- v1.1 rev 27: Add per-wearer leash texture setting (chain / silk). New LeashTexture global persisted under leash.texture (settings.set JSON path), defaults to "chain". setParticlesState passes LeashTexture as the style field on particles.start, broadcastState includes texture so plugin_leash can render the selection, and a new set_texture action (gated by POL_SETTINGS) routes through setTextureInternal — which validates against the chain/silk whitelist and re-renders particles immediately if leashed. Drops the hardcoded "style", "chain" in setParticlesState.
 - v1.1 rev 26: Consolidate mode-anchor branches and rename internal handshake/response helpers. New leashFollowTarget() replaces the 3-way LeashMode branch duplicated in followTick and control() (returns Leasher / CoffleTargetAvatar / LeashTarget). New rlvFollowTarget() replaces the @follow branch in startFollow (NULL_KEY in post mode). Renames: beginHolderHandshake → leashingModeQuery, handleHolderResponseNative → leashResponseNative, handleHolderResponseOc → leashResponseOCCompat. Earlier changelog entries were rewritten in place to use the new names — refer to git history for the prior identifiers. No behavior change.
 - v1.1 rev 25: control() event applies a soft corrective llMoveToTarget toward the leash anchor when the wearer presses a directional key at/past LeashLength. Bridges the 1Hz followTick gap, provides post-mode tether (no RLV @follow there), and serves as non-RLV fallback in avatar/coffle. llTakeControls mask is expanded beyond CONTROL_ML_LBUTTON only while leashed AND (at-limit OR yanking) — managed via updateControlsMask() called from followTick (AtLimit transition), yankToLeasher, at_target arrival, clearLeashState, and run_time_permissions.
 - v1.1 rev 24: Drop PERMISSION_CONTROL_CAMERA from llRequestPermissions — unused (no camera API consumers), and triggered the "Camera control currently only supported for attachments..." runtime warning whenever the collar was rezzed (e.g. in a vendor box). Take-controls alone is sufficient for the no-script-parcel sticky exemption.
@@ -176,6 +177,7 @@ string KEY_LEASHED = "leash.leashedavatar";
 string KEY_LEASHER = "leash.leasherkey";
 string KEY_LEASH_LENGTH = "leash.length";
 string KEY_LEASH_TURNTO = "leash.turnto";
+string KEY_LEASH_TEXTURE = "leash.texture";
 
 /* -------------------- STATE -------------------- */
 
@@ -184,6 +186,7 @@ integer Leashed = FALSE;
 key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
+string LeashTexture = "chain";    // Particle style — "chain" (default) or "silk"
 integer LeashMode = MODE_AVATAR;  // Current leash mode
 key LeashTarget = NULL_KEY;       // Target object for coffle/post modes
 key CoffleTargetAvatar = NULL_KEY; // Avatar wearing the target collar (coffle mode only)
@@ -299,7 +302,7 @@ setParticlesState(integer active, key target) {
             "type", "particles.start",
             "source", PLUGIN_CONTEXT,
             "target", (string)target,
-            "style", "chain"
+            "style", LeashTexture
         ]);
     } else {
         msg = llList2Json(JSON_OBJECT, [
@@ -348,6 +351,10 @@ persistTurnto(integer turnto) {
     persistSetting(KEY_LEASH_TURNTO, (string)turnto);
 }
 
+persistTexture(string texture) {
+    persistSetting(KEY_LEASH_TEXTURE, texture);
+}
+
 applySettingsSync() {
     string tmp = llLinksetDataRead(KEY_LEASHED);
     if (tmp != "") Leashed = (integer)tmp;
@@ -357,6 +364,8 @@ applySettingsSync() {
     if (tmp != "") LeashLength = clampLeashLength((integer)tmp);
     tmp = llLinksetDataRead(KEY_LEASH_TURNTO);
     if (tmp != "") TurnToFace = (integer)tmp;
+    tmp = llLinksetDataRead(KEY_LEASH_TEXTURE);
+    if (tmp == "chain" || tmp == "silk") LeashTexture = tmp;
 }
 
 /* -------------------- STATE MANAGEMENT -------------------- */
@@ -523,7 +532,7 @@ handleAclResult(string msg) {
         }
         else if (PendingAction == "coffle") btn_label = POL_COFFLE;
         else if (PendingAction == "post") btn_label = POL_POST;
-        else if (PendingAction == "set_length" || PendingAction == "toggle_turn") btn_label = POL_SETTINGS;
+        else if (PendingAction == "set_length" || PendingAction == "toggle_turn" || PendingAction == "set_texture") btn_label = POL_SETTINGS;
 
         if (btn_label != "" && policy_allows(btn_label, acl_level)) {
             if (PendingAction == "grab") grabLeashInternal(PendingActionUser, acl_level);
@@ -531,6 +540,7 @@ handleAclResult(string msg) {
             else if (PendingAction == "post") postLeashInternal(PendingActionUser, PendingPassTarget);
             else if (PendingAction == "set_length") setLengthInternal((integer)((string)PendingPassTarget));
             else if (PendingAction == "toggle_turn") toggleTurnInternal();
+            else if (PendingAction == "set_texture") setTextureInternal((string)PendingPassTarget);
         } else {
             denyAccess(PendingActionUser, "insufficient permissions");
         }
@@ -964,6 +974,7 @@ broadcastState() {
         "leasher", (string)Leasher,
         "length", LeashLength,
         "turnto", TurnToFace,
+        "texture", LeashTexture,
         "mode", LeashMode,
         "target", (string)LeashTarget
     ]);
@@ -985,6 +996,29 @@ toggleTurnInternal() {
     }
     persistTurnto(TurnToFace);
     broadcastState();
+}
+
+setTextureInternal(string texture) {
+    // Whitelist: anything outside chain/silk is dropped silently so a
+    // garbage value can't break particles. kmod_particles also falls back
+    // to chain on unknown styles as a second layer of defence.
+    if (texture != "chain" && texture != "silk") return;
+    if (texture == LeashTexture) {
+        broadcastState();
+        return;
+    }
+    LeashTexture = texture;
+    persistTexture(texture);
+    broadcastState();
+
+    // Re-render particles immediately if we're currently leashed. The
+    // idempotence guard in kmod_particles will detect the style change
+    // and re-issue llLinkParticleSystem with the new texture.
+    if (Leashed) {
+        key t = HolderTarget;
+        if (t == NULL_KEY) t = leashFollowTarget();
+        if (t != NULL_KEY) setParticlesState(TRUE, t);
+    }
 }
 
 
@@ -1328,6 +1362,12 @@ default
                 // Special case: set_length repurposes target field for length value
                 if (action == "set_length") {
                     target = (key)jsonGet(msg, "length", "0");
+                }
+                // Special case: set_texture repurposes target field for the
+                // texture style string. (string)(key)"chain" round-trips
+                // intact because LSL keys are string-backed.
+                else if (action == "set_texture") {
+                    target = (key)jsonGet(msg, "texture", "chain");
                 }
 
                 requestAclForAction(user, action, target);
