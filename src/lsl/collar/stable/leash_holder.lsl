@@ -1,10 +1,11 @@
 /*--------------------
 SCRIPT: leash_holder.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Minimal leash-holder target responder for external objects
 ARCHITECTURE: Direct channel listener with prim discovery fallback, namespaced message protocol
 CHANGES:
+- v1.1 rev 4: Guard JSON_INVALID before casting `collar` / `session` — malformed or spoofed requests now drop silently instead of replying to NULL_KEY with session 0.
 - v1.1 rev 3: Skip reply when plugin.leash.request `mode` is "coffle" —
   coffle explicitly targets the peer collar's leashpoint, so any holder
   the wearer happens to also have on must stay out of that handshake.
@@ -93,8 +94,11 @@ default {
         // Missing field = old requester, reply as before.
         if (llJsonGetValue(msg, ["mode"]) == "coffle") return;
 
-        key collar = (key)llJsonGetValue(msg, ["collar"]);
-        integer session = (integer)llJsonGetValue(msg, ["session"]);
+        string collarStr = llJsonGetValue(msg, ["collar"]);
+        string sessionStr = llJsonGetValue(msg, ["session"]);
+        if (collarStr == JSON_INVALID || sessionStr == JSON_INVALID) return;
+        key collar = (key)collarStr;
+        integer session = (integer)sessionStr;
 
         key targetPrim = leashPrimKey();
 

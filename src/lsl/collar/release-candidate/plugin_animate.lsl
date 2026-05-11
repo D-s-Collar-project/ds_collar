@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 11
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 11: Drop AnimationList cache — read inventory live via llGetInventoryName / llGetInventoryNumber. Plugin resets when animation count changes (CHANGED_INVENTORY). Removes refresh_animation_list and ~1.5 KB of heap pressure.
 - v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -65,8 +66,9 @@ string SessionId = "";
 integer CurrentPage = 0;
 integer PAGE_SIZE = 8;  // 8 animations + 4 nav buttons = 12 total
 
-// Animation inventory
-list AnimationList = [];
+// Animation inventory — read live from inventory; LastAnimCount only used to detect
+// add/remove deltas in CHANGED_INVENTORY so the plugin can reset itself.
+integer LastAnimCount = -1;
 string LastPlayedAnim = "";
 
 // Permissions
@@ -91,24 +93,12 @@ list get_policy_buttons(string ctx, integer acl) {
 
 /* -------------------- ANIMATION INVENTORY MANAGEMENT -------------------- */
 
-refresh_animation_list() {
-    AnimationList = [];
+// Returns the number of animations the plugin will expose, capped at MAX_ANIMATIONS.
+// All other access sites query inventory live via llGetInventoryName.
+integer get_animation_count() {
     integer count = llGetInventoryNumber(INVENTORY_ANIMATION);
-
-    // Safety cap to prevent stack-heap collision
-    if (count > MAX_ANIMATIONS) {
-        llRegionSayTo(llGetOwner(), 0, "WARNING: Too many animations (" + (string)count + "). Only loading first " + (string)MAX_ANIMATIONS + ".");
-        count = MAX_ANIMATIONS;
-    }
-
-    integer i;
-    for (i = 0; i < count; i++) {
-        string anim_name = llGetInventoryName(INVENTORY_ANIMATION, i);
-        if (anim_name != "") {
-            AnimationList += [anim_name];
-        }
-    }
-
+    if (count > MAX_ANIMATIONS) return MAX_ANIMATIONS;
+    return count;
 }
 
 /* -------------------- ANIMATION CONTROL -------------------- */
@@ -227,7 +217,7 @@ show_animation_menu(integer page) {
     // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
-    integer total_anims = llGetListLength(AnimationList);
+    integer total_anims = get_animation_count();
 
     // Handle empty animation list
     if (total_anims == 0) {
@@ -269,7 +259,7 @@ show_animation_menu(integer page) {
     list page_anims = [];
     integer i;
     for (i = start_idx; i <= end_idx; i++) {
-        page_anims += [llList2String(AnimationList, i)];
+        page_anims += [llGetInventoryName(INVENTORY_ANIMATION, i)];
     }
 
     integer count = llGetListLength(page_anims);
@@ -385,7 +375,7 @@ handle_button_click(string button) {
 
     // Pagination - left (with wrap)
     if (button == "<<") {
-        integer total_anims = llGetListLength(AnimationList);
+        integer total_anims = get_animation_count();
         integer max_page = (total_anims - 1) / PAGE_SIZE;
 
         if (CurrentPage == 0) {
@@ -400,7 +390,7 @@ handle_button_click(string button) {
 
     // Pagination - right (with wrap)
     if (button == ">>") {
-        integer total_anims = llGetListLength(AnimationList);
+        integer total_anims = get_animation_count();
         integer max_page = (total_anims - 1) / PAGE_SIZE;
 
         if (CurrentPage >= max_page) {
@@ -414,7 +404,7 @@ handle_button_click(string button) {
     }
 
     // Check if button is an animation name
-    if (llListFindList(AnimationList, [button]) != -1) {
+    if (llGetInventoryType(button) == INVENTORY_ANIMATION) {
         start_animation(button);
         show_animation_menu(CurrentPage);
         return;
@@ -459,8 +449,14 @@ default {
             return;
         }
 
+        // Snapshot animation count so CHANGED_INVENTORY can detect deltas and reset.
+        integer raw_count = llGetInventoryNumber(INVENTORY_ANIMATION);
+        if (raw_count > MAX_ANIMATIONS) {
+            llRegionSayTo(llGetOwner(), 0, "WARNING: Too many animations (" + (string)raw_count + "). Only the first " + (string)MAX_ANIMATIONS + " are reachable.");
+        }
+        LastAnimCount = raw_count;
+
         cleanup_session();
-        refresh_animation_list();
         ensure_permissions();
         register_self();
     }
@@ -475,23 +471,11 @@ default {
         }
 
         if (change & CHANGED_INVENTORY) {
-            integer old_count = llGetListLength(AnimationList);
-            refresh_animation_list();
-            integer new_count = llGetListLength(AnimationList);
-
-            // Only redraw if count changed AND user has menu open
-            if (old_count != new_count && CurrentUser != NULL_KEY) {
-                // Clamp page if needed
-                integer total_anims = new_count;
-                integer max_page = 0;
-                if (total_anims > 0) {
-                    max_page = (total_anims - 1) / PAGE_SIZE;
-                }
-                if (CurrentPage > max_page) {
-                    CurrentPage = max_page;
-                }
-
-                show_animation_menu(CurrentPage);
+            // Only animation-count deltas matter to this plugin; other inventory
+            // changes (notecards, sounds, etc.) are ignored. Any change in the
+            // animation set fully invalidates open menus, so reset the script.
+            if (llGetInventoryNumber(INVENTORY_ANIMATION) != LastAnimCount) {
+                llResetScript();
             }
         }
     }

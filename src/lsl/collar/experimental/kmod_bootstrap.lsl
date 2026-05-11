@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Startup coordination, RLV detection, status announcement
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 7: Remove unreachable `return;` after `state running` in timer event — state change is immediate, return never executed.
 - v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
@@ -389,7 +390,6 @@ state starting
             BootstrapComplete = TRUE;
             announce_status();
             state running;
-            return;
         }
 
         // Handle Settings Retries (read directly from LSD)
