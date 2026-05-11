@@ -70,6 +70,11 @@ string LSD_KEY_ACL_TIMESTAMP = "acl.timestamp";
 string LSD_ACL_CACHE_PREFIX = "acl.";
 string LSD_ACL_CACHE_SUFFIX = ".cache";
 
+// kmod_auth is the sole writer of the ACL query cache. The actual write site
+// uses a dynamic key ("acl." + uuid + ".cache") which is invisible to static
+// analysis; declared here for cross-script attribution.
+// @lsl-ide lsd-owns: *.cache
+
 /* -------------------- CACHE CONSTANTS -------------------- */
 integer CACHE_TTL = 60;  // Cache query results for 60 seconds
 integer CACHE_MAX_USERS = 800;  // Safety limit for cache size

@@ -1,13 +1,14 @@
 /*--------------------
 MODULE: kmod_chat.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 20
 PURPOSE: Local chat command receiver. Listens on channel 1 (always) and
          optionally channel 0 (public chat) for prefixed commands from
          authorised speakers. Sends ui.chat.command to UI_BUS so kmod_ui
          can route the request; plugins never receive the raw dispatch.
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 20: First-run bootstrap of `chat.prefix` and `chat.public` now goes through the settings.delta CSV protocol instead of direct llLinksetDataWrite. kmod_settings stays the sole LSD writer for both keys; the in-memory ChatPrefix / PublicChat values are still set synchronously here so callers in the same event see them immediately.
 - v1.1 rev 19: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 18: speaker_authorised now validates the per-avatar ACL cache
   against the global acl.timestamp epoch and treats entries older than
@@ -157,9 +158,11 @@ apply_settings_sync() {
         ChatPrefix = stored_prefix;
     }
     else {
-        // First run: derive from username and persist so plugin_chat can read it
+        // First run: derive from username and request kmod_settings persist it.
+        // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
         ChatPrefix = derive_default_prefix();
-        llLinksetDataWrite(KEY_PREFIX, ChatPrefix);
+        llMessageLinked(LINK_SET, SETTINGS_BUS,
+            "settings.delta:" + KEY_PREFIX + ":" + ChatPrefix, NULL_KEY);
     }
 
     if (stored_public != "") {
@@ -167,7 +170,8 @@ apply_settings_sync() {
     }
     else {
         PublicChat = TRUE;
-        llLinksetDataWrite(KEY_PUBLIC_CHAT, "1");
+        llMessageLinked(LINK_SET, SETTINGS_BUS,
+            "settings.delta:" + KEY_PUBLIC_CHAT + ":1", NULL_KEY);
     }
 
     string stored_chan = llLinksetDataRead(KEY_CHAT_CHAN);

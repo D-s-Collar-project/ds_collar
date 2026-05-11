@@ -211,6 +211,7 @@ delete, broadcast_settings_changed fires settings.sync so consumers re-read.
 //   (2) reset to absent on notecard reload (clear_managed_settings) so consumers
 //       fall back to in-script defaults via lsd_int(key, fallback).
 // Grow this list as more plugins migrate to the single-writer protocol.
+// @lsl-ide lsd-owner
 list MANAGED_SETTINGS_KEYS = [
     "lock.locked",            // plugin_lock
     "public.mode",            // plugin_public
@@ -230,7 +231,15 @@ list MANAGED_SETTINGS_KEYS = [
     "rlvex.trusteetp",        // plugin_rlvex
     "rlvex.trusteeim",        // plugin_rlvex
     "restrict.list",          // plugin_restrict
-    "access.enablerunaway"    // plugin_access
+    "access.enablerunaway",   // plugin_access
+    // Keys still on the old settings.set JSON path (handle_set, dynamic key)
+    // but conceptually owned by kmod_settings just the same. Listed here for
+    // correct cross-script attribution; migrate these emitters to settings.delta
+    // CSV in a future pass.
+    "leash.leashedavatar",    // kmod_leash
+    "leash.leasherkey",       // kmod_leash
+    "leash.length",           // kmod_leash
+    "leash.turnto"            // kmod_leash
 ];
 
 integer is_writable_key(string lsd_key) {
