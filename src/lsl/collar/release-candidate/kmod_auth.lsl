@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_auth.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: Authoritative ACL engine - OPTIMIZED
 ARCHITECTURE: Dispatch table pattern with linkset data cache and JSON templates
 CHANGES:
+- v1.1 rev 9: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 8: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
@@ -724,7 +725,7 @@ default
             }
         }
         else if (num == SETTINGS_BUS) {
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
             }
         }

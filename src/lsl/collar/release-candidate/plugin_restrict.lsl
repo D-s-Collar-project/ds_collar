@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_restrictions sends `settings.delta:restrict.list:<csv>`; drops direct llLinksetDataWrite.
 - v1.1 rev 11: Migrate RLV emission to kmod_rlv (rlv.apply / rlv.release /
   rlv.clear / rlv.force on UI_BUS, consumer="restrict"). Fixes a
@@ -740,7 +741,7 @@ default
         }
         // Settings
         else if (num == SETTINGS_BUS) {
-            if (type == "settings.sync" || type == "settings.delta") {
+            if (type == "settings.sync") {
                 apply_settings_sync();
             }
         }

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 24
+REVISION: 25
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -10,6 +10,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              routed through kmod_rlv on UI_BUS so refcount coordinates with
              any relay-source that asks for the same folder lock.
 CHANGES:
+- v1.1 rev 25: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 24: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_locked sends `settings.delta:folders.locked:<csv>`.
 - v1.1 rev 23: Migrate RLV emission to kmod_rlv. Folder locks use
   rlv.apply / rlv.release with consumer="folders"; attach/detach/
@@ -787,12 +788,6 @@ default
         else if (num == SETTINGS_BUS) {
             if (msg_type == "settings.sync") {
                 apply_settings_sync();
-            }
-            else if (msg_type == "settings.delta") {
-                string delta_key = llJsonGetValue(msg, ["key"]);
-                if (delta_key == KEY_LOCKED) {
-                    apply_settings_sync();
-                }
             }
         }
         else if (num == UI_BUS) {

@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: Startup coordination, RLV detection, status announcement
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 8: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 7: Remove unreachable `return;` after `state running` in timer event — state change is immediate, return never executed.
 - v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
@@ -452,7 +453,7 @@ state starting
         
         /* -------------------- SETTINGS BUS -------------------- */
         if (num == SETTINGS_BUS) {
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
             }
         }

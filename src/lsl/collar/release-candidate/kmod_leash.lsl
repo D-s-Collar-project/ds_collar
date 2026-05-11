@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_leash.lsl
 VERSION: 1.10
-REVISION: 22
+REVISION: 23
 PURPOSE: Leashing engine providing leash services to plugins
 ARCHITECTURE: Shared infra + per-mode sections (avatar / coffle / post)
 CHANGES:
+- v1.1 rev 23: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 22: Explicit (integer) cast on TickCount in `% N` expressions. No functional change — lslint accepted both forms; the cast silences a false-positive type warning from the lsl-lsp VS Code extension.
 - v1.1 rev 21: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt — flushes in-memory
@@ -1289,7 +1290,7 @@ default
         }
 
         if (num == SETTINGS_BUS) {
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 applySettingsSync();
             }
             return;

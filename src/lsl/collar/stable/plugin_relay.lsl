@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 23
+REVISION: 24
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -10,6 +10,7 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
 CHANGES:
+- v1.1 rev 24: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 23: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_mode and persist_hardcore send `settings.delta:<key>:<v>` envelopes.
 - v1.1 rev 22: Split off the relay engine into kmod_rlv (Mono per-script
   byte budget). plugin_relay is now ~UI-only; refcount + auth + sources
@@ -527,7 +528,7 @@ default
             }
         }
         else if (num == SETTINGS_BUS) {
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 refresh_mode();
             }
         }

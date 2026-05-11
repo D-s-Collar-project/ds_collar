@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: kmod_rlv.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: RLV subsystem. Single point of @-command emission for all
   refcount-stateful RLV restrictions in the collar. Owns the third-party
   RLV relay protocol (RELAY_CHANNEL listen, auth queue, ASK dialog,
@@ -20,6 +20,7 @@ ARCHITECTURE: Spun off from plugin_relay v1.10 rev 21 to keep that
     (one-shot or pre-existing semantics — Phase 2 migration), and
     kmod_leash (=force / =clear only, no refcount overlap).
 CHANGES:
+- v1.1 rev 2: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 1: Initial implementation. Lift of plugin_relay rev 21's
   refcount engine + relay protocol; adds multi-consumer apply/release
   API on UI_BUS. plugin_relay rewritten to UI shell that consumes this.
@@ -832,7 +833,7 @@ default {
         }
 
         if (num == SETTINGS_BUS) {
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
             }
             return;

@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_bell.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Bell visibility and jingling control for the collar
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 14: Drop empty on_rez handler — semantically identical to not declaring it (no-op default). Replaced with an explanatory comment so the intent ("state survives attach/detach") stays visible.
 - v1.1 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_bell_setting sends `settings.delta:<key>:<v>`; drops direct llLinksetDataWrite.
 - v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
@@ -527,7 +528,7 @@ default {
             string msg_type = llJsonGetValue(msg, ["type"]);
             if (msg_type == JSON_INVALID) return;
 
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
                 return;
             }

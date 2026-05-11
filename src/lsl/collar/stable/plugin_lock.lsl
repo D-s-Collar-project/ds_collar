@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_lock.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Toggle collar lock and RLV detach control labels
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 14: PoC for single-writer settings protocol. persist_locked now sends a `settings.delta:lock.locked:<value>` CSV request to kmod_settings instead of writing LSD directly + emitting a settings.set JSON. kmod_settings is the sole LSD writer; we receive the resulting settings.sync broadcast and apply_settings_sync sees no-op because the in-memory Locked global is already in sync.
 - v1.1 rev 13: Toggle state now written to plugin.state.<ctx> in LSD
   (via idempotent write_plugin_state helper) instead of pushed via
@@ -433,7 +434,7 @@ default {
             string msg_type = llJsonGetValue(msg, ["type"]);
             if (msg_type == JSON_INVALID) return;
 
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
                 return;
             }

@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_access.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 13: Migrate runaway-enable to settings.delta CSV write protocol (kmod_settings rev 14 sole writer for access.enablerunaway). Drops direct llLinksetDataWrite and JSON settings.set emission in both enable and disable code paths.
 - v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
@@ -931,7 +932,7 @@ default {
             }
         }
         else if (num == SETTINGS_BUS) {
-            if (type == "settings.sync" || type == "settings.delta") apply_settings_sync();
+            if (type == "settings.sync") apply_settings_sync();
         }
         else if (num == UI_BUS) {
             if (type == "ui.menu.start" && (llJsonGetValue(msg, ["context"]) != JSON_INVALID)) {

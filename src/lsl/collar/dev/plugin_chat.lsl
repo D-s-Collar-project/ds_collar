@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_chat.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Configuration UI for kmod_chat — change command prefix and toggle
          public chat (channel 0) listening.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_prefix / persist_chat_chan / persist_public_chat send `settings.delta:<key>:<v>` envelopes.
 - v1.1 rev 11: Drop "[Chat]" source prefix from the access-denied notice.
   Brings this plugin into line with the project convention.
@@ -442,7 +443,7 @@ default
             }
         }
         else if (num == SETTINGS_BUS) {
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
             }
         }

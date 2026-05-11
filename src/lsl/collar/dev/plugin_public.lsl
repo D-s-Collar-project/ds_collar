@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_public.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Toggle public access mode directly from main menu
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 14: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_public_mode sends `settings.delta:public.mode:<v>` instead of a JSON settings.set envelope.
 - v1.1 rev 13: persist_public_mode no longer pre-writes public.mode to LSD
   before sending settings.set. The pre-write made kmod_settings.handle_set's
@@ -360,7 +361,7 @@ default {
             string msg_type = llJsonGetValue(msg, ["type"]);
             if (msg_type == JSON_INVALID) return;
 
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
                 return;
             }

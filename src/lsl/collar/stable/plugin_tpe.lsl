@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_tpe.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Manage TPE mode with wearer confirmation and owner oversight
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_tpe_mode sends `settings.delta:tpe.mode:<v>`; drops direct llLinksetDataWrite calls in persist_tpe_mode and apply_settings_sync — kmod_settings is now sole writer.
 - v1.1 rev 12: Simplify wearer-consent dialog copy. The rev 11 enumeration
   of every SOS button was too much detail for the consent moment; one line
@@ -428,7 +429,7 @@ default
         else if (num == SETTINGS_BUS) {
             string msg_type = llJsonGetValue(str, ["type"]);
 
-            if (msg_type == "settings.sync" || msg_type == "settings.delta") {
+            if (msg_type == "settings.sync") {
                 apply_settings_sync();
             }
         }
