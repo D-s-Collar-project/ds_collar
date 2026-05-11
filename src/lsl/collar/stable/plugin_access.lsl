@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_access.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 13: Migrate runaway-enable to settings.delta CSV write protocol (kmod_settings rev 14 sole writer for access.enablerunaway). Drops direct llLinksetDataWrite and JSON settings.set emission in both enable and disable code paths.
 - v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -638,13 +639,9 @@ handle_button(string cmd, string label) {
             else {
                 // Enabling is direct (no consent needed)
                 RunawayEnabled = TRUE;
-                llLinksetDataWrite(KEY_RUNAWAY_ENABLED, "1");
-
-                llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-                    "type", "settings.set",
-                    "key", KEY_RUNAWAY_ENABLED,
-                    "value", "1"
-                ]), NULL_KEY);
+                // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
+                llMessageLinked(LINK_SET, SETTINGS_BUS,
+                    "settings.delta:" + KEY_RUNAWAY_ENABLED + ":1", NULL_KEY);
 
                 llRegionSayTo(CurrentUser, 0, "Runaway enabled.");
                 show_main();
@@ -808,13 +805,9 @@ handle_button(string cmd, string label) {
         if (cmd == "confirm") {
             // Wearer consented - disable runaway
             RunawayEnabled = FALSE;
-            llLinksetDataWrite(KEY_RUNAWAY_ENABLED, "0");
-
-            llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-                "type", "settings.set",
-                "key", KEY_RUNAWAY_ENABLED,
-                "value", "0"
-            ]), NULL_KEY);
+            // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
+            llMessageLinked(LINK_SET, SETTINGS_BUS,
+                "settings.delta:" + KEY_RUNAWAY_ENABLED + ":0", NULL_KEY);
 
             llRegionSayTo(llGetOwner(), 0, "Runaway disabled.");
             llRegionSayTo(CurrentUser, 0, "Runaway disabled.");

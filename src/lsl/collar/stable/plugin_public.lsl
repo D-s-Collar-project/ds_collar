@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_public.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Toggle public access mode directly from main menu
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 14: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_public_mode sends `settings.delta:public.mode:<v>` instead of a JSON settings.set envelope.
 - v1.1 rev 13: persist_public_mode no longer pre-writes public.mode to LSD
   before sending settings.set. The pre-write made kmod_settings.handle_set's
   idempotency guard short-circuit (LSD already matches the requested value),
@@ -214,15 +215,12 @@ apply_settings_sync() {
 persist_public_mode(integer new_value) {
     if (new_value != 0) new_value = 1;
 
-    // kmod_settings is the canonical writer. Pre-writing here would make
-    // kmod_settings.handle_set's idempotency guard short-circuit before
-    // broadcast_settings_changed fires, leaving kmod_auth out of sync.
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_PUBLIC_MODE,
-        "value", (string)new_value
-    ]);
-    llMessageLinked(LINK_SET, SETTINGS_BUS, msg, NULL_KEY);
+    // kmod_settings is the canonical writer. Single-writer settings.delta CSV
+    // protocol — kmod_settings validates against MANAGED_SETTINGS_KEYS, writes
+    // LSD, broadcasts settings.sync; our apply_settings_sync receives the
+    // notification and reconciles.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_PUBLIC_MODE + ":" + (string)new_value, NULL_KEY);
 }
 
 /* -------------------- UI LABEL UPDATE -------------------- */

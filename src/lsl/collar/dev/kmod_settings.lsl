@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -17,6 +17,7 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               notecard reload; consumers fall back to in-script defaults
               via lsd_int(key, fallback) when the notecard omits a key.
 CHANGES:
+- v1.1 rev 14: Expand MANAGED_SETTINGS_KEYS to the full plugin settings family (19 keys). Plugin migrations to the settings.delta CSV protocol: plugin_public, plugin_tpe, plugin_folders, plugin_relay, plugin_chat, plugin_bell, plugin_rlvex, plugin_restrict, plugin_access (runaway).
 - v1.1 rev 13: Notecard reload reverts managed settings keys to "absent" before re-parsing. Any key listed in MANAGED_SETTINGS_KEYS that's not in the new notecard ends up deleted, so consumer plugins fall back to in-script defaults via their existing lsd_int(key, fallback) reads. Replaces ad-hoc reload preservation with a uniform "notecard is canonical" model for managed keys.
 - v1.1 rev 12: Add CSV-envelope settings.delta / settings.delete write protocol. Plugins request writes via `settings.delta:<key>:<value>` (or `settings.delete:<key>`); kmod_settings validates against MANAGED_SETTINGS_KEYS whitelist, writes LSD, broadcasts settings.sync. Initial whitelist: lock.locked (plugin_lock PoC). Single-writer pattern eliminates LSD-ownership conflicts and routes settings changes through one authority.
 - v1.1 rev 11: Listen for kernel.reset.factory / kernel.reset.soft on
@@ -211,7 +212,25 @@ delete, broadcast_settings_changed fires settings.sync so consumers re-read.
 //       fall back to in-script defaults via lsd_int(key, fallback).
 // Grow this list as more plugins migrate to the single-writer protocol.
 list MANAGED_SETTINGS_KEYS = [
-    "lock.locked"
+    "lock.locked",            // plugin_lock
+    "public.mode",            // plugin_public
+    "tpe.mode",               // plugin_tpe
+    "folders.locked",         // plugin_folders
+    "relay.mode",             // plugin_relay
+    "relay.hardcoremode",     // plugin_relay
+    "chat.prefix",            // plugin_chat
+    "chat.channel",           // plugin_chat
+    "chat.public",            // plugin_chat
+    "bell.visible",           // plugin_bell
+    "bell.enablesound",       // plugin_bell
+    "bell.volume",            // plugin_bell
+    "bell.sound",             // plugin_bell
+    "rlvex.ownertp",          // plugin_rlvex
+    "rlvex.ownerim",          // plugin_rlvex
+    "rlvex.trusteetp",        // plugin_rlvex
+    "rlvex.trusteeim",        // plugin_rlvex
+    "restrict.list",          // plugin_restrict
+    "access.enablerunaway"    // plugin_access
 ];
 
 integer is_writable_key(string lsd_key) {

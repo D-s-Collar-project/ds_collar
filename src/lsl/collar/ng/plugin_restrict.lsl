@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.10
-REVISION: 11
+REVISION: 12
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_restrictions sends `settings.delta:restrict.list:<csv>`; drops direct llLinksetDataWrite.
 - v1.1 rev 11: Migrate RLV emission to kmod_rlv (rlv.apply / rlv.release /
   rlv.clear / rlv.force on UI_BUS, consumer="restrict"). Fixes a
   long-standing bug: the apply path emitted "@<behav>=y" (canonical
@@ -208,15 +209,9 @@ cleanup_session() {
 
 persist_restrictions() {
     string csv = llDumpList2String(Restrictions, ",");
-
-    // Write to LSD immediately so restrictions survive relog
-    llLinksetDataWrite(KEY_RESTRICTIONS, csv);
-
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_RESTRICTIONS,
-        "value", csv
-    ]), NULL_KEY);
+    // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_RESTRICTIONS + ":" + csv, NULL_KEY);
 }
 
 /* -------------------- KMOD_RLV PROXY -------------------- */

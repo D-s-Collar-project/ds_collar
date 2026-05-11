@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.10
-REVISION: 18
+REVISION: 19
 PURPOSE: Session management, LSD policy filtering, and plugin list orchestration
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 19: Handle ui.menu.close on UI_BUS — calls cleanup_session(user) which closes the dialog (via DIALOG_BUS ui.dialog.close) and drops the session state. Used by plugin_tpe to force-close the wearer's menu on TPE acceptance so the cached ACL can't be reused — next touch re-auths and (with tpe.mode now set) kmod_auth returns ACL_NOACCESS.
 - v1.1 rev 18: try_cached_session and handle_start's chat-cache-hit path
   now validate the per-avatar acl.<uuid>.cache entry against the global
   acl.timestamp epoch and treat entries older than the last settings
@@ -915,6 +916,16 @@ handle_return(string msg) {
 
 // handle_plugin_acl_bus removed in v1.1 — ACL filtering via LSD policies
 
+// Force-close a user's open dialog and drop their session. Cached ACL is
+// dropped along with the session, so the next touch re-auths from scratch.
+// Primary caller: plugin_tpe on TPE acceptance (wearer's stale ACL must not
+// keep navigating the menu after tpe.mode has been raised to ACL_NOACCESS).
+handle_close(string msg) {
+    string user_key_str = llJsonGetValue(msg, ["user"]);
+    if (user_key_str == JSON_INVALID) return;
+    cleanup_session((key)user_key_str);
+}
+
 handle_dialog_response(string msg) {
     if (!validate_required_fields(msg, ["session_id", "button", "user"])) return;
 
@@ -1102,6 +1113,7 @@ default
             if (msg_type == "ui.menu.start") handle_start(msg, id);
             else if (msg_type == "ui.chat.command") handle_start(msg, id);
             else if (msg_type == "ui.menu.return") handle_return(msg);
+            else if (msg_type == "ui.menu.close") handle_close(msg);
             return;
         }
 

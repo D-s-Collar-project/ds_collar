@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_leash.lsl
 VERSION: 1.10
-REVISION: 21
+REVISION: 22
 PURPOSE: Leashing engine providing leash services to plugins
 ARCHITECTURE: Shared infra + per-mode sections (avatar / coffle / post)
 CHANGES:
+- v1.1 rev 22: Explicit (integer) cast on TickCount in `% N` expressions. No functional change — lslint accepted both forms; the cast silences a false-positive type warning from the lsl-lsp VS Code extension.
 - v1.1 rev 21: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt — flushes in-memory
   leash/coffle state on the kernel's owner-change wipe (collar_kernel
@@ -1301,7 +1302,7 @@ default
 
         TickCount++;
         // Check for offsim/auto-release (~4s cadence at 1.0s FOLLOW_TICK)
-        if (TickCount % 4 == 0) {
+        if (((integer)TickCount % 4) == 0) {
             if (Leashed) checkLeasherPresence();
             if (!Leashed && ReclipScheduled != 0) checkAutoReclip();
         }
@@ -1311,7 +1312,7 @@ default
         // detach, or initial handshake never found one). Retrying the
         // handshake picks up a re-attached holder without requiring the
         // user to unclip and re-clip.
-        if (TickCount % 10 == 0) {
+        if (((integer)TickCount % 10) == 0) {
             if (Leashed && HolderTarget == NULL_KEY
                 && HolderState == HOLDER_STATE_COMPLETE
                 && Leasher != NULL_KEY) {

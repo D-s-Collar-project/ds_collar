@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.10
-REVISION: 11
+REVISION: 12
 PURPOSE: Manage RLV teleport and IM exceptions for owners and trustees
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_setting sends `settings.delta:<key>:<v>`.
 - v1.1 rev 11: persist_setting stops pre-writing LSD before sending
   settings.set. Aligns with project rule that kmod_settings is the
   canonical writer for shared LSD keys.
@@ -318,12 +319,9 @@ apply_settings_sync() {
 }
 
 persist_setting(string setting_key, integer value) {
-    // kmod_settings is the canonical writer. See rev 11 changelog.
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", setting_key,
-        "value", (string)value
-    ]), NULL_KEY);
+    // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + setting_key + ":" + (string)value, NULL_KEY);
 }
 
 /* -------------------- MENUS -------------------- */

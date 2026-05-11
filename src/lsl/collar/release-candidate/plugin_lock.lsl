@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_lock.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Toggle collar lock and RLV detach control labels
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 14: PoC for single-writer settings protocol. persist_locked now sends a `settings.delta:lock.locked:<value>` CSV request to kmod_settings instead of writing LSD directly + emitting a settings.set JSON. kmod_settings is the sole LSD writer; we receive the resulting settings.sync broadcast and apply_settings_sync sees no-op because the in-memory Locked global is already in sync.
 - v1.1 rev 13: Toggle state now written to plugin.state.<ctx> in LSD
   (via idempotent write_plugin_state helper) instead of pushed via
   ui.state.update link_message. kmod_ui rev 17 reads plugin.state.<ctx>
@@ -224,14 +225,14 @@ apply_settings_sync() {
 /* -------------------- SETTINGS MODIFICATION -------------------- */
 
 persist_locked(integer new_value) {
-    // Write to LSD immediately so state survives relog
-    llLinksetDataWrite(KEY_LOCKED, (string)new_value);
-
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_LOCKED,
-        "value", (string)new_value
-    ]), NULL_KEY);
+    // Single-writer protocol: kmod_settings owns the LSD write. We send a
+    // settings.delta CSV request; kmod_settings validates against its writable-
+    // keys whitelist, writes LSD, and broadcasts settings.sync. Our own
+    // apply_settings_sync handler will then fire and be a no-op because the
+    // in-memory Locked global is already in sync with new_value (set by the
+    // caller before this function is invoked).
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_LOCKED + ":" + (string)new_value, NULL_KEY);
 }
 
 /* -------------------- LOCK STATE APPLICATION -------------------- */

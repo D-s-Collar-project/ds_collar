@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_tpe.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Manage TPE mode with wearer confirmation and owner oversight
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_tpe_mode sends `settings.delta:tpe.mode:<v>`; drops direct llLinksetDataWrite calls in persist_tpe_mode and apply_settings_sync — kmod_settings is now sole writer.
 - v1.1 rev 12: Simplify wearer-consent dialog copy. The rev 11 enumeration
   of every SOS button was too much detail for the consent moment; one line
   pointing to the long-touch SOS as the safety hatch is enough.
@@ -216,14 +217,10 @@ send_pong() {
 persist_tpe_mode(integer new_value) {
     if (new_value != 0) new_value = 1;
 
-    // Write to LSD so state survives relog
-    llLinksetDataWrite(KEY_TPE_MODE, (string)new_value);
-
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_TPE_MODE,
-        "value", (string)new_value
-    ]), NULL_KEY);
+    // Single-writer settings.delta CSV protocol. kmod_settings validates
+    // against MANAGED_SETTINGS_KEYS, writes LSD, broadcasts settings.sync.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_TPE_MODE + ":" + (string)new_value, NULL_KEY);
 }
 
 /* -------------------- UI LABEL UPDATE -------------------- */
@@ -366,9 +363,9 @@ apply_settings_sync() {
         TpeModeEnabled = (integer)lsd_val;
     }
 
-    // If TPE mode changed, persist to LSD (covers delta-driven updates)
+    // If TPE mode changed, fire the state-update notification. kmod_settings
+    // is the sole LSD writer; no LSD echo here.
     if (TpeModeEnabled != prev) {
-        llLinksetDataWrite(KEY_TPE_MODE, (string)TpeModeEnabled);
         send_state_update();
     }
 }

@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 11
+REVISION: 14
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -10,7 +10,16 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               settings notecard. Mode is selected by access.multiowner.
               Trustees and blacklist always use CSVs. Display names are
               resolved asynchronously via llRequestDisplayName.
+              kmod_settings is the SOLE LSD WRITER for keys listed in
+              MANAGED_SETTINGS_KEYS — plugins request writes via the
+              CSV-envelope settings.delta / settings.delete protocol on
+              SETTINGS_BUS. Managed keys are also reset to absent on
+              notecard reload; consumers fall back to in-script defaults
+              via lsd_int(key, fallback) when the notecard omits a key.
 CHANGES:
+- v1.1 rev 14: Expand MANAGED_SETTINGS_KEYS to the full plugin settings family (19 keys). Plugin migrations to the settings.delta CSV protocol: plugin_public, plugin_tpe, plugin_folders, plugin_relay, plugin_chat, plugin_bell, plugin_rlvex, plugin_restrict, plugin_access (runaway).
+- v1.1 rev 13: Notecard reload reverts managed settings keys to "absent" before re-parsing. Any key listed in MANAGED_SETTINGS_KEYS that's not in the new notecard ends up deleted, so consumer plugins fall back to in-script defaults via their existing lsd_int(key, fallback) reads. Replaces ad-hoc reload preservation with a uniform "notecard is canonical" model for managed keys.
+- v1.1 rev 12: Add CSV-envelope settings.delta / settings.delete write protocol. Plugins request writes via `settings.delta:<key>:<value>` (or `settings.delete:<key>`); kmod_settings validates against MANAGED_SETTINGS_KEYS whitelist, writes LSD, broadcasts settings.sync. Initial whitelist: lock.locked (plugin_lock PoC). Single-writer pattern eliminates LSD-ownership conflicts and routes settings changes through one authority.
 - v1.1 rev 11: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt. Notecard NOT touched
   in this path — that's exclusive to handle_runaway/factory_reset.
@@ -178,6 +187,81 @@ broadcast_settings_changed() {
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type", "settings.sync"
     ]), NULL_KEY);
+}
+
+/* -------------------- CSV WRITE PROTOCOL (settings.delta / settings.delete) --
+
+Single-writer protocol. Plugins send write requests as CSV (no JSON parsing
+needed in kmod_settings — preserves the JSON-free invariant). Envelope:
+
+    settings.delta:<key>:<value>     write/update LSD key
+    settings.delete:<key>            delete LSD key (exactly 2 fields)
+
+Strict arity. Trailing/extra separators are malformed and silently rejected.
+is_writable_key gates which keys this protocol may mutate — plugin
+registration keys (plugin.reg.*) and ACL policy keys (acl.policycontext:*)
+remain plugin-owned and are NOT eligible. After every successful write or
+delete, broadcast_settings_changed fires settings.sync so consumers re-read.
+
+-------------------- */
+
+// Canonical list of LSD keys that kmod_settings manages on behalf of consumer
+// plugins. These keys are:
+//   (1) writable via the settings.delta CSV protocol (is_writable_key gate)
+//   (2) reset to absent on notecard reload (clear_managed_settings) so consumers
+//       fall back to in-script defaults via lsd_int(key, fallback).
+// Grow this list as more plugins migrate to the single-writer protocol.
+list MANAGED_SETTINGS_KEYS = [
+    "lock.locked",            // plugin_lock
+    "public.mode",            // plugin_public
+    "tpe.mode",               // plugin_tpe
+    "folders.locked",         // plugin_folders
+    "relay.mode",             // plugin_relay
+    "relay.hardcoremode",     // plugin_relay
+    "chat.prefix",            // plugin_chat
+    "chat.channel",           // plugin_chat
+    "chat.public",            // plugin_chat
+    "bell.visible",           // plugin_bell
+    "bell.enablesound",       // plugin_bell
+    "bell.volume",            // plugin_bell
+    "bell.sound",             // plugin_bell
+    "rlvex.ownertp",          // plugin_rlvex
+    "rlvex.ownerim",          // plugin_rlvex
+    "rlvex.trusteetp",        // plugin_rlvex
+    "rlvex.trusteeim",        // plugin_rlvex
+    "restrict.list",          // plugin_restrict
+    "access.enablerunaway"    // plugin_access
+];
+
+integer is_writable_key(string lsd_key) {
+    return llListFindList(MANAGED_SETTINGS_KEYS, [lsd_key]) != -1;
+}
+
+clear_managed_settings() {
+    integer i;
+    integer n = llGetListLength(MANAGED_SETTINGS_KEYS);
+    for (i = 0; i < n; i++) {
+        llLinksetDataDelete(llList2String(MANAGED_SETTINGS_KEYS, i));
+    }
+}
+
+handle_settings_delta_csv(string msg) {
+    list parts = llParseString2List(msg, [":"], []);
+    if (llGetListLength(parts) != 3) return;
+    string lsd_key = llList2String(parts, 1);
+    string value   = llList2String(parts, 2);
+    if (lsd_key == "" || !is_writable_key(lsd_key)) return;
+    llLinksetDataWrite(lsd_key, value);
+    broadcast_settings_changed();
+}
+
+handle_settings_delete_csv(string msg) {
+    list parts = llParseString2List(msg, [":"], []);
+    if (llGetListLength(parts) != 2) return;
+    string lsd_key = llList2String(parts, 1);
+    if (lsd_key == "" || !is_writable_key(lsd_key)) return;
+    llLinksetDataDelete(lsd_key);
+    broadcast_settings_changed();
 }
 
 /* -------------------- LSD CLEAR & FACTORY RESET -------------------- */
@@ -596,6 +680,10 @@ integer start_notecard_reading() {
     clear_owner_keys();
     clear_trustee_keys();
     llLinksetDataDelete(KEY_BLACKLIST);
+    // Same rule for the managed-settings family: any key absent from the new
+    // notecard reverts to its in-script default (consumer plugins read with
+    // lsd_int(key, fallback) so an empty LSD value resolves to the default).
+    clear_managed_settings();
 
     IsLoadingNotecard = TRUE;
     NotecardLine = 0;
@@ -910,6 +998,19 @@ default
     }
 
     link_message(integer sender, integer num, string msg, key id) {
+        // CSV envelope (single-writer protocol) — detect before JSON parsing
+        // so kmod_settings stays JSON-free for the new write path.
+        if (num == SETTINGS_BUS) {
+            if (llSubStringIndex(msg, "settings.delta:") == 0) {
+                handle_settings_delta_csv(msg);
+                return;
+            }
+            if (llSubStringIndex(msg, "settings.delete:") == 0) {
+                handle_settings_delete_csv(msg);
+                return;
+            }
+        }
+
         string msg_type = get_msg_type(msg);
         if (msg_type == "") return;
 

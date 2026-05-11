@@ -1,11 +1,13 @@
 /*--------------------
 PLUGIN: plugin_bell.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 14
 PURPOSE: Bell visibility and jingling control for the collar
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.1 rev 14: Drop empty on_rez handler — semantically identical to not declaring it (no-op default). Replaced with an explanatory comment so the intent ("state survives attach/detach") stays visible.
+- v1.1 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_bell_setting sends `settings.delta:<key>:<v>`; drops direct llLinksetDataWrite.
 - v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -257,14 +259,9 @@ show_main_menu() {
 
 /* -------------------- SETTINGS MODIFICATION -------------------- */
 persist_bell_setting(string setting_key, string value) {
-    // Write to LSD immediately so state survives relog
-    llLinksetDataWrite(setting_key, value);
-
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", setting_key,
-        "value", value
-    ]), NULL_KEY);
+    // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + setting_key + ":" + value, NULL_KEY);
 }
 
 /* -------------------- CHAT SUBCOMMAND HANDLING -------------------- */
@@ -479,10 +476,8 @@ default {
         register_self();
     }
 
-    on_rez(integer start_param) {
-        // Don't reset script on attach/detach
-        // This preserves state, but settings sync will restore saved state anyway
-    }
+    // No on_rez handler — bell state survives attach/detach by design.
+    // settings.sync from kmod_settings re-applies anything stale on reload.
 
     changed(integer change) {
         if (change & CHANGED_OWNER) {

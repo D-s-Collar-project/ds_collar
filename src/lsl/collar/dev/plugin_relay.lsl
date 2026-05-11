@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 22
+REVISION: 23
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -10,6 +10,7 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
 CHANGES:
+- v1.1 rev 23: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_mode and persist_hardcore send `settings.delta:<key>:<v>` envelopes.
 - v1.1 rev 22: Split off the relay engine into kmod_rlv (Mono per-script
   byte budget). plugin_relay is now ~UI-only; refcount + auth + sources
   + ASK dialog moved out. "Bound by..." is async via relay.list.request
@@ -173,19 +174,14 @@ send_pong() {
 /* -------------------- SETTINGS -------------------- */
 
 persist_mode(integer new_mode) {
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_RELAY_MODE,
-        "value", (string)new_mode
-    ]), NULL_KEY);
+    // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_RELAY_MODE + ":" + (string)new_mode, NULL_KEY);
 }
 
 persist_hardcore(integer new_hardcore) {
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_RELAY_HARDCORE,
-        "value", (string)new_hardcore
-    ]), NULL_KEY);
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_RELAY_HARDCORE + ":" + (string)new_hardcore, NULL_KEY);
 }
 
 

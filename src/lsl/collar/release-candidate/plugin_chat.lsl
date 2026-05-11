@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_chat.lsl
 VERSION: 1.10
-REVISION: 11
+REVISION: 12
 PURPOSE: Configuration UI for kmod_chat — change command prefix and toggle
          public chat (channel 0) listening.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_prefix / persist_chat_chan / persist_public_chat send `settings.delta:<key>:<v>` envelopes.
 - v1.1 rev 11: Drop "[Chat]" source prefix from the access-denied notice.
   Brings this plugin into line with the project convention.
 - v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
@@ -174,30 +175,21 @@ apply_settings_sync() {
 
 persist_prefix(string new_prefix) {
     ChatPrefix = new_prefix;
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_PREFIX,
-        "value", new_prefix
-    ]), NULL_KEY);
+    // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_PREFIX + ":" + new_prefix, NULL_KEY);
 }
 
 persist_chat_chan(integer new_chan) {
     ChatChan = new_chan;
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key",  KEY_CHAT_CHAN,
-        "value", (string)new_chan
-    ]), NULL_KEY);
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_CHAT_CHAN + ":" + (string)new_chan, NULL_KEY);
 }
 
 persist_public_chat(integer enabled) {
     PublicChat = enabled;
-    string val = (string)enabled;
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_PUBLIC_CHAT,
-        "value", val
-    ]), NULL_KEY);
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_PUBLIC_CHAT + ":" + (string)enabled, NULL_KEY);
 }
 
 /* -------------------- UI -------------------- */
