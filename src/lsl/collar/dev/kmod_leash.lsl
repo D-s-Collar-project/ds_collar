@@ -1,10 +1,13 @@
 /*--------------------
 MODULE: kmod_leash.lsl
 VERSION: 1.10
-REVISION: 23
+REVISION: 26
 PURPOSE: Leashing engine providing leash services to plugins
 ARCHITECTURE: Shared infra + per-mode sections (avatar / coffle / post)
 CHANGES:
+- v1.1 rev 26: Consolidate mode-anchor branches and rename internal handshake/response helpers. New leashFollowTarget() replaces the 3-way LeashMode branch duplicated in followTick and control() (returns Leasher / CoffleTargetAvatar / LeashTarget). New rlvFollowTarget() replaces the @follow branch in startFollow (NULL_KEY in post mode). Renames: beginHolderHandshake → leashingModeQuery, handleHolderResponseNative → leashResponseNative, handleHolderResponseOc → leashResponseOCCompat. Earlier changelog entries were rewritten in place to use the new names — refer to git history for the prior identifiers. No behavior change.
+- v1.1 rev 25: control() event applies a soft corrective llMoveToTarget toward the leash anchor when the wearer presses a directional key at/past LeashLength. Bridges the 1Hz followTick gap, provides post-mode tether (no RLV @follow there), and serves as non-RLV fallback in avatar/coffle. llTakeControls mask is expanded beyond CONTROL_ML_LBUTTON only while leashed AND (at-limit OR yanking) — managed via updateControlsMask() called from followTick (AtLimit transition), yankToLeasher, at_target arrival, clearLeashState, and run_time_permissions.
+- v1.1 rev 24: Drop PERMISSION_CONTROL_CAMERA from llRequestPermissions — unused (no camera API consumers), and triggered the "Camera control currently only supported for attachments..." runtime warning whenever the collar was rezzed (e.g. in a vendor box). Take-controls alone is sufficient for the no-script-parcel sticky exemption.
 - v1.1 rev 23: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 22: Explicit (integer) cast on TickCount in `% N` expressions. No functional change — lslint accepted both forms; the cast silences a false-positive type warning from the lsl-lsp VS Code extension.
 - v1.1 rev 21: Listen for kernel.reset.factory / kernel.reset.soft on
@@ -60,7 +63,7 @@ CHANGES:
   leasher crashes and logs back in hours later. Checked before the
   MAX_RECLIP_ATTEMPTS cap so a late-returning leasher is never reclipped.
 - v1.1 rev 12: Re-acquire leashpoint after holder detach/reattach.
-  Timer retries beginHolderHandshake every ~10s when Leashed &&
+  Timer retries leashingModeQuery every ~10s when Leashed &&
   HolderTarget == NULL_KEY && HolderState == HOLDER_STATE_COMPLETE,
   so a reattached holder gets picked up without unclip+re-clip.
   Drops rev 11 temporary diagnostics (no regression; was a sim crash
@@ -69,13 +72,13 @@ CHANGES:
   duplicate llRegionSayTo on channel 0. Remove notifyLeashAction helper;
   callers inline llOwnerSay. New formats: "Leash grabbed by X", "Leash
   released", "Coffled to Y", "Posted to Z". Adds temporary diagnostic
-  llOwnerSays in handleHolderResponseNative — remove once particles
+  llOwnerSays in leashResponseNative — remove once particles
   regression is resolved.
 - v1.1 rev 10: Extend native/OC holder handshake to coffle and post modes.
   Previously only grab mode discovered a LeashPoint prim; coffle/post
   aimed particles at the raw sensor-detected target (avatar pelvis for
   coffle, root prim for post). Both now run the same two-phase handshake
-  via beginHolderHandshake. Native-phase validation branches on LeashMode:
+  via leashingModeQuery. Native-phase validation branches on LeashMode:
   avatar/coffle check attached+owner (expected wearer is Leasher vs
   CoffleTargetAvatar), post checks the reply's new "root" field equals
   LeashTarget (needs leash_holder rev 2+). OC phase addresses LeashTarget
@@ -116,11 +119,11 @@ CHANGES:
   gentler tau (1.0), and runs at 1.0s instead of 2.0s for responsiveness.
   Offsim/auto-reclip throttle rebalanced to keep its prior ~4s cadence.
 - v1.1 rev 3: Reject native-protocol holder responses from objects that are
-  not worn by the leasher. beginHolderHandshake() broadcasts via
+  not worn by the leasher. leashingModeQuery() broadcasts via
   llRegionSay on LEASH_CHAN_NATIVE so any in-world native-compatible holder
   could reply with its own UUID, hijacking the leash and pulling
   particles to a random world prim instead of the avatar that just
-  accepted an offer. handleHolderResponseNative() now requires the
+  accepted an offer. leashResponseNative() now requires the
   responding object to be an attachment owned by the leasher; otherwise
   the response is dropped and the handshake falls through to OC and
   finally to direct-to-avatar attachment.
@@ -190,6 +193,8 @@ integer FollowActive = FALSE;
 vector LastTargetPos = ZERO_VECTOR;
 float LastDistance = -1.0;
 integer ControlsOk = FALSE;
+integer AtLimit = FALSE;          // distance >= LeashLength
+integer ControlsExpanded = FALSE; // TRUE when directional keys are in our llTakeControls mask
 integer TickCount = 0;
 
 // Turn-to-face throttling
@@ -408,6 +413,8 @@ clearLeashState(integer clear_reclip) {
     setLockmeisterState(FALSE, NULL_KEY);
     setParticlesState(FALSE, NULL_KEY);
     stopFollow();
+    AtLimit = FALSE;
+    updateControlsMask();
     broadcastState();
 }
 
@@ -554,7 +561,7 @@ requestAclForPassTarget(key target) {
 }
 
 /* -------------------- NATIVE HOLDER PROTOCOL -------------------- */
-beginHolderHandshake(key user) {
+leashingModeQuery(key user) {
     // Improved randomness for session ID using multiple entropy sources
     HolderSession = (integer)llFrand(9.0E06);
     HolderState = HOLDER_STATE_NATIVE_PHASE;
@@ -629,7 +636,7 @@ handleNativeRequest(string msg) {
     llRegionSayTo(requesting_collar, LEASH_CHAN_NATIVE, reply);
 }
 
-handleHolderResponseNative(string msg) {
+leashResponseNative(string msg) {
     if (HolderState != HOLDER_STATE_NATIVE_PHASE && HolderState != HOLDER_STATE_OC_PHASE) return;
     if (llJsonGetValue(msg, ["type"]) != "plugin.leash.target") return;
     if (llJsonGetValue(msg, ["ok"]) != "1") return;
@@ -677,7 +684,7 @@ key ocNonceTarget() {
     return LeashTarget;
 }
 
-handleHolderResponseOc(key holder_prim, string msg) {
+leashResponseOCCompat(key holder_prim, string msg) {
     if (HolderState != HOLDER_STATE_OC_PHASE) return;
     // Must match the UUID we sent in the ping; the nonce identifies our
     // specific handshake so stray LM traffic can't pin HolderTarget.
@@ -807,21 +814,57 @@ checkAutoReclip() {
 }
 
 /* -------------------- FOLLOW MECHANICS -------------------- */
+
+// Resolve the leash anchor for the current mode. Callers may layer
+// HolderTarget on top when they want the discovered LeashPoint prim
+// instead of the raw mode anchor (e.g. followTick), or use the raw
+// value directly when they need the underlying avatar/object.
+key leashFollowTarget() {
+    if (LeashMode == MODE_AVATAR)      return Leasher;
+    else if (LeashMode == MODE_COFFLE) return CoffleTargetAvatar;
+    else if (LeashMode == MODE_POST)   return LeashTarget;
+    return NULL_KEY;
+}
+
+// The avatar to address with RLV @follow=force. NULL_KEY in post mode —
+// static prims can't be RLV-followed, so distance is enforced via
+// followTick's llMoveToTarget instead.
+key rlvFollowTarget() {
+    if (LeashMode == MODE_AVATAR) return Leasher;
+    if (LeashMode == MODE_COFFLE) return CoffleTargetAvatar;
+    return NULL_KEY;
+}
+
+// accept=FALSE so the wearer's input still drives the avatar normally;
+// control() events fire and we layer a corrective llMoveToTarget on top.
+// Directional keys are added to the mask only when leashed AND (at the
+// leash limit OR a yank is in flight) — otherwise the only registered
+// control is ML_LBUTTON for the no-script-parcel sticky exemption.
+updateControlsMask() {
+    if (!ControlsOk) return;
+    integer should_expand = Leashed && (AtLimit || YankTargetHandle != 0);
+    if (should_expand == ControlsExpanded) return;
+    ControlsExpanded = should_expand;
+    integer mask = CONTROL_ML_LBUTTON;
+    if (should_expand) {
+        mask = mask | CONTROL_FWD | CONTROL_BACK
+                    | CONTROL_LEFT | CONTROL_RIGHT
+                    | CONTROL_ROT_LEFT | CONTROL_ROT_RIGHT;
+    }
+    llTakeControls(mask, FALSE, TRUE);
+}
+
 startFollow() {
     if (!Leashed) return;
 
     FollowActive = TRUE;
 
-    // Set RLV follow based on mode
-    if (LeashMode == MODE_AVATAR && Leasher != NULL_KEY) {
-        llOwnerSay("@follow:" + (string)Leasher + "=force");
+    key rlv_target = rlvFollowTarget();
+    if (rlv_target != NULL_KEY) {
+        llOwnerSay("@follow:" + (string)rlv_target + "=force");
     }
-    else if (LeashMode == MODE_COFFLE && CoffleTargetAvatar != NULL_KEY) {
-        llOwnerSay("@follow:" + (string)CoffleTargetAvatar + "=force");
-    }
-    // Post mode: no RLV follow (we enforce distance manually)
 
-    llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA);
+    llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS);
 }
 
 stopFollow() {
@@ -854,13 +897,8 @@ turnToTarget(vector target_pos) {
 followTick() {
     if (!FollowActive || !Leashed) return;
 
-    // Resolve the per-mode follow anchor (avatar-pelvis fallback).
     vector target_pos;
-    key follow_target = NULL_KEY;
-    if (LeashMode == MODE_AVATAR)      follow_target = Leasher;
-    else if (LeashMode == MODE_COFFLE) follow_target = CoffleTargetAvatar;
-    else if (LeashMode == MODE_POST)   follow_target = LeashTarget;
-
+    key follow_target = leashFollowTarget();
     if (follow_target == NULL_KEY) return;
 
     // Prefer the discovered LeashPoint prim over the raw mode target.
@@ -883,6 +921,12 @@ followTick() {
 
     vector wearer_pos = llGetRootPosition();
     float distance = llVecDist(wearer_pos, target_pos);
+
+    integer new_at_limit = (distance >= (float)LeashLength);
+    if (new_at_limit != AtLimit) {
+        AtLimit = new_at_limit;
+        updateControlsMask();
+    }
 
     if (ControlsOk && distance > (float)LeashLength) {
         // Pull to 0.85 * length (not 0.98) so there is slack on arrival
@@ -964,7 +1008,7 @@ grabLeashInternal(key user, integer acl_level) {
     }
 
     setLeashState(user, MODE_AVATAR, NULL_KEY, NULL_KEY);
-    beginHolderHandshake(user);
+    leashingModeQuery(user);
 
     // Enable Lockmeister for this authorized controller
     AuthorizedLmController = user;
@@ -993,7 +1037,7 @@ passLeashInternal(key new_leasher) {
     setLeashState(new_leasher, MODE_AVATAR, NULL_KEY, NULL_KEY);
 
     // Start holder handshake for new leasher
-    beginHolderHandshake(new_leasher);
+    leashingModeQuery(new_leasher);
 
     // Update Lockmeister authorization
     AuthorizedLmController = new_leasher;
@@ -1029,6 +1073,7 @@ yankToLeasher() {
         }
         llMoveToTarget(leasher_pos, 0.3);
         YankTargetHandle = llTarget(leasher_pos, 1.5);
+        updateControlsMask();
         llRegionSayTo(llGetOwner(), 0, "Yanked to " + llKey2Name(Leasher));
         llRegionSayTo(Leasher, 0, llKey2Name(llGetOwner()) + " yanked to you.");
     } else {
@@ -1103,7 +1148,7 @@ coffleLeashInternal(key user, key target_collar) {
     // used by grab. Native phase reaches a DS leash_holder worn by the
     // target sub; OC phase reaches an OC-protocol collar on the target.
     // On timeout, setParticlesState falls back to the target avatar.
-    beginHolderHandshake(user);
+    leashingModeQuery(user);
 
     // Enable follow mechanics to the target avatar (the one wearing the collar)
     startFollow();
@@ -1137,7 +1182,7 @@ postLeashInternal(key user, key post_object) {
     // Native phase matches responses whose linkset root equals post_object;
     // OC phase reaches LM-compatible leashposts. On timeout, particles fall
     // back to the post root.
-    beginHolderHandshake(user);
+    leashingModeQuery(user);
 
     // Enable distance enforcement (via follow mechanics)
     startFollow();
@@ -1176,7 +1221,7 @@ default
 
         applySettingsSync();
         llSetTimerEvent(FOLLOW_TICK);
-        llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA);
+        llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS);
     }
 
     on_rez(integer start_param) {
@@ -1190,13 +1235,47 @@ default
     run_time_permissions(integer perm) {
         if (perm & PERMISSION_TAKE_CONTROLS) {
             ControlsOk = TRUE;
-            // Hold a single unobtrusive control so this prim's scripts
-            // (the entire collar) keep running on no-script parcels.
-            // accept=FALSE pass_on=TRUE means the wearer's input is
-            // unaffected; we just register interest so the takecontrols-
-            // sticky exemption fires for every script in this prim.
+            // Baseline mask: ML_LBUTTON only — keeps the takecontrols-
+            // sticky exemption alive so every script in this prim survives
+            // on no-script parcels. updateControlsMask() then expands the
+            // mask to include directional keys if we should already be in
+            // an at-limit/yanking state.
             llTakeControls(CONTROL_ML_LBUTTON, FALSE, TRUE);
+            ControlsExpanded = FALSE;
+            updateControlsMask();
         }
+    }
+
+    control(key id, integer level, integer edge) {
+        if (!Leashed) return;
+        integer pressed = level & edge;
+        integer directional = CONTROL_FWD | CONTROL_BACK
+                            | CONTROL_LEFT | CONTROL_RIGHT
+                            | CONTROL_ROT_LEFT | CONTROL_ROT_RIGHT;
+        if ((pressed & directional) == 0) return;
+
+        key follow_target = leashFollowTarget();
+        if (follow_target == NULL_KEY) return;
+
+        key target_key = follow_target;
+        if (HolderTarget != NULL_KEY) target_key = HolderTarget;
+
+        list details = llGetObjectDetails(target_key, [OBJECT_POS]);
+        if (llGetListLength(details) == 0) return;
+        vector target_pos = llList2Vector(details, 0);
+
+        vector wearer_pos = llGetRootPosition();
+        float distance = llVecDist(wearer_pos, target_pos);
+        if (distance < (float)LeashLength) return;
+
+        // Soft corrective pull — same geometry as followTick (0.85 * length
+        // toward the anchor, tau 1.0). Bridges the 1Hz follow tick so the
+        // wearer can't sprint past the limit between ticks; also serves as
+        // the only correction in post mode (no RLV @follow) and as a
+        // non-RLV fallback in avatar/coffle.
+        vector pull_pos = target_pos + llVecNorm(wearer_pos - target_pos) * (float)LeashLength * 0.85;
+        llMoveToTarget(pull_pos, 1.0);
+        LastTargetPos = pull_pos;
     }
 
     link_message(integer sender, integer num, string msg, key id) {
@@ -1317,7 +1396,7 @@ default
             if (Leashed && HolderTarget == NULL_KEY
                 && HolderState == HOLDER_STATE_COMPLETE
                 && Leasher != NULL_KEY) {
-                beginHolderHandshake(Leasher);
+                leashingModeQuery(Leasher);
             }
         }
 
@@ -1333,6 +1412,7 @@ default
             YankTargetHandle = 0;
             llStopMoveToTarget();
             LastTargetPos = ZERO_VECTOR;
+            updateControlsMask();
         }
     }
 
@@ -1343,11 +1423,11 @@ default
                 handleNativeRequest(msg);
             }
             else if (mtype == "plugin.leash.target") {
-                handleHolderResponseNative(msg);
+                leashResponseNative(msg);
             }
         }
         else if (channel == LEASH_CHAN_LM) {
-            handleHolderResponseOc(id, msg);
+            leashResponseOCCompat(id, msg);
         }
     }
 }
