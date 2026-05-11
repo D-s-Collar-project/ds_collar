@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 11
+REVISION: 12
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -10,7 +10,11 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               settings notecard. Mode is selected by access.multiowner.
               Trustees and blacklist always use CSVs. Display names are
               resolved asynchronously via llRequestDisplayName.
+              kmod_settings is the SOLE LSD WRITER for keys listed in
+              is_writable_key — plugins request writes via the CSV-envelope
+              settings.delta / settings.delete protocol on SETTINGS_BUS.
 CHANGES:
+- v1.1 rev 12: Add CSV-envelope settings.delta / settings.delete write protocol. Plugins request writes via `settings.delta:<key>:<value>` (or `settings.delete:<key>`); kmod_settings validates against is_writable_key whitelist, writes LSD, broadcasts settings.sync. Initial whitelist: lock.locked (plugin_lock PoC). Single-writer pattern eliminates LSD-ownership conflicts and routes settings changes through one authority.
 - v1.1 rev 11: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt. Notecard NOT touched
   in this path — that's exclusive to handle_runaway/factory_reset.
@@ -178,6 +182,47 @@ broadcast_settings_changed() {
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type", "settings.sync"
     ]), NULL_KEY);
+}
+
+/* -------------------- CSV WRITE PROTOCOL (settings.delta / settings.delete) --
+
+Single-writer protocol. Plugins send write requests as CSV (no JSON parsing
+needed in kmod_settings — preserves the JSON-free invariant). Envelope:
+
+    settings.delta:<key>:<value>     write/update LSD key
+    settings.delete:<key>            delete LSD key (exactly 2 fields)
+
+Strict arity. Trailing/extra separators are malformed and silently rejected.
+is_writable_key gates which keys this protocol may mutate — plugin
+registration keys (plugin.reg.*) and ACL policy keys (acl.policycontext:*)
+remain plugin-owned and are NOT eligible. After every successful write or
+delete, broadcast_settings_changed fires settings.sync so consumers re-read.
+
+-------------------- */
+
+integer is_writable_key(string lsd_key) {
+    // Initial whitelist — plugin_lock is the PoC. Grow as plugins migrate.
+    if (lsd_key == KEY_LOCKED) return TRUE;
+    return FALSE;
+}
+
+handle_settings_delta_csv(string msg) {
+    list parts = llParseString2List(msg, [":"], []);
+    if (llGetListLength(parts) != 3) return;
+    string lsd_key = llList2String(parts, 1);
+    string value   = llList2String(parts, 2);
+    if (lsd_key == "" || !is_writable_key(lsd_key)) return;
+    llLinksetDataWrite(lsd_key, value);
+    broadcast_settings_changed();
+}
+
+handle_settings_delete_csv(string msg) {
+    list parts = llParseString2List(msg, [":"], []);
+    if (llGetListLength(parts) != 2) return;
+    string lsd_key = llList2String(parts, 1);
+    if (lsd_key == "" || !is_writable_key(lsd_key)) return;
+    llLinksetDataDelete(lsd_key);
+    broadcast_settings_changed();
 }
 
 /* -------------------- LSD CLEAR & FACTORY RESET -------------------- */
@@ -910,6 +955,19 @@ default
     }
 
     link_message(integer sender, integer num, string msg, key id) {
+        // CSV envelope (single-writer protocol) — detect before JSON parsing
+        // so kmod_settings stays JSON-free for the new write path.
+        if (num == SETTINGS_BUS) {
+            if (llSubStringIndex(msg, "settings.delta:") == 0) {
+                handle_settings_delta_csv(msg);
+                return;
+            }
+            if (llSubStringIndex(msg, "settings.delete:") == 0) {
+                handle_settings_delete_csv(msg);
+                return;
+            }
+        }
+
         string msg_type = get_msg_type(msg);
         if (msg_type == "") return;
 
