@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_proto.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 3
 PURPOSE: Holder-discovery handshake protocol for the leashing engine
 ARCHITECTURE: True LSL state machine.
                 default          — idle / coffle responder
@@ -14,6 +14,7 @@ ARCHITECTURE: True LSL state machine.
               (mode_str + validation_target + oc_ping_target). IPC reuses
               SETTINGS_BUS so no new bus number is consumed.
 CHANGES:
+- v1.1 rev 3: Defensive validProtoStart(msg) gate before captureProtoStart in all three paths that consume leash.proto.start (default's link_message, proto_native's link_message restart, proto_oc_lm's link_message restart). Without it, a malformed leash.proto.start (missing field) would silently corrupt the handshake — llJsonGetValue returns the literal string "JSON_INVALID" for missing fields, (key)"JSON_INVALID" yields garbage, proto_native's request would carry that garbage controller / mode. Engine always sends all fields today, but defends against future protocol drift / typos.
 - v1.1 rev 2: Convert HolderState integer-flag dispatch to actual LSL
   states. HOLDER_STATE_* constants and HolderState global gone — the
   current state IS the phase. Phase transitions are now `state X;`
@@ -92,6 +93,19 @@ notifyFallback(key target) {
 }
 
 /* -------------------- IPC PARAM CAPTURE -------------------- */
+// Defensive guard against malformed leash.proto.start. Engine always
+// sends all four fields, but a missing one would have llJsonGetValue
+// return the literal string "JSON_INVALID" — silently corrupting the
+// handshake (controller / mode field would carry garbage). Callers
+// MUST validate before captureProtoStart + state change.
+integer validProtoStart(string msg) {
+    if (llJsonGetValue(msg, ["controller"])        == JSON_INVALID) return FALSE;
+    if (llJsonGetValue(msg, ["mode"])              == JSON_INVALID) return FALSE;
+    if (llJsonGetValue(msg, ["validation_target"]) == JSON_INVALID) return FALSE;
+    if (llJsonGetValue(msg, ["oc_ping_target"])    == JSON_INVALID) return FALSE;
+    return TRUE;
+}
+
 captureProtoStart(string msg) {
     Controller       = (key)llJsonGetValue(msg, ["controller"]);
     ModeStr          = llJsonGetValue(msg, ["mode"]);
@@ -226,6 +240,7 @@ default
         }
         if (num == SETTINGS_BUS) {
             if (msg_type == "leash.proto.start") {
+                if (!validProtoStart(msg)) return;
                 captureProtoStart(msg);
                 state proto_native;
             }
@@ -292,6 +307,7 @@ state proto_native
                 // a no-op (LSL treats same-state changes as return), so
                 // do the per-handshake setup inline — the listener stays
                 // open across the reset.
+                if (!validProtoStart(msg)) return;
                 captureProtoStart(msg);
                 restartNativeProbe();
             }
@@ -369,6 +385,7 @@ state proto_oc_lm
             }
             else if (msg_type == "leash.proto.start") {
                 // Engine restart — go back to native phase fresh.
+                if (!validProtoStart(msg)) return;
                 captureProtoStart(msg);
                 state proto_native;
             }
