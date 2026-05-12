@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl
 VERSION: 1.10
-REVISION: 30
+REVISION: 31
 PURPOSE: Leashing engine — state, ACL, claim/release/pass/yank, follow
          mechanics, settings persistence, broadcasts. Holder-discovery
          handshake protocol lives in sibling kmod_leash_proto.lsl.
@@ -11,6 +11,7 @@ ARCHITECTURE: Engine + sibling proto. Engine owns leash state and the
               machine. IPC reuses SETTINGS_BUS so no new bus number is
               consumed (proto filters on type prefix "leash.proto.*").
 CHANGES:
+- v1.1 rev 31: Fix post-mode leash re-pinning to wearer's leashpoint after ~10s. applySettingsSync's cold-restart default (FollowTarget=Leasher, FollowIsAvatar=TRUE) was firing on every settings.sync broadcast, not just at boot. After claimLeash persisted leashed/leasher, the resulting settings.sync round-tripped through this handler and clobbered an active post/coffle session back into grab mode. The next 10s retry timer then sent a mode=grab handshake with ValidationTarget=Leasher, and any attached responder owned by Leasher (e.g. another worn collar's leashpoint) validated successfully — particles re-aimed to it. Guard the defaulting with FollowTarget == NULL_KEY so it only fires when there's no in-memory mode (true cold restart).
 - v1.1 rev 30: Drop stale leash.proto.holder / leash.proto.fallback messages from kmod_leash_proto when !Leashed. Proto can emit a late holder/fallback notification after an Unclip because LSL discards pending events on state change — a queued proto.shutdown gets dropped if proto state-changes first, so the handshake keeps running in the background until natural timeout (~4s). Without this guard, a real responder reply during that window would re-pin HolderTarget on a released leash, lighting particles to a phantom holder. One-line `if (!Leashed) return;` at the top of each handler.
 - v1.1 rev 29: Architectural split — handshake protocol moved to kmod_leash_proto.lsl. Engine retains leash state, ACL, claim/release/pass/yank, follow mechanics, controls, settings persistence, broadcasts, Lockmeister grab inflow. Removed from engine: HOLDER_STATE_* constants, HolderState/HolderPhaseStart/HolderListen/HolderListenOC/HolderSession globals, NATIVE_PHASE_DURATION/OC_PHASE_DURATION, LEASH_CHAN_LM/LEASH_CHAN_NATIVE constants, leashingModeQuery / findLeashpointPrim / leashProtoNativeRequest / leashProtoNativeResponse / leashProtoOCTargetHelper / leashProtoOCCompat / leashProtoHandover / leashProtoListenerTerminate / completeHandshake helpers, listen() event, native listener in state_entry, leashProtoHandover() tick. Engine keeps HolderTarget (the truth — proto reports, engine pins). IPC contract on SETTINGS_BUS: engine→proto sends leash.proto.start (controller, mode_str, validation_target, oc_ping_target) and leash.proto.shutdown; proto→engine sends leash.proto.holder (handshake found a holder) and leash.proto.fallback (handshake timed out, particle fallback target). Re-handshake retry in timer now sends leash.proto.start unconditionally (proto handles its own state idempotently). claimLeash and passLeashInternal call sendProtoStart instead of leashingModeQuery. clearLeashState calls sendProtoShutdown instead of leashProtoListenerTerminate. Renamed file: kmod_leash.lsl → kmod_leash_engine.lsl.
 - v1.1 rev 28: Bytecode reduction pass after Mono stack-heap collision in rev 27 (66888B / 102%). Saved ~1665B (now 65223B / 99.5%). Changes: (1) handleLmGrabbed now calls setLeashState; handleLmReleased now calls clearLeashState(TRUE) — closes a defensive cleanup gap. (2) New clearReclipState() helper replaces 3-place verbatim duplication in clearLeashState + checkAutoReclip. (3) New completeHandshake(holder) helper consolidates the 4-line tail of leashProtoNativeResponse + leashProtoOCCompat. (4) Dropped rlvFollowTarget — startFollow now skips MODE_POST inline and uses leashFollowTarget for avatar/coffle. (5) Inlined single-use persist helpers (persistLength/persistTurnto/persistTexture). (6) leashProtoNativeResponse avatar+coffle validation collapsed via leashFollowTarget for expected_wearer. (7) New clearPendingAction() helper used in handleAclResult final reset and state_entry. (8) NEW claimLeash(user, mode, target_key, acl_level) replaces grabLeashInternal/coffleLeashInternal/postLeashInternal — the per-mode *Internal entry points are gone; sections 3 and 4 dissolved. (9) handleAclResult dual if-ladder restructured into per-action blocks with inline policy check (marginal — denyAccess proliferation offsets ladder removal). passLeashInternal kept separate (different intent; uses notifyLeashTransfer). All inter-collar protocol strings preserved (OC interop is a hard requirement).
@@ -368,10 +369,14 @@ applySettingsSync() {
 
     // FollowTarget / FollowIsAvatar aren't persisted (mode survives only
     // in-memory; coffle/post sessions don't restore across script reset
-    // — matches pre-unification behavior). If we wake up Leashed, default
-    // to avatar mode with Leasher as the follow target; the 10s retry
-    // timer will re-handshake to discover the real leashpoint.
-    if (Leashed && Leasher != NULL_KEY) {
+    // — matches pre-unification behavior). If we wake up Leashed with no
+    // in-memory follow target, default to avatar mode with Leasher as the
+    // follow target; the 10s retry timer will re-handshake to discover
+    // the real leashpoint. The FollowTarget == NULL_KEY guard is what
+    // makes this cold-restart-only — mid-session settings.sync (triggered
+    // by our own persistLeashState during claimLeash) must NOT clobber an
+    // active post/coffle session back into grab mode.
+    if (Leashed && Leasher != NULL_KEY && FollowTarget == NULL_KEY) {
         FollowTarget = Leasher;
         FollowIsAvatar = TRUE;
     }
@@ -1256,6 +1261,10 @@ default
                 // continues in the background until natural timeout.
                 if (!Leashed) return;
                 HolderTarget = (key)jsonGet(msg, "holder", (string)NULL_KEY);
+                llOwnerSay("[engine] pin HolderTarget=" + (string)HolderTarget
+                    + " Leashed=" + (string)Leashed
+                    + " FollowTarget=" + (string)FollowTarget
+                    + " FollowIsAvatar=" + (string)FollowIsAvatar);
                 if (HolderTarget != NULL_KEY) setParticlesState(TRUE, HolderTarget);
             }
             else if (msg_type == "leash.proto.fallback") {

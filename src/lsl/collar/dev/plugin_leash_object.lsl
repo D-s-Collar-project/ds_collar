@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash_object.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: Sub-plugin for object-target leash flows — Post mode. Sensor
          scan for in-world objects (posts, hitching points, leashposts),
          paginated picker, dispatches the post action to engine.
@@ -12,6 +12,7 @@ ARCHITECTURE: Hidden helper of plugin_leash. Does NOT register
               completion routes back to plugin_leash's main menu via
               ui.menu.start (context "ui.core.leash").
 CHANGES:
+- v1.1 rev 2: Destroy picker dialog after action dispatch instead of re-opening parent leash menu — matches the project's "process finished → dialog gone" convention. Folded the dialog close into cleanupSession (mirroring plugin_leash) so completion/error paths just call cleanupSession directly; returnToParent retained only for the Back button (explicit back-navigation).
 - v1.1 rev 1: Initial split out of plugin_leash. Carries the Post sensor
   scan + paginated picker. Hidden from kmod_ui's top menu. Delegated to
   via ui.menu.start with context="ui.core.leash.object" and subpath
@@ -138,14 +139,11 @@ sendActionWithTarget(string action, key target) {
 }
 
 /* -------------------- NAVIGATION -------------------- */
+// Back to plugin_leash's main menu. Used only for the Back button —
+// an explicit back-navigation gesture. Action completions and error
+// paths just call cleanupSession() directly, per the project
+// convention that a finished process leaves no dialog behind.
 returnToParent() {
-    if (SessionId != "") {
-        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-            "type", "ui.dialog.close",
-            "session_id", SessionId
-        ]), NULL_KEY);
-        SessionId = "";
-    }
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.menu.start",
         "context", PARENT_PLUGIN_CONTEXT,
@@ -155,6 +153,12 @@ returnToParent() {
 }
 
 cleanupSession() {
+    if (SessionId != "") {
+        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+            "type", "ui.dialog.close",
+            "session_id", SessionId
+        ]), NULL_KEY);
+    }
     CurrentUser = NULL_KEY;
     UserAcl = -999;
     SessionId = "";
@@ -170,7 +174,7 @@ handleSubpath(string subpath) {
         startSensorScan();
     }
     else {
-        returnToParent();
+        cleanupSession();
     }
 }
 
@@ -200,12 +204,12 @@ handlePickerClick(string ctx) {
             if (list_index < llGetListLength(SensorCandidates)) {
                 key selected = llList2Key(SensorCandidates, list_index + 1);
                 sendActionWithTarget(MenuContext, selected);
-                returnToParent();
+                cleanupSession();
                 return;
             }
         }
         llRegionSayTo(CurrentUser, 0, "Invalid selection.");
-        returnToParent();
+        cleanupSession();
     }
 }
 
@@ -298,7 +302,7 @@ default
 
         if (llGetListLength(SensorCandidates) == 0) {
             llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
-            returnToParent();
+            cleanupSession();
             return;
         }
         displayObjectMenu();
@@ -308,6 +312,6 @@ default
         if (MenuContext != "post") return;
         if (CurrentUser == NULL_KEY) return;
         llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
-        returnToParent();
+        cleanupSession();
     }
 }

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash_avatar.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: Sub-plugin for avatar-target leash flows — Clip / Pass / Offer /
          Coffle. Also receives plugin.leash.offer.pending and shows the
          accept/decline dialog to the offer target.
@@ -18,6 +18,7 @@ ARCHITECTURE: Hidden helper of plugin_leash. Does NOT register
               Coffle and Pass differ in the engine: Pass swaps Controller,
               Coffle keeps Controller and changes FollowTarget only.
 CHANGES:
+- v1.1 rev 2: Destroy picker dialog after action dispatch instead of re-opening parent leash menu — matches the project's "process finished → dialog gone" convention. Folded the dialog close into cleanupSession (mirroring plugin_leash) so completion/error paths just call cleanupSession directly; returnToParent retained only for the Back button (explicit back-navigation).
 - v1.1 rev 1: Initial split out of plugin_leash. Carries the Pass/Offer
   avatar picker, the Coffle avatar picker, and the offer-reception
   accept/decline dialog. Hidden from kmod_ui's top menu (no plugin.reg).
@@ -120,7 +121,7 @@ showAvatarPicker(string action_name, string title) {
 
     if (llGetListLength(SensorCandidates) == 0) {
         llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
-        returnToParent();
+        cleanupSession();
         return;
     }
 
@@ -205,16 +206,11 @@ handleOfferResponse(string ctx) {
 }
 
 /* -------------------- NAVIGATION -------------------- */
-// Return to plugin_leash's main menu. ui.menu.start with no subpath
-// re-enters the parent's "show main menu" path.
+// Back to plugin_leash's main menu. Used only for the Back button —
+// an explicit back-navigation gesture. Action completions and error
+// paths just call cleanupSession() directly, per the project
+// convention that a finished process leaves no dialog behind.
 returnToParent() {
-    if (SessionId != "") {
-        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-            "type", "ui.dialog.close",
-            "session_id", SessionId
-        ]), NULL_KEY);
-        SessionId = "";
-    }
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.menu.start",
         "context", PARENT_PLUGIN_CONTEXT,
@@ -224,6 +220,12 @@ returnToParent() {
 }
 
 cleanupSession() {
+    if (SessionId != "") {
+        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+            "type", "ui.dialog.close",
+            "session_id", SessionId
+        ]), NULL_KEY);
+    }
     CurrentUser = NULL_KEY;
     UserAcl = -999;
     SessionId = "";
@@ -238,7 +240,7 @@ cleanupSession() {
 handleSubpath(string subpath) {
     if (subpath == "clip") {
         sendAction("grab");
-        returnToParent();
+        cleanupSession();
     }
     else if (subpath == "pass") {
         showAvatarPicker("pass", "Pass Leash");
@@ -250,8 +252,8 @@ handleSubpath(string subpath) {
         showAvatarPicker("coffle", "Coffle");
     }
     else {
-        // Unknown subpath — bounce back to parent.
-        returnToParent();
+        // Unknown subpath — nothing to do, just clean up.
+        cleanupSession();
     }
 }
 
@@ -283,11 +285,11 @@ handlePickerClick(string ctx, string clicked_btn) {
     if (selected != NULL_KEY) {
         // MenuContext is the action verb ("pass" / "offer" / "coffle").
         sendActionWithTarget(MenuContext, selected);
-        returnToParent();
+        cleanupSession();
     }
     else {
         llRegionSayTo(CurrentUser, 0, "Avatar not found.");
-        returnToParent();
+        cleanupSession();
     }
 }
 
