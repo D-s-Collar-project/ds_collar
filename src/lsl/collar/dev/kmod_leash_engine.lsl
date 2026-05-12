@@ -1261,10 +1261,6 @@ default
                 // continues in the background until natural timeout.
                 if (!Leashed) return;
                 HolderTarget = (key)jsonGet(msg, "holder", (string)NULL_KEY);
-                llOwnerSay("[engine] pin HolderTarget=" + (string)HolderTarget
-                    + " Leashed=" + (string)Leashed
-                    + " FollowTarget=" + (string)FollowTarget
-                    + " FollowIsAvatar=" + (string)FollowIsAvatar);
                 if (HolderTarget != NULL_KEY) setParticlesState(TRUE, HolderTarget);
             }
             else if (msg_type == "leash.proto.fallback") {
