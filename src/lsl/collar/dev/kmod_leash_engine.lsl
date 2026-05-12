@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl
 VERSION: 1.10
-REVISION: 29
+REVISION: 30
 PURPOSE: Leashing engine — state, ACL, claim/release/pass/yank, follow
          mechanics, settings persistence, broadcasts. Holder-discovery
          handshake protocol lives in sibling kmod_leash_proto.lsl.
@@ -11,6 +11,7 @@ ARCHITECTURE: Engine + sibling proto. Engine owns leash state and the
               machine. IPC reuses SETTINGS_BUS so no new bus number is
               consumed (proto filters on type prefix "leash.proto.*").
 CHANGES:
+- v1.1 rev 30: Drop stale leash.proto.holder / leash.proto.fallback messages from kmod_leash_proto when !Leashed. Proto can emit a late holder/fallback notification after an Unclip because LSL discards pending events on state change — a queued proto.shutdown gets dropped if proto state-changes first, so the handshake keeps running in the background until natural timeout (~4s). Without this guard, a real responder reply during that window would re-pin HolderTarget on a released leash, lighting particles to a phantom holder. One-line `if (!Leashed) return;` at the top of each handler.
 - v1.1 rev 29: Architectural split — handshake protocol moved to kmod_leash_proto.lsl. Engine retains leash state, ACL, claim/release/pass/yank, follow mechanics, controls, settings persistence, broadcasts, Lockmeister grab inflow. Removed from engine: HOLDER_STATE_* constants, HolderState/HolderPhaseStart/HolderListen/HolderListenOC/HolderSession globals, NATIVE_PHASE_DURATION/OC_PHASE_DURATION, LEASH_CHAN_LM/LEASH_CHAN_NATIVE constants, leashingModeQuery / findLeashpointPrim / leashProtoNativeRequest / leashProtoNativeResponse / leashProtoOCTargetHelper / leashProtoOCCompat / leashProtoHandover / leashProtoListenerTerminate / completeHandshake helpers, listen() event, native listener in state_entry, leashProtoHandover() tick. Engine keeps HolderTarget (the truth — proto reports, engine pins). IPC contract on SETTINGS_BUS: engine→proto sends leash.proto.start (controller, mode_str, validation_target, oc_ping_target) and leash.proto.shutdown; proto→engine sends leash.proto.holder (handshake found a holder) and leash.proto.fallback (handshake timed out, particle fallback target). Re-handshake retry in timer now sends leash.proto.start unconditionally (proto handles its own state idempotently). claimLeash and passLeashInternal call sendProtoStart instead of leashingModeQuery. clearLeashState calls sendProtoShutdown instead of leashProtoListenerTerminate. Renamed file: kmod_leash.lsl → kmod_leash_engine.lsl.
 - v1.1 rev 28: Bytecode reduction pass after Mono stack-heap collision in rev 27 (66888B / 102%). Saved ~1665B (now 65223B / 99.5%). Changes: (1) handleLmGrabbed now calls setLeashState; handleLmReleased now calls clearLeashState(TRUE) — closes a defensive cleanup gap. (2) New clearReclipState() helper replaces 3-place verbatim duplication in clearLeashState + checkAutoReclip. (3) New completeHandshake(holder) helper consolidates the 4-line tail of leashProtoNativeResponse + leashProtoOCCompat. (4) Dropped rlvFollowTarget — startFollow now skips MODE_POST inline and uses leashFollowTarget for avatar/coffle. (5) Inlined single-use persist helpers (persistLength/persistTurnto/persistTexture). (6) leashProtoNativeResponse avatar+coffle validation collapsed via leashFollowTarget for expected_wearer. (7) New clearPendingAction() helper used in handleAclResult final reset and state_entry. (8) NEW claimLeash(user, mode, target_key, acl_level) replaces grabLeashInternal/coffleLeashInternal/postLeashInternal — the per-mode *Internal entry points are gone; sections 3 and 4 dissolved. (9) handleAclResult dual if-ladder restructured into per-action blocks with inline policy check (marginal — denyAccess proliferation offsets ladder removal). passLeashInternal kept separate (different intent; uses notifyLeashTransfer). All inter-collar protocol strings preserved (OC interop is a hard requirement).
 - v1.1 rev 27: Add per-wearer leash texture setting (chain / silk). New LeashTexture global persisted under leash.texture (settings.set JSON path), defaults to "chain". setParticlesState passes LeashTexture as the style field on particles.start, broadcastState includes texture so plugin_leash can render the selection, and a new set_texture action (gated by POL_SETTINGS) routes through setTextureInternal — which validates against the chain/silk whitelist and re-renders particles immediately if leashed. Drops the hardcoded "style", "chain" in setParticlesState.
@@ -1206,6 +1207,12 @@ default
             }
             else if (msg_type == "leash.proto.holder") {
                 // kmod_leash_proto found a leashpoint — pin it.
+                // Drop the message if we're no longer leashed: proto can
+                // emit a late holder after an Unclip/release because LSL
+                // discards pending events when proto state-changes, so a
+                // queued proto.shutdown can be lost and the handshake
+                // continues in the background until natural timeout.
+                if (!Leashed) return;
                 HolderTarget = (key)jsonGet(msg, "holder", (string)NULL_KEY);
                 if (HolderTarget != NULL_KEY) setParticlesState(TRUE, HolderTarget);
             }
@@ -1213,6 +1220,8 @@ default
                 // Handshake timed out — particles aim at the raw mode
                 // anchor (proto picked it). HolderTarget stays NULL_KEY
                 // so followTick falls back to leashFollowTarget too.
+                // Same stale-message guard as proto.holder above.
+                if (!Leashed) return;
                 key fallback = (key)jsonGet(msg, "target", (string)NULL_KEY);
                 if (fallback != NULL_KEY) setParticlesState(TRUE, fallback);
             }
