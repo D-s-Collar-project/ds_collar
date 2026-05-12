@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_dialogs.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: Centralized dialog management for shared listener handling
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 8: Drop dead empty `else { }` block in ui.dialog.buttonconfig.register handler. Restructured the field-presence check as early-return guards (one per JSON field) instead of a compound AND-condition with an empty else branch. No behavior change.
 - v1.1 rev 7: Toggle-button state is now read directly from LSD at render
   time rather than taken from the button_data "state" field. Convention:
   for context "ui.core.lock" the state key is "plugin.lock.state" (the
@@ -550,14 +551,13 @@ default
             handle_dialog_close(msg);
         }
         else if (msg_type == "ui.dialog.buttonconfig.register") {
-            if ((llJsonGetValue(msg, ["context"]) != JSON_INVALID) && (llJsonGetValue(msg, ["button_a"]) != JSON_INVALID) && (llJsonGetValue(msg, ["button_b"]) != JSON_INVALID)) {
-                string context = llJsonGetValue(msg, ["context"]);
-                string button_a = llJsonGetValue(msg, ["button_a"]);
-                string button_b = llJsonGetValue(msg, ["button_b"]);
-                register_button_config(context, button_a, button_b);
-            }
-            else {
-            }
+            if (llJsonGetValue(msg, ["context"])  == JSON_INVALID) return;
+            if (llJsonGetValue(msg, ["button_a"]) == JSON_INVALID) return;
+            if (llJsonGetValue(msg, ["button_b"]) == JSON_INVALID) return;
+            string context  = llJsonGetValue(msg, ["context"]);
+            string button_a = llJsonGetValue(msg, ["button_a"]);
+            string button_b = llJsonGetValue(msg, ["button_b"]);
+            register_button_config(context, button_a, button_b);
         }
     }
     
