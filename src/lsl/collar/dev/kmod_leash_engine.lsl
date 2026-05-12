@@ -172,10 +172,27 @@ string POL_COFFLE   = "Coffle";
 string POL_POST     = "Post";
 string POL_SETTINGS = "Settings";
 
-// Leash mode constants
-integer MODE_AVATAR = 0;  // Standard leash to avatar
-integer MODE_COFFLE = 1;  // Collar-to-collar leashpoint connection
-integer MODE_POST = 2;    // Posted to a static object
+// Leash session abstraction (state = Leasher + FollowTarget + FollowIsAvatar):
+//   Leasher        = controller (has authority: release, yank, pass)
+//   FollowTarget   = who/what the wearer physically follows
+//   FollowIsAvatar = TRUE → target is an avatar (RLV @follow applies; validation
+//                    against responder's attachment-owner)
+//                    FALSE → target is a static object (no @follow; validation
+//                    against responder's linkset root)
+//
+// The three legacy "modes" emerge from combinations:
+//   Leasher == FollowTarget,  FollowIsAvatar=TRUE  → "grab"   (regular leash)
+//   Leasher != FollowTarget,  FollowIsAvatar=TRUE  → "coffle" (chain link)
+//                              FollowIsAvatar=FALSE → "post"   (static object)
+// mode_str is derived at handshake send-time; not a stored state variable.
+//
+// Pass swaps Leasher AND FollowTarget to the new user (full transfer).
+// Coffle keeps Leasher, changes FollowTarget (redirect follow without transfer).
+
+// Claim kinds — parameters to claimLeash() only. NOT stored as state.
+integer MODE_AVATAR = 0;  // Clip: grab leash, wearer follows the clicker
+integer MODE_COFFLE = 1;  // Coffle: wearer follows a different avatar
+integer MODE_POST = 2;    // Post: wearer follows a static object
 
 // Settings keys
 string KEY_LEASHED = "leash.leashedavatar";
@@ -192,9 +209,8 @@ key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
 string LeashTexture = "chain";    // Particle style — "chain" (default) or "silk"
-integer LeashMode = MODE_AVATAR;  // Current leash mode
-key LeashTarget = NULL_KEY;       // Target object for coffle/post modes
-key CoffleTargetAvatar = NULL_KEY; // Avatar wearing the target collar (coffle mode only)
+key FollowTarget = NULL_KEY;       // Who/what the wearer follows physically
+integer FollowIsAvatar = TRUE;     // TRUE → avatar (RLV @follow + attachment validation); FALSE → object (root validation)
 
 // Follow mechanics
 integer FollowActive = FALSE;
@@ -349,6 +365,16 @@ applySettingsSync() {
     if (tmp != "") TurnToFace = (integer)tmp;
     tmp = llLinksetDataRead(KEY_LEASH_TEXTURE);
     if (tmp == "chain" || tmp == "silk") LeashTexture = tmp;
+
+    // FollowTarget / FollowIsAvatar aren't persisted (mode survives only
+    // in-memory; coffle/post sessions don't restore across script reset
+    // — matches pre-unification behavior). If we wake up Leashed, default
+    // to avatar mode with Leasher as the follow target; the 10s retry
+    // timer will re-handshake to discover the real leashpoint.
+    if (Leashed && Leasher != NULL_KEY) {
+        FollowTarget = Leasher;
+        FollowIsAvatar = TRUE;
+    }
 }
 
 /* -------------------- STATE MANAGEMENT -------------------- */
@@ -360,14 +386,16 @@ integer clampLeashLength(integer len) {
     return len;
 }
 
-// Helper to set common leash state
-setLeashState(key user, integer mode, key target, key coffle_target) {
+// Helper to set common leash state. `follow_target` is who/what the
+// wearer will follow physically; `follow_is_avatar` distinguishes
+// avatar-mode (RLV @follow + attachment-owner validation) from
+// object-mode (no @follow + linkset-root validation).
+setLeashState(key user, key follow_target, integer follow_is_avatar) {
     Leashed = TRUE;
     Leasher = user;
     LastLeasher = user;
-    LeashMode = mode;
-    LeashTarget = target;
-    CoffleTargetAvatar = coffle_target;
+    FollowTarget = follow_target;
+    FollowIsAvatar = follow_is_avatar;
     persistLeashState(TRUE, user);
     broadcastState();
 }
@@ -376,9 +404,8 @@ setLeashState(key user, integer mode, key target, key coffle_target) {
 clearLeashState(integer clear_reclip) {
     Leashed = FALSE;
     Leasher = NULL_KEY;
-    LeashMode = MODE_AVATAR;
-    LeashTarget = NULL_KEY;
-    CoffleTargetAvatar = NULL_KEY;
+    FollowTarget = NULL_KEY;
+    FollowIsAvatar = TRUE;
     persistLeashState(FALSE, NULL_KEY);
     HolderTarget = NULL_KEY;
     AuthorizedLmController = NULL_KEY;
@@ -415,27 +442,25 @@ notifyLeashTransfer(key from_user, key to_user, string action) {
 // proto → engine:
 //   leash.proto.holder   — handshake found a holder, pin it
 //   leash.proto.fallback — handshake timed out, particle-aim target
-sendProtoStart(key controller, integer mode) {
-    string mode_str = "grab";
-    if (mode == MODE_COFFLE) mode_str = "coffle";
-    else if (mode == MODE_POST) mode_str = "post";
+sendProtoStart(key controller) {
+    // mode_str derived from current state for wire-protocol compatibility
+    // (other DS / OC collars still receive "grab" / "coffle" / "post").
+    string mode_str;
+    if (!FollowIsAvatar)            mode_str = "post";
+    else if (FollowTarget == Leasher) mode_str = "grab";
+    else                              mode_str = "coffle";
 
-    // Proto's LM ping target: leasher avatar in grab; the target object
-    // (collar or post root) in coffle/post.
-    key oc_ping_target = Leasher;
-    if (mode != MODE_AVATAR) oc_ping_target = LeashTarget;
-
-    // Validation target: leashFollowTarget gives Leasher / CoffleTargetAvatar
-    // for avatar/coffle (expected attachment owner), or LeashTarget for post
-    // (expected linkset root) — exactly the right value for each mode.
-    key validation_target = leashFollowTarget();
-
+    // Unified model: both validation_target and oc_ping_target are
+    // FollowTarget. For avatar-modes the responder is expected to be an
+    // attachment owned by FollowTarget; for post the responder's linkset
+    // root must equal FollowTarget. The OC LM ping is addressed to the
+    // same UUID and the responder echoes it back as the nonce.
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type",              "leash.proto.start",
         "controller",        (string)controller,
         "mode",              mode_str,
-        "validation_target", (string)validation_target,
-        "oc_ping_target",    (string)oc_ping_target
+        "validation_target", (string)FollowTarget,
+        "oc_ping_target",    (string)FollowTarget
     ]), NULL_KEY);
 }
 
@@ -666,15 +691,13 @@ checkAutoReclip() {
 
 /* -------------------- FOLLOW MECHANICS -------------------- */
 
-// Resolve the leash anchor for the current mode. Callers may layer
-// HolderTarget on top when they want the discovered LeashPoint prim
-// instead of the raw mode anchor (e.g. followTick), or use the raw
-// value directly when they need the underlying avatar/object.
+// The leash anchor for the current session. After the Controller/
+// FollowTarget unification this is a one-liner; kept as a helper so
+// call sites read clearly (and so a future swap to a derived value is
+// localised). Callers may layer HolderTarget on top when they want the
+// discovered LeashPoint prim instead of the raw anchor.
 key leashFollowTarget() {
-    if (LeashMode == MODE_AVATAR)      return Leasher;
-    else if (LeashMode == MODE_COFFLE) return CoffleTargetAvatar;
-    else if (LeashMode == MODE_POST)   return LeashTarget;
-    return NULL_KEY;
+    return FollowTarget;
 }
 
 // accept=FALSE so the wearer's input still drives the avatar normally;
@@ -701,13 +724,10 @@ startFollow() {
 
     FollowActive = TRUE;
 
-    // RLV @follow target: leashFollowTarget for avatar/coffle (avatar key);
-    // post mode skips because static prims can't be RLV-followed.
-    if (LeashMode != MODE_POST) {
-        key rlv_target = leashFollowTarget();
-        if (rlv_target != NULL_KEY) {
-            llOwnerSay("@follow:" + (string)rlv_target + "=force");
-        }
+    // RLV @follow target: FollowTarget when avatar; post mode skips
+    // because static prims can't be RLV-followed.
+    if (FollowIsAvatar && FollowTarget != NULL_KEY) {
+        llOwnerSay("@follow:" + (string)FollowTarget + "=force");
     }
 
     llRequestPermissions(llGetOwner(), PERMISSION_TAKE_CONTROLS);
@@ -804,6 +824,17 @@ followTick() {
 
 /* -------------------- STATE BROADCAST -------------------- */
 broadcastState() {
+    // Legacy "mode" field stays integer-coded for wire-compat with
+    // plugin_leash's existing parsing. Derive from current state.
+    integer mode_out = MODE_AVATAR;
+    if (!FollowIsAvatar)            mode_out = MODE_POST;
+    else if (FollowTarget != Leasher) mode_out = MODE_COFFLE;
+
+    // Legacy "target" semantics: NULL_KEY in avatar mode (suppresses the
+    // "Target: ..." line in plugin_leash); FollowTarget for coffle/post.
+    key target_out = NULL_KEY;
+    if (FollowTarget != Leasher || !FollowIsAvatar) target_out = FollowTarget;
+
     string msg = llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.state",
         "leashed", Leashed,
@@ -811,8 +842,8 @@ broadcastState() {
         "length", LeashLength,
         "turnto", TurnToFace,
         "texture", LeashTexture,
-        "mode", LeashMode,
-        "target", (string)LeashTarget
+        "mode", mode_out,
+        "target", (string)target_out
     ]);
     llMessageLinked(LINK_SET, UI_BUS, msg, NULL_KEY);
 }
@@ -887,32 +918,38 @@ claimLeash(key user, integer mode, key target_key, integer acl_level) {
         }
     }
 
-    // Mode-specific target validation + notice text.
-    key coffle_target_avatar = NULL_KEY;
+    // Mode-specific target validation. Resolve to a unified
+    // (follow_target, follow_is_avatar) pair for setLeashState.
+    key follow_target;
+    integer follow_is_avatar;
     string notice;
 
     if (mode == MODE_AVATAR) {
+        follow_target = user;
+        follow_is_avatar = TRUE;
         notice = "Leash grabbed by " + llKey2Name(user);
     }
     else if (mode == MODE_COFFLE) {
         // OBJECT_OWNER returns the avatar wearing the collar, not the ACL
         // owner (Dom). This validation allows coffling between different
-        // subs with the same Dom.
+        // subs with the same Dom. The wearer of the target collar is the
+        // FollowTarget — that's who our wearer physically follows.
         list details = llGetObjectDetails(target_key, [OBJECT_POS, OBJECT_NAME, OBJECT_OWNER]);
         if (llGetListLength(details) == 0) {
             llRegionSayTo(user, 0, "Target collar not found or out of range.");
             return;
         }
-        coffle_target_avatar = llList2Key(details, 2);
-        if (coffle_target_avatar == NULL_KEY) {
+        follow_target = llList2Key(details, 2);
+        if (follow_target == NULL_KEY) {
             llRegionSayTo(user, 0, "Cannot coffle: target collar has no owner.");
             return;
         }
-        if (coffle_target_avatar == llGetOwner()) {
+        if (follow_target == llGetOwner()) {
             llRegionSayTo(user, 0, "Cannot coffle to yourself.");
             return;
         }
-        notice = "Coffled to " + llKey2Name(coffle_target_avatar);
+        follow_is_avatar = TRUE;
+        notice = "Coffled to " + llKey2Name(follow_target);
     }
     else if (mode == MODE_POST) {
         list details = llGetObjectDetails(target_key, [OBJECT_POS, OBJECT_NAME]);
@@ -920,13 +957,17 @@ claimLeash(key user, integer mode, key target_key, integer acl_level) {
             llRegionSayTo(user, 0, "Post object not found or out of range.");
             return;
         }
+        follow_target = target_key;
+        follow_is_avatar = FALSE;
         notice = "Posted to " + llList2String(details, 1);
     }
 
     // Common claim sequence.
-    setLeashState(user, mode, target_key, coffle_target_avatar);
-    sendProtoStart(user, mode);
-    if (mode == MODE_AVATAR) {
+    setLeashState(user, follow_target, follow_is_avatar);
+    sendProtoStart(user);
+    // LM authorization only when wearer follows the controller (regular
+    // leash). Coffle and post don't enable LM.
+    if (follow_target == user && follow_is_avatar) {
         AuthorizedLmController = user;
         setLockmeisterState(TRUE, user);
     }
@@ -958,11 +999,12 @@ passLeashInternal(key new_leasher) {
 
     key old_leasher = Leasher;
 
-    // Reset to avatar mode (if was in coffle/post, revert to standard leashing)
-    setLeashState(new_leasher, MODE_AVATAR, NULL_KEY, NULL_KEY);
+    // Reset to avatar mode (if was in coffle/post, revert to standard
+    // leashing). Pass = full transfer of both controller and follow target.
+    setLeashState(new_leasher, new_leasher, TRUE);
 
     // Start holder handshake for new leasher
-    sendProtoStart(new_leasher, MODE_AVATAR);
+    sendProtoStart(new_leasher);
 
     // Update Lockmeister authorization
     AuthorizedLmController = new_leasher;
@@ -1012,7 +1054,7 @@ yankToLeasher() {
 // before this is called.
 handleLmGrabbed(key controller) {
     if (Leashed) return;
-    setLeashState(controller, MODE_AVATAR, NULL_KEY, NULL_KEY);
+    setLeashState(controller, controller, TRUE);
     startFollow();
     llRegionSayTo(llGetOwner(), 0, "Leashed by " + llKey2Name(controller) + " (Lockmeister)");
 }
@@ -1243,7 +1285,7 @@ default
         // re-run the handshake; proto handles its own state idempotently.
         if (((integer)TickCount % 10) == 0) {
             if (Leashed && HolderTarget == NULL_KEY && Leasher != NULL_KEY) {
-                sendProtoStart(Leasher, LeashMode);
+                sendProtoStart(Leasher);
             }
         }
 
