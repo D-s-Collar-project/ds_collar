@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 26
+REVISION: 29
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -10,6 +10,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              routed through kmod_rlv on UI_BUS so refcount coordinates with
              any relay-source that asks for the same folder lock.
 CHANGES:
+- v1.1 rev 29: Wrap-around paging on `<<` / `>>` matching plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. LastMaxPage global stashed by show_folder_pick so the dispatcher avoids recomputing action_count for the wrap branches.
+- v1.1 rev 28: Page size dynamic on action_count. ACL 2 (no Lock/Unlock in policy) at subfolder now gets 7 folder items per page (slot 5 fills with content); ACL 3+ still 6 (slot 5 = Lock|Unlock toggle). Root unchanged at 9. PAGE_SIZE_ROOT / PAGE_SIZE_SUBPATH constants removed — page_size = 9 - action_count.
+- v1.1 rev 27: Align folder-pick dialog layout with plugin_animate convention — nav order `<<, >>, Back` at slots 0-2, action buttons at slot 3+, content fills top-to-bottom via display-ordered target_slots. Folder 1 is now always top-left.
 - v1.1 rev 26: Collapse DiscoveredFolders/WornStates parallel lists into one stride-2 `Folders` list and pre-allocate via doubling in handle_rlv_response — eliminates O(N²) heap churn on large #RLV trees, halves persistent memory for the parsed listing.
 - v1.1 rev 25: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 24: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_locked sends `settings.delta:folders.locked:<csv>`.
@@ -114,8 +117,11 @@ string  KEY_LOCKED  = "folders.locked";  // CSV of folder names locked via @deta
 
 integer RLV_CHAN          = 1888753;  // Private positive channel for @getinv responses
 float   RLV_TIMEOUT       = 10.0;     // Seconds to wait for viewer RLV reply
-integer PAGE_SIZE_ROOT    = 9;        // At #RLV root: 3 nav slots + 9 folder slots
-integer PAGE_SIZE_SUBPATH = 6;        // At a subfolder: 3 nav + up to 3 actions + 6 folder slots
+// Page size is derived per-render in show_folder_pick as `9 - action_count`,
+// because the action_buttons count varies with policy: 0 at root, 2 at a
+// subfolder when the user has Attach/Detach but no Lock/Unlock, 3 when
+// they have all four. Effective sizes: root=9, ACL 2 subfolder=7,
+// ACL 3+ subfolder=6.
 
 /* -------------------- STATE -------------------- */
 list    LockedNames       = [];   // Folder paths locked via @detachallthis:name=n
@@ -132,6 +138,10 @@ string  CurrentPath       = "";   // #RLV-relative browsing path; "" = #RLV root
 // pre-allocation via doubling in handle_rlv_response.
 list    Folders           = [];
 integer PickPage          = 0;
+// Stashed by show_folder_pick so the dispatcher's prev/next wrap branches
+// don't have to recompute action_count → page_size → max_page. Refreshed
+// on every render; only consumed by the immediately-following click.
+integer LastMaxPage       = 0;
 integer RlvListenHandle   = 0;
 
 /* -------------------- HELPERS -------------------- */
@@ -238,6 +248,7 @@ cleanup_session() {
     CurrentPath       = "";
     Folders           = [];
     PickPage          = 0;
+    LastMaxPage       = 0;
 }
 
 /* -------------------- SETTINGS -------------------- */
@@ -392,9 +403,29 @@ string worn_indicator(string raw) {
 // slots; at subfolder, 3 nav + up to 3 action + 6 folder slots.
 show_folder_pick(integer page) {
     integer at_subfolder = (CurrentPath != "");
-    integer page_size;
-    if (at_subfolder) page_size = PAGE_SIZE_SUBPATH;
-    else              page_size = PAGE_SIZE_ROOT;
+
+    integer current_locked = FALSE;
+    if (at_subfolder) {
+        if (llListFindList(LockedNames, [CurrentPath]) != -1) current_locked = TRUE;
+    }
+
+    // Action buttons computed up-front because page_size depends on
+    // action_count (slot 5 is content for users without Lock/Unlock policy).
+    list action_buttons = [];
+    if (at_subfolder) {
+        if (btn_allowed("Attach")) action_buttons += [btn("Attach", "attach")];
+        if (btn_allowed("Detach")) action_buttons += [btn("Detach", "detach")];
+        if (current_locked) {
+            if (btn_allowed("Unlock")) action_buttons += [btn("Unlock", "unlock")];
+        }
+        else {
+            if (btn_allowed("Lock")) action_buttons += [btn("Lock", "lock")];
+        }
+    }
+    integer action_count = llGetListLength(action_buttons);
+
+    // 12 dialog slots minus 3 nav minus action buttons = content capacity.
+    integer page_size = 9 - action_count;
 
     integer total = llGetListLength(Folders) / 2;
 
@@ -404,17 +435,13 @@ show_folder_pick(integer page) {
     string crumb = "#RLV";
     if (at_subfolder) crumb = "#RLV/" + CurrentPath;
 
-    integer current_locked = FALSE;
-    if (at_subfolder) {
-        if (llListFindList(LockedNames, [CurrentPath]) != -1) current_locked = TRUE;
-    }
-
     integer max_page;
     if (total == 0) max_page = 0;
     else            max_page = (total - 1) / page_size;
     if (page < 0)        page = 0;
     if (page > max_page) page = max_page;
-    PickPage = page;
+    PickPage    = page;
+    LastMaxPage = max_page;
 
     integer start   = page * page_size;
     integer end_idx = start + page_size;
@@ -448,49 +475,45 @@ show_folder_pick(integer page) {
         }
     }
 
-    // Folder buttons (row-inversion so dialog reads top-to-bottom)
-    integer num_rows  = 0;
-    integer top_count = 0;
-    if (count > 0) {
-        num_rows  = (count + 2) / 3;
-        top_count = count - (num_rows - 1) * 3;
-    }
-    list folder_buttons = [];
-    integer r = num_rows - 1;
-    while (r >= 1) {
-        integer row_start = top_count + (r - 1) * 3;
-        integer ci = 0;
-        while (ci < 3) {
-            integer item_idx = row_start + ci;
-            folder_buttons += [btn((string)(item_idx + 1), "pick:" + (string)(start + item_idx))];
-            ci += 1;
-        }
-        r -= 1;
-    }
-    integer ti = 0;
-    while (ti < top_count) {
-        folder_buttons += [btn((string)(ti + 1), "pick:" + (string)(start + ti))];
-        ti += 1;
-    }
-
-    // Action buttons act on CurrentPath itself — only meaningful at a
-    // subfolder. Lock and Unlock are mutually exclusive; show only the
-    // one that applies given the current lock state.
-    list action_buttons = [];
-    if (at_subfolder) {
-        if (btn_allowed("Attach")) action_buttons += [btn("Attach", "attach")];
-        if (btn_allowed("Detach")) action_buttons += [btn("Detach", "detach")];
-        if (current_locked) {
-            if (btn_allowed("Unlock")) action_buttons += [btn("Unlock", "unlock")];
-        }
-        else {
-            if (btn_allowed("Lock")) action_buttons += [btn("Lock", "lock")];
-        }
-    }
-
-    list button_data = [btn("Back", "back"), btn("<<", "prev"), btn(">>", "next")];
+    // Layout per project dialog convention (canonical: plugin_animate):
+    //   slots 0-2 : nav (<<, >>, Back)
+    //   slot 3-N  : action buttons (0 at root; 2 or 3 at subfolder per ACL)
+    //   remaining : folder content, slot-mapped top-to-bottom, left-to-right
+    //               so folder 1 is always top-left of the content area.
+    list button_data = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
     button_data += action_buttons;
-    button_data += folder_buttons;
+    // Pad placeholder slots; llListReplaceList below overwrites each one.
+    // " " is the project's blank-slot filler (kmod_dialogs accepts it).
+    integer pad_i;
+    for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
+
+    integer first_content_slot = 3 + action_count;
+    integer total_buttons      = first_content_slot + count;
+
+    // Build target_slots in display order: row 4 (top) left→right, row 3,
+    // then row 2 (only slots not consumed by actions).
+    list target_slots = [];
+    if (total_buttons > 9)  target_slots += [9];
+    if (total_buttons > 10) target_slots += [10];
+    if (total_buttons > 11) target_slots += [11];
+    if (total_buttons > 6)  target_slots += [6];
+    if (total_buttons > 7)  target_slots += [7];
+    if (total_buttons > 8)  target_slots += [8];
+    if (first_content_slot <= 3 && total_buttons > 3) target_slots += [3];
+    if (first_content_slot <= 4 && total_buttons > 4) target_slots += [4];
+    if (first_content_slot <= 5 && total_buttons > 5) target_slots += [5];
+
+    integer ci = 0;
+    while (ci < count) {
+        integer slot     = llList2Integer(target_slots, ci);
+        integer item_idx = start + ci;
+        button_data = llListReplaceList(
+            button_data,
+            [btn((string)(ci + 1), "pick:" + (string)item_idx)],
+            slot, slot
+        );
+        ci += 1;
+    }
 
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type",        "ui.dialog.open",
@@ -624,24 +647,17 @@ handle_dialog_response(string msg) {
         return;
     }
 
-    integer page_size;
-    if (CurrentPath != "") page_size = PAGE_SIZE_SUBPATH;
-    else                   page_size = PAGE_SIZE_ROOT;
-
+    // Wrap-around paging per plugin_animate convention. LastMaxPage was
+    // stashed by the most recent show_folder_pick render — current by the
+    // time a click reaches us.
     if (ctx == "prev") {
-        integer new_page = PickPage - 1;
-        if (new_page < 0) new_page = 0;
-        show_folder_pick(new_page);
+        if (PickPage == 0) show_folder_pick(LastMaxPage);
+        else               show_folder_pick(PickPage - 1);
         return;
     }
     if (ctx == "next") {
-        integer total = llGetListLength(Folders) / 2;
-        integer max_page;
-        if (total == 0) max_page = 0;
-        else            max_page = (total - 1) / page_size;
-        integer new_page = PickPage + 1;
-        if (new_page > max_page) new_page = max_page;
-        show_folder_pick(new_page);
+        if (PickPage >= LastMaxPage) show_folder_pick(0);
+        else                         show_folder_pick(PickPage + 1);
         return;
     }
 

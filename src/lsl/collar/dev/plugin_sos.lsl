@@ -426,10 +426,6 @@ default {
         register_self();
     }
 
-    on_rez(integer start_param) {
-        // Preserve state on attach/detach
-    }
-
     changed(integer change_mask) {
         if (change_mask & CHANGED_OWNER) {
             llResetScript();
