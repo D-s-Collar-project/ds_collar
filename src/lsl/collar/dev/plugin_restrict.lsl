@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.1 rev 14: Apply the project's bottom-nav + top-to-bottom-L-R dialog convention across all three menus (main, category, sit-target). Nav row is now `<<, >>, Back` at slots 0-2 (was `Back, <<, >>` and inversion via a manual list-reverse). Items slot-mapped via a nav-count-agnostic reorder_item_buttons helper matching plugin_leash rev 22. Stripped the trailing `:` from every restriction label (LABEL_INV/SPEECH/TRAVEL/OTHER) — the `[X]` / `[ ]` checkbox prefix is the delimiter now. CAT_* / LABEL_* pre-sorted alphabetically by displayed label (parallel-stride preserved); main-menu if-blocks re-ordered alphabetical as well.
 - v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_restrictions sends `settings.delta:restrict.list:<csv>`; drops direct llLinksetDataWrite.
 - v1.1 rev 11: Migrate RLV emission to kmod_rlv (rlv.apply / rlv.release /
@@ -82,15 +83,21 @@ string CAT_NAME_SPEECH    = "Speech";
 string CAT_NAME_TRAVEL    = "Travel";
 string CAT_NAME_OTHER     = "Other";
 
-list CAT_INV    = ["@detachall", "@addoutfit", "@remoutfit", "@remattach", "@addattach", "@attachall", "@showinv", "@viewnote", "@viewscript"];
-list CAT_SPEECH = ["@sendchat", "@recvim", "@sendim", "@startim", "@chatshout", "@chatwhisper"];
-list CAT_TRAVEL = ["@tptlm", "@tploc", "@tplure"];
-list CAT_OTHER  = ["@edit", "@rez", "@touchall", "@touchworld", "@accepttp", "@shownames", "@sit", "@unsit", "@stand"];
+// CAT_* and LABEL_* are parallel-stride lists (index-paired). Both are
+// pre-sorted by displayed label so render order is alphabetical without
+// per-render sorting cost. Lexicographic / case-sensitive — note that
+// '+' (43) and '-' (45) sort before letters (A=65) in ASCII.
+list CAT_INV    = ["@addattach", "@addoutfit", "@remattach", "@remoutfit", "@attachall", "@detachall", "@showinv",  "@viewnote", "@viewscript"];
+list CAT_SPEECH = ["@sendchat",  "@recvim",    "@sendim",    "@chatshout", "@startim",   "@chatwhisper"];
+list CAT_TRAVEL = ["@tploc",     "@tptlm",     "@tplure"];
+list CAT_OTHER  = ["@edit",      "@shownames", "@accepttp",  "@rez",       "@sit",       "@stand",     "@touchall", "@touchworld", "@unsit"];
 
-list LABEL_INV    = ["Det. All:", "+ Outfit:", "- Outfit:", "- Attach:", "+ Attach:", "Att. All:", "Inv:", "Notes:", "Scripts:"];
-list LABEL_SPEECH = ["Chat:", "Recv IM:", "Send IM:", "Start IM:", "Shout:", "Whisper:"];
-list LABEL_TRAVEL = ["Map TP:", "Loc. TP:", "TP:"];
-list LABEL_OTHER  = ["Edit:", "Rez:", "Touch:", "Touch Wld:", "OK TP:", "Names:", "Sit:", "Unsit:", "Stand:"];
+// Labels carry no trailing punctuation — the [X]/[ ] checkbox prefix
+// added in show_category_menu acts as the visual delimiter.
+list LABEL_INV    = ["+ Attach",  "+ Outfit",  "- Attach",  "- Outfit",  "Att. All",  "Det. All", "Inv",       "Notes",     "Scripts"];
+list LABEL_SPEECH = ["Chat",      "Recv IM",   "Send IM",   "Shout",     "Start IM",  "Whisper"];
+list LABEL_TRAVEL = ["Loc. TP",   "Map TP",    "TP"];
+list LABEL_OTHER  = ["Edit",      "Names",     "OK TP",     "Rez",       "Sit",       "Stand",    "Touch",     "Touch Wld", "Unsit"];
 
 /* -------------------- UI SESSION STATE -------------------- */
 
@@ -133,6 +140,41 @@ list get_policy_buttons(string ctx, integer acl) {
 
 integer btn_allowed(string label) {
     return (llListFindList(gPolicyButtons, [label]) != -1);
+}
+
+/* -------------------- DIALOG LAYOUT HELPER -------------------- */
+// Lays out a dialog in the project's bottom-nav + top-to-bottom-L-R
+// content convention (canonical: plugin_animate, plugin_leash_object).
+// Caller provides 1-3 nav buttons (slots 0..nav_count-1) and 0..N content
+// items, which fill the remaining slots in visual top-to-bottom-L-R
+// order. No filler is left in the output when items consume all
+// qualifying slots (true for total <= 12 here).
+list reorder_item_buttons(list nav_buttons, list item_buttons) {
+    integer nav_count  = llGetListLength(nav_buttons);
+    integer item_count = llGetListLength(item_buttons);
+    integer total      = nav_count + item_count;
+
+    list reading_order = [9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2];
+    list slots = [];
+    integer ri = 0;
+    while (ri < 12) {
+        integer rs = llList2Integer(reading_order, ri);
+        if (rs < total && rs >= nav_count) slots += [rs];
+        ri++;
+    }
+
+    list final_buttons = nav_buttons;
+    integer p = 0;
+    while (p < item_count) { final_buttons += [btn(" ", " ")]; p++; }
+
+    integer i = 0;
+    while (i < item_count) {
+        integer slot = llList2Integer(slots, i);
+        final_buttons = llListReplaceList(final_buttons,
+            [llList2String(item_buttons, i)], slot, slot);
+        i++;
+    }
+    return final_buttons;
 }
 
 /* -------------------- LIFECYCLE -------------------- */
@@ -378,13 +420,14 @@ display_sit_targets() {
         body += "\nPage " + (string)(SitPage + 1) + "/" + (string)total_pages;
     }
 
-    // Build button_data: Back, <<, >>, then numbered buttons
-    list button_data = [btn("Back", "back"), btn("<<", "prev_page"), btn(">>", "next_page")];
+    list nav_buttons  = [btn("<<", "prev_page"), btn(">>", "next_page"), btn("Back", "back")];
+    list item_buttons = [];
     i = 1;
     while (i <= (end_idx - start_idx)) {
-        button_data += [btn((string)i, "sit_" + (string)i)];
+        item_buttons += [btn((string)i, "sit_" + (string)i)];
         i = i + 1;
     }
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
 
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
@@ -430,19 +473,19 @@ show_main() {
     // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
+    list nav_buttons  = [btn("Back", "back")];
+    list item_buttons = [];
+
+    // Alphabetical by displayed label.
+    if (btn_allowed("Clear all"))   item_buttons += [btn("Clear all",        "clear_all")];
+    if (btn_allowed("Force Sit"))   item_buttons += [btn("Force Sit",        "force_sit")];
+    if (btn_allowed("Force Unsit")) item_buttons += [btn("Force Unsit",      "force_unsit")];
+    if (btn_allowed("Inventory"))   item_buttons += [btn(CAT_NAME_INVENTORY, "cat_inventory")];
+    if (btn_allowed("Other"))       item_buttons += [btn(CAT_NAME_OTHER,     "cat_other")];
+    if (btn_allowed("Speech"))      item_buttons += [btn(CAT_NAME_SPEECH,    "cat_speech")];
+    if (btn_allowed("Travel"))      item_buttons += [btn(CAT_NAME_TRAVEL,    "cat_travel")];
+
     string body;
-    list button_data = [btn("Back", "back")];
-
-    // Build menu from policy
-    if (btn_allowed("Inventory"))  button_data += [btn(CAT_NAME_INVENTORY, "cat_inventory")];
-    if (btn_allowed("Speech"))     button_data += [btn(CAT_NAME_SPEECH, "cat_speech")];
-    if (btn_allowed("Travel"))     button_data += [btn(CAT_NAME_TRAVEL, "cat_travel")];
-    if (btn_allowed("Other"))      button_data += [btn(CAT_NAME_OTHER, "cat_other")];
-    if (btn_allowed("Clear all"))  button_data += [btn("Clear all", "clear_all")];
-    if (btn_allowed("Force Sit"))  button_data += [btn("Force Sit", "force_sit")];
-    if (btn_allowed("Force Unsit")) button_data += [btn("Force Unsit", "force_unsit")];
-
-    // Adjust body text based on available buttons
     if (btn_allowed("Inventory")) {
         body = "RLV Restrictions\n\nActive: " + (string)llGetListLength(Restrictions) + "/" + (string)MAX_RESTRICTIONS;
     }
@@ -450,6 +493,7 @@ show_main() {
         body = "RLV Actions\n\nForce sit or unsit the wearer.";
     }
 
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
         "session_id", SessionId,
@@ -484,38 +528,22 @@ show_category_menu(string cat_name, integer page_num) {
         end_idx = total_items - 1;
     }
 
-    // Build button_data list with checkbox prefixes
-    list page_buttons = [];
+    // Build item buttons with [X]/[ ] checkbox prefix per current state.
+    list item_buttons = [];
     integer i = start_idx;
     while (i <= end_idx) {
-        string cmd = llList2String(cat_cmds, i);
+        string cmd   = llList2String(cat_cmds, i);
         string label = llList2String(cat_labels, i);
-
-        integer is_active = (restriction_idx(cmd) != -1);
-        if (is_active) {
-            label = "[X] " + label;
-        }
-        else {
-            label = "[ ] " + label;
-        }
-
-        page_buttons += [btn(label, cmd)];
+        if (restriction_idx(cmd) != -1) label = "[X] " + label;
+        else                            label = "[ ] " + label;
+        item_buttons += [btn(label, cmd)];
         i = i + 1;
     }
 
-    // Calculate max page
     integer max_page = (total_items - 1) / DIALOG_PAGE_SIZE;
 
-    // Reverse the order so items fill bottom-right to top-left
-    list reversed = [];
-    i = llGetListLength(page_buttons) - 1;
-    while (i >= 0) {
-        reversed += [llList2String(page_buttons, i)];
-        i = i - 1;
-    }
-
-    // Add nav buttons in bottom-left corner (positions 0, 1, 2)
-    reversed = [btn("Back", "back"), btn("<<", "prev_page"), btn(">>", "next_page")] + reversed;
+    list nav_buttons = [btn("<<", "prev_page"), btn(">>", "next_page"), btn("Back", "back")];
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
 
     string body = cat_name + " (" + (string)(page_num + 1) + "/" + (string)(max_page + 1) + ")\n\nActive: " + (string)llGetListLength(Restrictions);
 
@@ -525,7 +553,7 @@ show_category_menu(string cat_name, integer page_num) {
         "user", (string)CurrentUser,
         "title", cat_name,
         "body", body,
-        "button_data", llList2Json(JSON_ARRAY, reversed),
+        "button_data", llList2Json(JSON_ARRAY, button_data),
         "timeout", 60
     ]), NULL_KEY);
 }
