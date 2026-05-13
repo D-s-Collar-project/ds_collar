@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 30
+REVISION: 31
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -10,6 +10,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              routed through kmod_rlv on UI_BUS so refcount coordinates with
              any relay-source that asks for the same folder lock.
 CHANGES:
+- v1.1 rev 31: persist_locked switches to `settings.delete:folders.locked` when LockedNames becomes empty (last unlock), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix: previously the empty-CSV `settings.delta` was silently dropped, folders.locked stayed populated with the last-removed entry, and the next settings.sync re-emitted @detachallthis:<folder>=n — visible as the "folder reactivates whenever any RLV restriction is toggled" bug.
 - v1.1 rev 30: Sort the parsed folder list alphabetically (case-sensitive) before render. Viewer returns @getinvworn in inventory-internal order; pick dialog was unbrowsable on large outfit trees.
 - v1.1 rev 29: Wrap-around paging on `<<` / `>>` matching plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. LastMaxPage global stashed by show_folder_pick so the dispatcher avoids recomputing action_count for the wrap branches.
 - v1.1 rev 28: Page size dynamic on action_count. ACL 2 (no Lock/Unlock in policy) at subfolder now gets 7 folder items per page (slot 5 fills with content); ACL 3+ still 6 (slot 5 = Lock|Unlock toggle). Root unchanged at 9. PAGE_SIZE_ROOT / PAGE_SIZE_SUBPATH constants removed — page_size = 9 - action_count.
@@ -284,6 +285,17 @@ apply_settings_sync() {
 }
 
 persist_locked() {
+    // When the list goes empty, ERASE the LSD key outright via
+    // settings.delete rather than writing an empty-value settings.delta.
+    // An empty key would otherwise (a) get silently dropped by older
+    // kmod_settings ≤ rev 15's parser, or (b) sit as a "" LSD value
+    // that future readers might still interpret as present. Either way,
+    // the cleanest "no locks" representation is "key absent."
+    if (llGetListLength(LockedNames) == 0) {
+        llMessageLinked(LINK_SET, SETTINGS_BUS,
+            "settings.delete:" + KEY_LOCKED, NULL_KEY);
+        return;
+    }
     string csv = llDumpList2String(LockedNames, ",");
     // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
     llMessageLinked(LINK_SET, SETTINGS_BUS,

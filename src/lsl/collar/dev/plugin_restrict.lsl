@@ -1,13 +1,15 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 16
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.1 rev 16: Command audit against the RLV API. CAT_INV: drop @attachall / @detachall (not y/n restrictions in RLV; RLVa aliases to @attachallthis / @detachallthis — folder lock, plugin_folders' domain). CAT_OTHER: drop @stand (no such command), drop @accepttp (add/rem exception list, not y/n; moved to plugin_rlvex). CAT_TRAVEL: typo fix @tptlm → @tplm (landmark TP); add @sittp ("Sit TP"). Touch refactored from a single coarse "Touch" (@touchall) into the full hierarchy: @fartouch ("Touch Far"), @touchall ("Touch Own"), @touchworld ("Touch Wld"), @touchattach ("Touch Att"), @touchhud ("Touch HUD"), @interact ("Isolate"). New reconcile_sittp() drives @sittp's viewer state from the OR of explicit toggle + implicit holds via @tplm or @tploc — wearers blocked from teleporting can't bypass via far-sit warp either. apply_settings_sync calls reconcile_sittp after the apply loop.
+- v1.1 rev 15: persist_restrictions switches to `settings.delete:restrict.list` when Restrictions becomes empty (last toggle-off), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix — the empty-CSV settings.delta was silently dropped, leaving restrict.list populated and causing the next settings.sync to re-apply stale entries (the `@touchall` resurrection / folder-lock reactivation pattern). When a restriction is lifted now, its LSD entry is actually erased.
 - v1.1 rev 14: Apply the project's bottom-nav + top-to-bottom-L-R dialog convention across all three menus (main, category, sit-target). Nav row is now `<<, >>, Back` at slots 0-2 (was `Back, <<, >>` and inversion via a manual list-reverse). Items slot-mapped via a nav-count-agnostic reorder_item_buttons helper matching plugin_leash rev 22. Stripped the trailing `:` from every restriction label (LABEL_INV/SPEECH/TRAVEL/OTHER) — the `[X]` / `[ ]` checkbox prefix is the delimiter now. CAT_* / LABEL_* pre-sorted alphabetically by displayed label (parallel-stride preserved); main-menu if-blocks re-ordered alphabetical as well.
 - v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_restrictions sends `settings.delta:restrict.list:<csv>`; drops direct llLinksetDataWrite.
@@ -87,17 +89,29 @@ string CAT_NAME_OTHER     = "Other";
 // pre-sorted by displayed label so render order is alphabetical without
 // per-render sorting cost. Lexicographic / case-sensitive — note that
 // '+' (43) and '-' (45) sort before letters (A=65) in ASCII.
-list CAT_INV    = ["@addattach", "@addoutfit", "@remattach", "@remoutfit", "@attachall", "@detachall", "@showinv",  "@viewnote", "@viewscript"];
-list CAT_SPEECH = ["@sendchat",  "@recvim",    "@sendim",    "@chatshout", "@startim",   "@chatwhisper"];
-list CAT_TRAVEL = ["@tploc",     "@tptlm",     "@tplure"];
-list CAT_OTHER  = ["@edit",      "@shownames", "@accepttp",  "@rez",       "@sit",       "@stand",     "@touchall", "@touchworld", "@unsit"];
+//
+// Mischaracterizations cleaned up in rev 16 against the RLV API:
+//   - @attachall / @detachall: not y/n restrictions; RLVa aliases to
+//     @attachallthis / @detachallthis (folder lock on the collar's
+//     parent folder), which is plugin_folders' domain.
+//   - @stand: not in the API at all (closest is @unsit, already exposed).
+//   - @accepttp: add/rem exception list, not y/n — moved to plugin_rlvex.
+//   - @tptlm: typo, the correct command is @tplm.
+// Touch was a single @touchall toggle; split into the full hierarchy
+// (@fartouch, @touchall, @touchworld, @touchattach, @touchhud, @interact)
+// so the wearer doesn't lock themselves out of their own collar by
+// toggling a coarse "Touch."
+list CAT_INV    = ["@addattach", "@addoutfit", "@remattach", "@remoutfit", "@showinv",    "@viewnote",    "@viewscript"];
+list CAT_SPEECH = ["@sendchat",  "@recvim",    "@sendim",    "@chatshout", "@startim",    "@chatwhisper"];
+list CAT_TRAVEL = ["@tploc",     "@tplm",      "@sittp",     "@tplure"];
+list CAT_OTHER  = ["@edit",      "@interact",  "@shownames", "@rez",       "@sit",        "@touchattach", "@fartouch",   "@touchhud",   "@touchall",  "@touchworld", "@unsit"];
 
 // Labels carry no trailing punctuation — the [X]/[ ] checkbox prefix
 // added in show_category_menu acts as the visual delimiter.
-list LABEL_INV    = ["+ Attach",  "+ Outfit",  "- Attach",  "- Outfit",  "Att. All",  "Det. All", "Inv",       "Notes",     "Scripts"];
+list LABEL_INV    = ["+ Attach",  "+ Outfit",  "- Attach",  "- Outfit",  "Inv",       "Notes",       "Scripts"];
 list LABEL_SPEECH = ["Chat",      "Recv IM",   "Send IM",   "Shout",     "Start IM",  "Whisper"];
-list LABEL_TRAVEL = ["Loc. TP",   "Map TP",    "TP"];
-list LABEL_OTHER  = ["Edit",      "Names",     "OK TP",     "Rez",       "Sit",       "Stand",    "Touch",     "Touch Wld", "Unsit"];
+list LABEL_TRAVEL = ["Loc. TP",   "Map TP",    "Sit TP",    "TP"];
+list LABEL_OTHER  = ["Edit",      "Isolate",   "Names",     "Rez",       "Sit",       "Touch Att",   "Touch Far",   "Touch HUD",   "Touch Own",  "Touch Wld",   "Unsit"];
 
 /* -------------------- UI SESSION STATE -------------------- */
 
@@ -251,6 +265,17 @@ cleanup_session() {
 /* -------------------- SETTINGS PERSISTENCE -------------------- */
 
 persist_restrictions() {
+    // When all restrictions are lifted, ERASE the LSD key via
+    // settings.delete rather than persisting an empty-value settings.delta.
+    // Per kmod_settings rev 16 the empty-value path now works defensively,
+    // but explicit deletion is the semantically-correct "no restrictions
+    // active" representation and protects against partial-rollback
+    // scenarios where older kmod_settings would silently drop the write.
+    if (llGetListLength(Restrictions) == 0) {
+        llMessageLinked(LINK_SET, SETTINGS_BUS,
+            "settings.delete:" + KEY_RESTRICTIONS, NULL_KEY);
+        return;
+    }
     string csv = llDumpList2String(Restrictions, ",");
     // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
     llMessageLinked(LINK_SET, SETTINGS_BUS,
@@ -316,6 +341,12 @@ apply_settings_sync() {
         rlv_op("rlv.apply", llList2String(Restrictions, i));
         i = i + 1;
     }
+
+    // Reconcile the implicit @sittp hold from @tplm / @tploc after the
+    // explicit applies are out — covers the case where neither @sittp
+    // nor its implier was in the previous state but is in the new one,
+    // or vice versa.
+    reconcile_sittp();
 }
 
 /* -------------------- RESTRICTION LOGIC -------------------- */
@@ -324,13 +355,36 @@ integer restriction_idx(string restr_cmd) {
     return llListFindList(Restrictions, [restr_cmd]);
 }
 
+// @sittp viewer state derives from the OR of three sources: the user's
+// explicit "Sit TP" toggle, plus implicit holds from @tplm and @tploc
+// (a wearer who can't normally TP shouldn't be able to bypass via
+// far-sit-warp either). The Restrictions list only contains @sittp when
+// the user toggled it explicitly; reconcile_sittp drives the viewer
+// state from the combined source. kmod_rlv claim_add/remove is
+// idempotent per (consumer, behav), so repeated calls here are safe.
+reconcile_sittp() {
+    integer explicit = (llListFindList(Restrictions, ["@sittp"]) != -1);
+    integer implied  = (llListFindList(Restrictions, ["@tplm"])  != -1)
+                    || (llListFindList(Restrictions, ["@tploc"]) != -1);
+    if (explicit || implied) rlv_op("rlv.apply",   "@sittp");
+    else                     rlv_op("rlv.release", "@sittp");
+}
+
 toggle_restriction(string restr_cmd) {
     integer idx = restriction_idx(restr_cmd);
+    // @sittp's viewer state is owned by reconcile_sittp — skip the direct
+    // apply/release here for the explicit toggle so the two sources don't
+    // race. The Restrictions list still reflects the user's explicit
+    // choice for UI checkbox purposes.
+    integer is_sittp        = (restr_cmd == "@sittp");
+    integer affects_sittp   = is_sittp
+                           || (restr_cmd == "@tplm")
+                           || (restr_cmd == "@tploc");
 
     if (idx != -1) {
         // Remove restriction
         Restrictions = llDeleteSubList(Restrictions, idx, idx);
-        rlv_op("rlv.release", restr_cmd);
+        if (!is_sittp) rlv_op("rlv.release", restr_cmd);
     }
     else {
         // Add restriction
@@ -340,9 +394,10 @@ toggle_restriction(string restr_cmd) {
         }
 
         Restrictions += [restr_cmd];
-        rlv_op("rlv.apply", restr_cmd);
+        if (!is_sittp) rlv_op("rlv.apply", restr_cmd);
     }
 
+    if (affects_sittp) reconcile_sittp();
     persist_restrictions();
 }
 
