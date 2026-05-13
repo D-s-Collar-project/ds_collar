@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 25
+REVISION: 26
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -10,6 +10,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              routed through kmod_rlv on UI_BUS so refcount coordinates with
              any relay-source that asks for the same folder lock.
 CHANGES:
+- v1.1 rev 26: Collapse DiscoveredFolders/WornStates parallel lists into one stride-2 `Folders` list and pre-allocate via doubling in handle_rlv_response — eliminates O(N²) heap churn on large #RLV trees, halves persistent memory for the parsed listing.
 - v1.1 rev 25: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 24: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_locked sends `settings.delta:folders.locked:<csv>`.
 - v1.1 rev 23: Migrate RLV emission to kmod_rlv. Folder locks use
@@ -125,8 +126,11 @@ list    gPolicyButtons    = [];
 string  SessionId         = "";
 string  MenuContext       = "";   // "scanning" | "pick"
 string  CurrentPath       = "";   // #RLV-relative browsing path; "" = #RLV root
-list    DiscoveredFolders = [];   // Populated from @getinvworn response (relative names)
-list    WornStates        = [];   // Parallel to DiscoveredFolders: two-digit "<self><descendants>"
+// Strided pairs from @getinvworn: [name0, worn0, name1, worn1, ...].
+// Worn is a two-digit "<self><descendants>" code (each 0-3). Folder count
+// is llGetListLength(Folders) / 2. Combined to halve heap and to allow
+// pre-allocation via doubling in handle_rlv_response.
+list    Folders           = [];
 integer PickPage          = 0;
 integer RlvListenHandle   = 0;
 
@@ -232,8 +236,7 @@ cleanup_session() {
     gPolicyButtons    = [];
     MenuContext       = "";
     CurrentPath       = "";
-    DiscoveredFolders = [];
-    WornStates        = [];
+    Folders           = [];
     PickPage          = 0;
 }
 
@@ -346,9 +349,8 @@ pop_current_path() {
 // Issue @getinvworn for CurrentPath. Empty path = #RLV root. The viewer's
 // response lands in handle_rlv_response which shows show_folder_pick(0).
 scan_current_path() {
-    DiscoveredFolders = [];
-    WornStates        = [];
-    PickPage          = 0;
+    Folders  = [];
+    PickPage = 0;
     MenuContext       = "scanning";
     stop_rlv_listen();
     RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
@@ -394,7 +396,7 @@ show_folder_pick(integer page) {
     if (at_subfolder) page_size = PAGE_SIZE_SUBPATH;
     else              page_size = PAGE_SIZE_ROOT;
 
-    integer total = llGetListLength(DiscoveredFolders);
+    integer total = llGetListLength(Folders) / 2;
 
     SessionId   = generate_session_id();
     MenuContext = "pick";
@@ -435,8 +437,9 @@ show_folder_pick(integer page) {
         body += "Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
         integer k = 0;
         while (k < count) {
-            string folder_name = llList2String(DiscoveredFolders, start + k);
-            string worn        = llList2String(WornStates, start + k);
+            integer stride_idx = 2 * (start + k);
+            string folder_name = llList2String(Folders, stride_idx);
+            string worn        = llList2String(Folders, stride_idx + 1);
             string worn_ind    = worn_indicator(worn);
             string lock_mark   = "";
             if (llListFindList(LockedNames, [full_path(folder_name)]) != -1) lock_mark = "*";
@@ -632,7 +635,7 @@ handle_dialog_response(string msg) {
         return;
     }
     if (ctx == "next") {
-        integer total = llGetListLength(DiscoveredFolders);
+        integer total = llGetListLength(Folders) / 2;
         integer max_page;
         if (total == 0) max_page = 0;
         else            max_page = (total - 1) / page_size;
@@ -659,8 +662,8 @@ handle_dialog_response(string msg) {
     // Numbered folder tap: drill into that subfolder.
     if (llSubStringIndex(ctx, "pick:") == 0) {
         integer idx = (integer)llGetSubString(ctx, 5, -1);
-        if (idx >= 0 && idx < llGetListLength(DiscoveredFolders)) {
-            CurrentPath = full_path(llList2String(DiscoveredFolders, idx));
+        if (idx >= 0 && idx < llGetListLength(Folders) / 2) {
+            CurrentPath = full_path(llList2String(Folders, 2 * idx));
             scan_current_path();
         }
     }
@@ -678,15 +681,28 @@ handle_rlv_response(string message) {
     stop_rlv_listen();
     if (CurrentUser == NULL_KEY) return;
 
-    DiscoveredFolders = [];
-    WornStates        = [];
+    Folders = [];
     if (message != "") {
         // @getinvworn returns "name|wornstate" pairs separated by commas.
-        // wornstate: 0=not worn, 1=worn, 2=partially worn.
+        // wornstate is two digits "<self><descendants>" (each 0-3).
         list raw = llParseString2List(message, [","], []);
+        integer max_n = llGetListLength(raw);
+
+        // Pre-size Folders to capacity (2 entries per folder, strided) via
+        // doubling. Repeated `+= [name, worn]` would reallocate the whole
+        // list per iteration (O(N²) heap churn); doubling reaches capacity
+        // in O(log N) appends, and llListReplaceList then fills in O(N).
+        // Net build cost: O(N log N), bounded by max_n known up-front.
+        integer cap = 2 * max_n;
+        if (cap > 0) {
+            list buf = [""];
+            while (llGetListLength(buf) < cap) buf = buf + buf;
+            Folders = llList2List(buf, 0, cap - 1);
+        }
+
+        integer filled = 0;
         integer i = 0;
-        integer len = llGetListLength(raw);
-        while (i < len) {
+        while (i < max_n) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
             if (entry != "") {
                 integer pipe_pos = llSubStringIndex(entry, "|");
@@ -708,15 +724,19 @@ handle_rlv_response(string message) {
                 // through this menu.
                 string first = llGetSubString(folder_name, 0, 0);
                 if (folder_name != "" && first != "." && first != "~") {
-                    DiscoveredFolders += [folder_name];
-                    WornStates        += [worn_state];
+                    Folders = llListReplaceList(Folders, [folder_name, worn_state], filled, filled + 1);
+                    filled += 2;
                 }
             }
             i += 1;
         }
+
+        // Truncate placeholder tail when entries were filtered out.
+        if (filled == 0)         Folders = [];
+        else if (filled < cap)   Folders = llList2List(Folders, 0, filled - 1);
     }
 
-    if (llGetListLength(DiscoveredFolders) == 0 && CurrentPath == "") {
+    if (llGetListLength(Folders) == 0 && CurrentPath == "") {
         // Truly empty #RLV root — nothing to browse, exit cleanly.
         llRegionSayTo(CurrentUser, 0, "No shared folders found in #RLV.");
         return_to_root();
