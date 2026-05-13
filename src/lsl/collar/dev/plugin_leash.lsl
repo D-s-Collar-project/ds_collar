@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 21
+REVISION: 22
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
          multi-step flows (Pass/Offer/Coffle, Post) to hidden sub-plugins.
@@ -13,6 +13,7 @@ ARCHITECTURE: Renderer for the leash module. Picker flows now live in
               subpath; the sub-plugin returns to us via ui.menu.start
               with our context.
 CHANGES:
+- v1.1 rev 22: All four menus (main / settings / texture / length) now use the project's bottom-nav + top-to-bottom-L-R content convention (canonical: plugin_animate, plugin_leash_object). Length menu was rendering reversed (10/15/20 on top, 1/3/5 below); now reads 1/3/5/10/15/20 top-to-bottom. New nav-count-agnostic reorder_item_buttons helper handles both Back-only menus and the 3-button (<< >> Back) length menu without filler padding — items consume all qualifying slots, no " " survives in the final array.
 - v1.1 rev 21: Add "leash yank" chat subcommand. Was missing from handle_subpath since rev 8 (chat support introduced clip/unclip/turn/length/pass but not yank). Engine-side guards (leasher-only, 5s cooldown) apply unchanged — the chat path just dispatches plugin.leash.action action=yank with id=user, same shape as the menu Yank button.
 - v1.1 rev 20: Destroy dialog after one-shot action dispatch (Yank, Get Holder) instead of re-showing main menu — matches the project's "process finished → dialog gone" convention. Clip/Unclip already followed this; Yank and Get Holder were the outliers.
 - v1.1 rev 19: Architectural split after recurring Mono stack-heap collisions in rev 18 (91.5% / 64KB even after consolidation). Pass/Offer/Coffle avatar picker + offer-reception dialog moved to new plugin_leash_avatar (context ui.core.leash.avatar). Post object picker + sensor scanning moved to new plugin_leash_object (context ui.core.leash.object). Both sub-plugins are hidden from kmod_ui's top menu (no plugin.reg.* write). plugin_leash now: main menu + Settings (length/turn/texture) + Get Holder + state sync + chat dispatch root + direct simple actions (Unclip/Yank/Take). Removed from plugin_leash: showPassMenu, buildAvatarMenu, startSensorScan, displayObjectMenu, showOfferDialog, handleOfferResponse, reorder_item_buttons, sensor/no_sensor events, plugin.leash.offer.pending handler, MenuContext branches for pass/coffle/post, OfferDialog* / SensorMode / SensorCandidates / SensorPage / IsOfferMode / LeashMode / LeashTarget globals. New delegateTo(sub_context, subpath) helper sends ui.menu.start to the appropriate sub-plugin and closes our current session.
@@ -168,9 +169,43 @@ showMenu(string context, string title, string body, list button_data) {
     ]), NULL_KEY);
 }
 
-// (reorder_item_buttons moved to plugin_leash_avatar / plugin_leash_object;
-//  the renderer's menus are all small enough to render in declaration
-//  order without grid reordering.)
+// Lays out a dialog in the project's bottom-nav / top-to-bottom-L-R
+// content convention (canonical: plugin_animate, plugin_leash_object).
+// Caller provides 1-3 nav buttons (placed at slots 0..nav_count-1) and
+// 0..N content items, which fill the remaining slots in visual
+// top-to-bottom-L-R reading order. No filler is left in the output —
+// items must fully consume the qualifying slots (true for total <= 12
+// minus zero-padding gaps, which holds for all plugin_leash menus).
+list reorder_item_buttons(list nav_buttons, list item_buttons) {
+    integer nav_count  = llGetListLength(nav_buttons);
+    integer item_count = llGetListLength(item_buttons);
+    integer total      = nav_count + item_count;
+
+    // llDialog slot indices walked in visual top-to-bottom, L-R order.
+    // Filtered to slots that fit within `total` and aren't reserved
+    // for nav (slots < nav_count).
+    list reading_order = [9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2];
+    list slots = [];
+    integer ri = 0;
+    while (ri < 12) {
+        integer rs = llList2Integer(reading_order, ri);
+        if (rs < total && rs >= nav_count) slots += [rs];
+        ri++;
+    }
+
+    list final_buttons = nav_buttons;
+    integer p = 0;
+    while (p < item_count) { final_buttons += [btn(" ", " ")]; p++; }
+
+    integer i = 0;
+    while (i < item_count) {
+        integer slot = llList2Integer(slots, i);
+        final_buttons = llListReplaceList(final_buttons,
+            [llList2String(item_buttons, i)], slot, slot);
+        i++;
+    }
+    return final_buttons;
+}
 
 /* -------------------- PLUGIN REGISTRATION -------------------- */
 
@@ -234,33 +269,34 @@ showMainMenu() {
     // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
-    list button_data = [btn("Back", "back")];
+    list nav_buttons  = [btn("Back", "back")];
+    list item_buttons = [];
 
     // Action buttons — policy defines the superset, state logic narrows
     if (!Leashed) {
-        if (btn_allowed("Clip"))    button_data += [btn("Clip", "clip")];
-        if (btn_allowed("Offer"))   button_data += [btn("Offer", "offer")];
-        if (btn_allowed("Coffle"))  button_data += [btn("Coffle", "coffle")];
-        if (btn_allowed("Post"))    button_data += [btn("Post", "post")];
+        if (btn_allowed("Clip"))    item_buttons += [btn("Clip", "clip")];
+        if (btn_allowed("Offer"))   item_buttons += [btn("Offer", "offer")];
+        if (btn_allowed("Coffle"))  item_buttons += [btn("Coffle", "coffle")];
+        if (btn_allowed("Post"))    item_buttons += [btn("Post", "post")];
     }
     else {
         // Unclip: policy + must be leasher or ACL 3+
         if (btn_allowed("Unclip") && (CurrentUser == Leasher || UserAcl >= 3)) {
-            button_data += [btn("Unclip", "unclip")];
+            item_buttons += [btn("Unclip", "unclip")];
         }
         // Pass/Yank: policy + must be current leasher
         if (CurrentUser == Leasher) {
-            if (btn_allowed("Pass")) button_data += [btn("Pass", "pass")];
-            if (btn_allowed("Yank")) button_data += [btn("Yank", "yank")];
+            if (btn_allowed("Pass")) item_buttons += [btn("Pass", "pass")];
+            if (btn_allowed("Yank")) item_buttons += [btn("Yank", "yank")];
         }
         // Take: policy + not current leasher + ACL 3+
         if (btn_allowed("Take") && CurrentUser != Leasher && UserAcl >= 3) {
-            button_data += [btn("Take", "clip")];
+            item_buttons += [btn("Take", "clip")];
         }
     }
 
-    if (btn_allowed("Get Holder")) button_data += [btn("Get Holder", "get_holder")];
-    if (btn_allowed("Settings"))   button_data += [btn("Settings", "settings")];
+    if (btn_allowed("Get Holder")) item_buttons += [btn("Get Holder", "get_holder")];
+    if (btn_allowed("Settings"))   item_buttons += [btn("Settings", "settings")];
 
     string body;
     if (Leashed) {
@@ -283,23 +319,24 @@ showMainMenu() {
         body = "Not leashed";
     }
 
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
     showMenu("main", "Leash", body, button_data);
 }
 
 showSettingsMenu() {
-    list button_data = [btn("Back", "back"), btn("Length", "length")];
-    if (TurnToFace) {
-        button_data += [btn("Turn: On", "toggle_turn")];
-    }
-    else {
-        button_data += [btn("Turn: Off", "toggle_turn")];
-    }
-    button_data += [btn("Texture", "texture")];
+    list nav_buttons  = [btn("Back", "back")];
+    list item_buttons = [btn("Length", "length")];
+    if (TurnToFace) item_buttons += [btn("Turn: On",  "toggle_turn")];
+    else            item_buttons += [btn("Turn: Off", "toggle_turn")];
+    item_buttons += [btn("Texture", "texture")];
 
     string texture_label = "Chain";
     if (LeashTexture == "silk") texture_label = "Silk";
 
-    string body = "Leash Settings\nLength: " + (string)LeashLength + "m\nTurn to face: " + (string)TurnToFace + "\nTexture: " + texture_label;
+    string body = "Leash Settings\nLength: " + (string)LeashLength
+                + "m\nTurn to face: " + (string)TurnToFace
+                + "\nTexture: " + texture_label;
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
     showMenu("settings", "Settings", body, button_data);
 }
 
@@ -307,15 +344,23 @@ showTextureMenu() {
     string current = "Chain";
     if (LeashTexture == "silk") current = "Silk";
 
-    showMenu("texture", "Texture", "Select leash texture\nCurrent: " + current,
-              [btn("Back", "back"), btn("Chain", "chain"), btn("Silk", "silk")]);
+    list nav_buttons  = [btn("Back", "back")];
+    list item_buttons = [btn("Chain", "chain"), btn("Silk", "silk")];
+    list button_data  = reorder_item_buttons(nav_buttons, item_buttons);
+    showMenu("texture", "Texture",
+             "Select leash texture\nCurrent: " + current, button_data);
 }
 
 showLengthMenu() {
-    showMenu("length", "Length", "Select leash length\nCurrent: " + (string)LeashLength + "m",
-              [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back"),
-               btn("1m", "1"), btn("3m", "3"), btn("5m", "5"),
-               btn("10m", "10"), btn("15m", "15"), btn("20m", "20")]);
+    list nav_buttons  = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
+    list item_buttons = [
+        btn("1m",  "1"),  btn("3m",  "3"),  btn("5m",  "5"),
+        btn("10m", "10"), btn("15m", "15"), btn("20m", "20")
+    ];
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
+    showMenu("length", "Length",
+             "Select leash length\nCurrent: " + (string)LeashLength + "m",
+             button_data);
 }
 
 // (Pass/Offer/Coffle avatar picker + offer-reception dialog moved to
