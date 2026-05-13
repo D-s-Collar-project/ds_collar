@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 29
+REVISION: 30
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -10,6 +10,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              routed through kmod_rlv on UI_BUS so refcount coordinates with
              any relay-source that asks for the same folder lock.
 CHANGES:
+- v1.1 rev 30: Sort the parsed folder list alphabetically (case-sensitive) before render. Viewer returns @getinvworn in inventory-internal order; pick dialog was unbrowsable on large outfit trees.
 - v1.1 rev 29: Wrap-around paging on `<<` / `>>` matching plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. LastMaxPage global stashed by show_folder_pick so the dispatcher avoids recomputing action_count for the wrap branches.
 - v1.1 rev 28: Page size dynamic on action_count. ACL 2 (no Lock/Unlock in policy) at subfolder now gets 7 folder items per page (slot 5 fills with content); ACL 3+ still 6 (slot 5 = Lock|Unlock toggle). Root unchanged at 9. PAGE_SIZE_ROOT / PAGE_SIZE_SUBPATH constants removed — page_size = 9 - action_count.
 - v1.1 rev 27: Align folder-pick dialog layout with plugin_animate convention — nav order `<<, >>, Back` at slots 0-2, action buttons at slot 3+, content fills top-to-bottom via display-ordered target_slots. Folder 1 is now always top-left.
@@ -750,6 +751,11 @@ handle_rlv_response(string message) {
         // Truncate placeholder tail when entries were filtered out.
         if (filled == 0)         Folders = [];
         else if (filled < cap)   Folders = llList2List(Folders, 0, filled - 1);
+
+        // Viewer returns @getinvworn entries in inventory-internal order, not
+        // alphabetical. Sort by folder name (stride 2 = name+worn pair) so
+        // the picker is browsable. Lexicographic / case-sensitive.
+        if (filled > 0) Folders = llListSort(Folders, 2, TRUE);
     }
 
     if (llGetListLength(Folders) == 0 && CurrentPath == "") {

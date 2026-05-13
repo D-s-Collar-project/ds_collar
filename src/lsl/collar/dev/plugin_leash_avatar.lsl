@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash_avatar.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 3
 PURPOSE: Sub-plugin for avatar-target leash flows — Clip / Pass / Offer /
          Coffle. Also receives plugin.leash.offer.pending and shows the
          accept/decline dialog to the offer target.
@@ -18,6 +18,7 @@ ARCHITECTURE: Hidden helper of plugin_leash. Does NOT register
               Coffle and Pass differ in the engine: Pass swaps Controller,
               Coffle keeps Controller and changes FollowTarget only.
 CHANGES:
+- v1.1 rev 3: Real pagination on the avatar picker + wrap-around `<<` / `>>` matching plugin_folders / plugin_animate. Previously prev/next just re-scanned and re-rendered the same page; >9 nearby avatars silently overflowed reorder_item_buttons (items 10+ overwrote slot 0). Split showAvatarPicker (scan + sort) from renderAvatarPickerPage (page render), added SensorPage state, dropped the 18-cap (pagination handles it), dropped the now-redundant title parameter (dialogTitleForContext covers it).
 - v1.1 rev 2: Destroy picker dialog after action dispatch instead of re-opening parent leash menu — matches the project's "process finished → dialog gone" convention. Folded the dialog close into cleanupSession (mirroring plugin_leash) so completion/error paths just call cleanupSession directly; returnToParent retained only for the Back button (explicit back-navigation).
 - v1.1 rev 1: Initial split out of plugin_leash. Carries the Pass/Offer
   avatar picker, the Coffle avatar picker, and the offer-reception
@@ -43,6 +44,7 @@ integer UserAcl = -999;
 string SessionId = "";
 string MenuContext = "";              // "pass" | "offer" | "coffle" (or "" when idle)
 list SensorCandidates = [];           // [name, key, name, key, ...] strided
+integer SensorPage = 0;               // current page index for paginated picker
 
 // Offer-reception dialog (independent session).
 string OfferDialogSession = "";
@@ -92,7 +94,10 @@ list reorder_item_buttons(list nav_buttons, list item_buttons) {
 }
 
 /* -------------------- AVATAR PICKER -------------------- */
-showAvatarPicker(string action_name, string title) {
+// Scan + sort once, then hand off to renderAvatarPickerPage. Pagination
+// fans out arbitrary agent counts across pages of 9; the old 18-cap was a
+// workaround for the single-shot render and is gone.
+showAvatarPicker(string action_name) {
     MenuContext = action_name;
 
     list nearby = llGetAgentList(AGENT_LIST_PARCEL, []);
@@ -115,9 +120,6 @@ showAvatarPicker(string action_name, string title) {
     if (llGetListLength(SensorCandidates) > 2) {
         SensorCandidates = llListSortStrided(SensorCandidates, 2, 0, TRUE);
     }
-    if (llGetListLength(SensorCandidates) > 18) {
-        SensorCandidates = llList2List(SensorCandidates, 0, 17);
-    }
 
     if (llGetListLength(SensorCandidates) == 0) {
         llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
@@ -125,24 +127,45 @@ showAvatarPicker(string action_name, string title) {
         return;
     }
 
+    renderAvatarPickerPage(0);
+}
+
+// Render a single page of cached SensorCandidates. SensorPage is updated
+// here; prev/next in handlePickerClick supplies the new index (with wrap).
+renderAvatarPickerPage(integer page) {
+    integer total = llGetListLength(SensorCandidates) / 2;
+    integer total_pages = (total + 8) / 9;
+    if (total_pages < 1) total_pages = 1;
+    if (page < 0) page = 0;
+    if (page >= total_pages) page = total_pages - 1;
+    SensorPage = page;
+
+    integer start = page * 9;
+    integer end = start + 9;
+    if (end > total) end = total;
+
     list nav_buttons = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
     list item_buttons = [];
-    i = 0;
-    integer name_count = llGetListLength(SensorCandidates) / 2;
-    while (i < name_count) {
+    integer i = start;
+    while (i < end) {
         string avatar_name = llList2String(SensorCandidates, i * 2);
         item_buttons += [btn(avatar_name, "sel:" + avatar_name)];
         i++;
     }
     list button_data = reorder_item_buttons(nav_buttons, item_buttons);
 
+    string body = "Select avatar:";
+    if (total_pages > 1) {
+        body += "\n\nPage " + (string)(page + 1) + "/" + (string)total_pages;
+    }
+
     SessionId = generate_session_id();
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
         "session_id", SessionId,
         "user", (string)CurrentUser,
-        "title", title,
-        "body", "Select avatar:",
+        "title", dialogTitleForContext(MenuContext),
+        "body", body,
         "button_data", llList2Json(JSON_ARRAY, button_data),
         "timeout", 60
     ]), NULL_KEY);
@@ -231,6 +254,7 @@ cleanupSession() {
     SessionId = "";
     MenuContext = "";
     SensorCandidates = [];
+    SensorPage = 0;
 }
 
 /* -------------------- SUBPATH DISPATCH -------------------- */
@@ -243,13 +267,13 @@ handleSubpath(string subpath) {
         cleanupSession();
     }
     else if (subpath == "pass") {
-        showAvatarPicker("pass", "Pass Leash");
+        showAvatarPicker("pass");
     }
     else if (subpath == "offer") {
-        showAvatarPicker("offer", "Offer Leash");
+        showAvatarPicker("offer");
     }
     else if (subpath == "coffle") {
-        showAvatarPicker("coffle", "Coffle");
+        showAvatarPicker("coffle");
     }
     else {
         // Unknown subpath — nothing to do, just clean up.
@@ -263,10 +287,21 @@ handlePickerClick(string ctx, string clicked_btn) {
         returnToParent();
         return;
     }
-    if (ctx == "prev" || ctx == "next") {
-        // No pagination on flat avatar list (capped at 18 anyway); just
-        // re-open the same picker.
-        showAvatarPicker(MenuContext, dialogTitleForContext(MenuContext));
+
+    // Page math hoisted once — sibling-scope redeclaration is the LSL Mono
+    // nested-scope trap (lslint misses it). Wrap-around paging matches
+    // plugin_folders / plugin_animate.
+    integer total_pages = (llGetListLength(SensorCandidates) / 2 + 8) / 9;
+    if (total_pages < 1) total_pages = 1;
+
+    if (ctx == "prev") {
+        if (SensorPage == 0) renderAvatarPickerPage(total_pages - 1);
+        else                 renderAvatarPickerPage(SensorPage - 1);
+        return;
+    }
+    if (ctx == "next") {
+        if (SensorPage >= total_pages - 1) renderAvatarPickerPage(0);
+        else                               renderAvatarPickerPage(SensorPage + 1);
         return;
     }
 
