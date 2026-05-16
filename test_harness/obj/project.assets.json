@@ -765,9 +765,9 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\DSCollarTests.csproj",
-      "projectName": "DSCollarTests",
-      "projectPath": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\DSCollarTests.csproj",
+      "projectUniqueName": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\DSCollarTests-MY-WORKSTATION.csproj",
+      "projectName": "DSCollarTests-MY-WORKSTATION",
+      "projectPath": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\DSCollarTests-MY-WORKSTATION.csproj",
       "packagesPath": "C:\\Users\\Anne Skydancer\\.nuget\\packages\\",
       "outputPath": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\obj\\",
       "projectStyle": "PackageReference",
