@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_access.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 15: Bytecode compaction pass against the 92.9%-of-Mono-budget headroom warning. Two helpers: `open_numbered_dialog(target, ctx, title, prompt, items)` collapses three numbered-list dialog-open sites (show_candidates, show_honorific, show_remove_trustee); `show_confirm(target, ctx, title, body)` extended to take a target and collapse six inline Yes/No dialog-open boilerplates in handle_button (set_select, set_hon, transfer_select, release_owner, trustee_select, runaway_disable_confirm) plus the two pre-existing release/runaway call sites. No behaviour change — same SessionId / MenuContext / message shape. If the analyzer still flags the script as too close to the Mono wall after this, fall back to the split path (extract plugin_access_owner / plugin_access_trustee).
 - v1.1 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 13: Migrate runaway-enable to settings.delta CSV write protocol (kmod_settings rev 14 sole writer for access.enablerunaway). Drops direct llLinksetDataWrite and JSON settings.set emission in both enable and disable code paths.
 - v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
@@ -415,6 +416,42 @@ show_main() {
     ]), NULL_KEY);
 }
 
+// Unified numbered-list dialog open. Sets SessionId + MenuContext and
+// emits ui.dialog.open with dialog_type="numbered_list". Used by
+// show_candidates, show_honorific, and the inline remove-trustee picker.
+open_numbered_dialog(key target, string ctx, string title, string prompt, list items) {
+    SessionId = gen_session();
+    MenuContext = ctx;
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "dialog_type", "numbered_list",
+        "session_id", SessionId,
+        "user", (string)target,
+        "title", title,
+        "prompt", prompt,
+        "items", llList2Json(JSON_ARRAY, items),
+        "timeout", 60
+    ]), NULL_KEY);
+}
+
+// Unified Yes/No confirmation dialog. Sets SessionId + MenuContext and
+// emits ui.dialog.open with the standard [Yes, No] button pair routed
+// to "confirm" / "cancel" contexts. target picks which avatar receives
+// the dialog (wearer for self-confirm, candidate for accept-prompts).
+show_confirm(key target, string ctx, string title, string body) {
+    SessionId = gen_session();
+    MenuContext = ctx;
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "session_id", SessionId,
+        "user", (string)target,
+        "title", title,
+        "body", body,
+        "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
+        "timeout", 60
+    ]), NULL_KEY);
+}
+
 show_candidates(string context, string title, string prompt) {
     if (llGetListLength(CandidateKeys) == 0) {
         llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
@@ -429,54 +466,15 @@ show_candidates(string context, string title, string prompt) {
         i++;
     }
 
-    SessionId = gen_session();
-    MenuContext = context;
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "dialog_type", "numbered_list",
-        "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", title,
-        "prompt", prompt,
-        "items", llList2Json(JSON_ARRAY, names),
-        "timeout", 60
-    ]), NULL_KEY);
+    open_numbered_dialog(CurrentUser, context, title, prompt, names);
 }
 
 show_honorific(key target, string context) {
     PendingCandidate = target;
-    SessionId = gen_session();
-    MenuContext = context;
-
     list choices = OWNER_HONORIFICS;
     if (context == "trustee_hon") choices = TRUSTEE_HONORIFICS;
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "dialog_type", "numbered_list",
-        "session_id", SessionId,
-        "user", (string)target,
-        "title", "Honorific",
-        "prompt", "What would you like to be called?",
-        "items", llList2Json(JSON_ARRAY, choices),
-        "timeout", 60
-    ]), NULL_KEY);
-}
-
-show_confirm(string title, string body, string ctx) {
-    SessionId = gen_session();
-    MenuContext = ctx;
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", title,
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
-        "timeout", 60
-    ]), NULL_KEY);
+    open_numbered_dialog(target, context, "Honorific",
+        "What would you like to be called?", choices);
 }
 
 // Chat subcommand handler. Routes into the existing menu flows by
@@ -517,8 +515,8 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         gPolicyButtons = [];
-        show_confirm("Confirm Release",
-            "Release " + get_name(llGetOwner()) + "?", "release_owner");
+        show_confirm(CurrentUser, "release_owner", "Confirm Release",
+            "Release " + get_name(llGetOwner()) + "?");
         return;
     }
     if (verb == "add" && role == "trustee") {
@@ -568,19 +566,8 @@ show_remove_trustee() {
         i++;
     }
 
-    SessionId = gen_session();
-    MenuContext = "remove_trustee";
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "dialog_type", "numbered_list",
-        "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Remove Trustee",
-        "prompt", "Select to remove:",
-        "items", llList2Json(JSON_ARRAY, names),
-        "timeout", 60
-    ]), NULL_KEY);
+    open_numbered_dialog(CurrentUser, "remove_trustee", "Remove Trustee",
+        "Select to remove:", names);
 }
 
 /* -------------------- BUTTON HANDLING -------------------- */
@@ -611,31 +598,22 @@ handle_button(string cmd, string label) {
             llSensor("", NULL_KEY, AGENT, 10.0, PI);
         }
         else if (cmd == "release") {
-            show_confirm("Confirm Release", "Release " + get_name(llGetOwner()) + "?", "release_owner");
+            show_confirm(CurrentUser, "release_owner", "Confirm Release",
+                "Release " + get_name(llGetOwner()) + "?");
         }
         else if (cmd == "runaway") {
-            show_confirm("Confirm Runaway", "Run away from " + get_name(get_primary_owner()) + "?\n\nThis removes ownership without consent.", "runaway");
+            show_confirm(CurrentUser, "runaway", "Confirm Runaway",
+                "Run away from " + get_name(get_primary_owner()) + "?\n\nThis removes ownership without consent.");
         }
         else if (cmd == "runaway_toggle") {
             if (RunawayEnabled) {
-                // Disabling requires wearer consent - send dialog to WEARER
+                // Disabling requires wearer consent — dialog goes to the
+                // WEARER (not CurrentUser, who is the owner requesting it).
                 string hon = OwnerHonorific;
                 if (hon == "") hon = "Owner";
-
-                string msg_body = "Your " + hon + " wants to disable runaway for you.\n\nPlease confirm.";
-
-                SessionId = gen_session();
-                MenuContext = "runaway_disable_confirm";
-
-                llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-                    "type", "ui.dialog.open",
-                    "session_id", SessionId,
-                    "user", (string)llGetOwner(),  // Send to WEARER, not CurrentUser
-                    "title", "Disable Runaway",
-                    "body", msg_body,
-                    "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
-                    "timeout", 60
-                ]), NULL_KEY);
+                show_confirm(llGetOwner(), "runaway_disable_confirm",
+                    "Disable Runaway",
+                    "Your " + hon + " wants to disable runaway for you.\n\nPlease confirm.");
             }
             else {
                 // Enabling is direct (no consent needed)
@@ -666,18 +644,8 @@ handle_button(string cmd, string label) {
     if (MenuContext == "set_select") {
         if (idx >= 0 && idx < llGetListLength(CandidateKeys)) {
             PendingCandidate = (key)llList2String(CandidateKeys, idx);
-            SessionId = gen_session();
-            MenuContext = "set_accept";
-
-            llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-                "type", "ui.dialog.open",
-                "session_id", SessionId,
-                "user", (string)PendingCandidate,
-                "title", "Accept Ownership",
-                "body", get_name(llGetOwner()) + " wishes to submit to you.\n\nAccept?",
-                "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
-                "timeout", 60
-            ]), NULL_KEY);
+            show_confirm(PendingCandidate, "set_accept", "Accept Ownership",
+                get_name(llGetOwner()) + " wishes to submit to you.\n\nAccept?");
         }
     }
     else if (MenuContext == "set_accept") {
@@ -690,18 +658,8 @@ handle_button(string cmd, string label) {
     else if (MenuContext == "set_hon") {
         if (idx >= 0 && idx < llGetListLength(OWNER_HONORIFICS)) {
             PendingHonorific = llList2String(OWNER_HONORIFICS, idx);
-            SessionId = gen_session();
-            MenuContext = "set_confirm";
-
-            llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-                "type", "ui.dialog.open",
-                "session_id", SessionId,
-                "user", (string)llGetOwner(),
-                "title", "Confirm",
-                "body", "Submit to " + get_name(PendingCandidate) + " as your " + PendingHonorific + "?",
-                "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
-                "timeout", 60
-            ]), NULL_KEY);
+            show_confirm(llGetOwner(), "set_confirm", "Confirm",
+                "Submit to " + get_name(PendingCandidate) + " as your " + PendingHonorific + "?");
         }
     }
     else if (MenuContext == "set_confirm") {
@@ -719,18 +677,8 @@ handle_button(string cmd, string label) {
     else if (MenuContext == "transfer_select") {
         if (idx >= 0 && idx < llGetListLength(CandidateKeys)) {
             PendingCandidate = (key)llList2String(CandidateKeys, idx);
-            SessionId = gen_session();
-            MenuContext = "transfer_accept";
-
-            llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-                "type", "ui.dialog.open",
-                "session_id", SessionId,
-                "user", (string)PendingCandidate,
-                "title", "Accept Transfer",
-                "body", "Accept ownership of " + get_name(llGetOwner()) + "?",
-                "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
-                "timeout", 60
-            ]), NULL_KEY);
+            show_confirm(PendingCandidate, "transfer_accept", "Accept Transfer",
+                "Accept ownership of " + get_name(llGetOwner()) + "?");
         }
     }
     else if (MenuContext == "transfer_accept") {
@@ -753,18 +701,8 @@ handle_button(string cmd, string label) {
     }
     else if (MenuContext == "release_owner") {
         if (cmd == "confirm") {
-            SessionId = gen_session();
-            MenuContext = "release_wearer";
-
-            llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-                "type", "ui.dialog.open",
-                "session_id", SessionId,
-                "user", (string)llGetOwner(),
-                "title", "Confirm Release",
-                "body", "Released by " + get_name(CurrentUser) + ".\n\nConfirm freedom?",
-                "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
-                "timeout", 60
-            ]), NULL_KEY);
+            show_confirm(llGetOwner(), "release_wearer", "Confirm Release",
+                "Released by " + get_name(CurrentUser) + ".\n\nConfirm freedom?");
         }
         else show_main();
     }
@@ -824,25 +762,13 @@ handle_button(string cmd, string label) {
     else if (MenuContext == "trustee_select") {
         if (idx >= 0 && idx < llGetListLength(CandidateKeys)) {
             PendingCandidate = (key)llList2String(CandidateKeys, idx);
-
             if (llListFindList(TrusteeKeys, [(string)PendingCandidate]) != -1) {
                 llRegionSayTo(CurrentUser, 0, "Already trustee.");
                 show_main();
                 return;
             }
-
-            SessionId = gen_session();
-            MenuContext = "trustee_accept";
-
-            llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-                "type", "ui.dialog.open",
-                "session_id", SessionId,
-                "user", (string)PendingCandidate,
-                "title", "Accept Trustee",
-                "body", get_name(llGetOwner()) + " wants you as trustee.\n\nAccept?",
-                "button_data", llList2Json(JSON_ARRAY, [btn("Yes", "confirm"), btn("No", "cancel")]),
-                "timeout", 60
-            ]), NULL_KEY);
+            show_confirm(PendingCandidate, "trustee_accept", "Accept Trustee",
+                get_name(llGetOwner()) + " wants you as trustee.\n\nAccept?");
         }
     }
     else if (MenuContext == "trustee_accept") {

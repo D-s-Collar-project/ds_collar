@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 16
+REVISION: 17
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 17: Add SILK_TEXTURE alongside CHAIN_TEXTURE; render_leash_particles (renamed from render_chain_particles) now picks the texture from ParticleStyle ("chain" / "silk", default "chain"). handle_particles_start parses the requested style up-front so the idempotence guard can detect a style change and re-render on chain↔silk swap. All other particle knobs remain shared across styles.
 - v1.1 rev 16: Swap CHAIN_*_SCALE X/Y. FOLLOW_VELOCITY aligns the
   particle's Y axis to motion, so link length goes on Y not X.
 - v1.1 rev 15: Switch chain from ribbon mode to a regular particle
@@ -99,15 +100,21 @@ float PARTICLE_UPDATE_RATE = 0.25;  // Update every 0.5 seconds
 integer LEASH_CHAN_LM = -8888;
 integer LM_PING_INTERVAL = 8;  // Ping every 8 seconds
 
-/* -------------------- CHAIN PARTICLE TUNING -------------------- */
-// All visual knobs for the leash chain live here. Edit these without
-// touching render_chain_particles. Uses a regular (non-ribbon) particle
-// stream: each particle is an independent chain-link sprite oriented
-// along its motion vector by FOLLOW_VELOCITY. TARGET_POS pulls each
-// particle toward the holder over its lifetime; ACCEL adds gravity for
-// catenary sag. No ribbon-mode connectivity, so target movement makes
-// each particle individually course-correct — no segment-stretch snap.
-string   CHAIN_TEXTURE     = "7c44cb28-ce97-08a6-f1af-cf3deaa481e1";
+/* -------------------- LEASH PARTICLE TUNING -------------------- */
+// Visual knobs for the leash particle stream. Edit these without
+// touching render_leash_particles. Uses a regular (non-ribbon) particle
+// stream: each particle is an independent sprite oriented along its
+// motion vector by FOLLOW_VELOCITY. TARGET_POS pulls each particle
+// toward the holder over its lifetime; ACCEL adds gravity for catenary
+// sag. No ribbon-mode connectivity, so target movement makes each
+// particle individually course-correct — no segment-stretch snap.
+//
+// Texture is style-selected at render time (CHAIN_TEXTURE / SILK_TEXTURE);
+// all other knobs are shared. If a future style needs different scale /
+// accel / age, fork the relevant constant into a per-style pair and
+// branch in render_leash_particles.
+string   CHAIN_TEXTURE     = "ebe48305-8955-2b27-7656-3c39cee2cc1b";
+string   SILK_TEXTURE      = "78ce70e9-b10d-3650-a54c-aca6bdc9cddb";
 float    CHAIN_BURST_RATE  = 0.02;                  // ~50 sprites/sec
 integer  CHAIN_PART_COUNT  = 1;
 float    CHAIN_MAX_AGE     = 2.0;                   // travel time src->target
@@ -208,7 +215,7 @@ handle_lm_message(key id, string msg) {
             close_lm_listen();
             
             // Clear particles
-            render_chain_particles(NULL_KEY);
+            render_leash_particles(NULL_KEY);
             
             // Notify leash plugin
             llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
@@ -268,7 +275,7 @@ handle_lm_message(key id, string msg) {
         ParticlesActive = TRUE;
         SourcePlugin = "lockmeister";
         
-        render_chain_particles(id);
+        render_leash_particles(id);
         
         // Notify leash plugin
         string notify_msg = llList2Json(JSON_OBJECT, [
@@ -301,22 +308,26 @@ integer find_leashpoint_link() {
 
 /* -------------------- PARTICLE RENDERING -------------------- */
 
-render_chain_particles(key target) {
+render_leash_particles(key target) {
     if (LeashpointLink == 0) {
         LeashpointLink = find_leashpoint_link();
     }
-    
+
     if (target == NULL_KEY) {
         // Clear particles
         llLinkParticleSystem(LeashpointLink, []);
         ParticlesActive = FALSE;
         return;
     }
-    
-    // Render chain to target
+
+    // Pick the texture for the current style. Unknown styles fall back
+    // to chain so a stale settings value doesn't blank the leash visual.
+    string texture = CHAIN_TEXTURE;
+    if (ParticleStyle == "silk") texture = SILK_TEXTURE;
+
     llLinkParticleSystem(LeashpointLink, [
         PSYS_SRC_PATTERN, PSYS_SRC_PATTERN_DROP,
-        PSYS_SRC_TEXTURE, CHAIN_TEXTURE,
+        PSYS_SRC_TEXTURE, texture,
         PSYS_SRC_BURST_RATE, CHAIN_BURST_RATE,
         PSYS_SRC_BURST_PART_COUNT, CHAIN_PART_COUNT,
         PSYS_PART_START_ALPHA, CHAIN_START_ALPHA,
@@ -348,14 +359,22 @@ handle_particles_start(string msg) {
     string source = llJsonGetValue(msg, ["source"]);
     key target = (key)llJsonGetValue(msg, ["target"]);
 
-    // Idempotent: same source + target + already rendering → skip the
-    // re-issue. Each llLinkParticleSystem call resets the ribbon, and
-    // for the first few ms after a reset only 1-2 particles exist —
-    // TARGET_POS pulls them straight at the holder, so the leasher sees
-    // a stretched straight segment between source and target. kmod_leash
-    // fires particles.start multiple times during handshake (native + OC
-    // responders, periodic re-handshake), so this guard is load-bearing.
-    if (ParticlesActive && SourcePlugin == source && TargetKey == target) {
+    // Resolve the requested style up front so the idempotence guard can
+    // include it — a style change (chain↔silk) must trigger re-render
+    // even when source and target are unchanged.
+    string new_style = "chain";
+    string style_field = llJsonGetValue(msg, ["style"]);
+    if (style_field != JSON_INVALID) new_style = style_field;
+
+    // Idempotent: same source + target + same style + already rendering
+    // → skip the re-issue. Each llLinkParticleSystem call resets the
+    // particle system, and for the first few ms after a reset only 1-2
+    // particles exist — TARGET_POS pulls them straight at the holder, so
+    // the leasher sees a stretched straight segment between source and
+    // target. kmod_leash fires particles.start multiple times during
+    // handshake (native + OC responders, periodic re-handshake), so this
+    // guard is load-bearing.
+    if (ParticlesActive && SourcePlugin == source && TargetKey == target && ParticleStyle == new_style) {
         return;
     }
 
@@ -381,17 +400,9 @@ handle_particles_start(string msg) {
     
     SourcePlugin = source;
     TargetKey = target;
-    
-    string tmp = llJsonGetValue(msg, ["style"]);
-    if (tmp != JSON_INVALID) {
-        ParticleStyle = tmp;
-    }
-    else {
-        ParticleStyle = "chain";
-    }
-    
-    
-    render_chain_particles(TargetKey);
+    ParticleStyle = new_style;
+
+    render_leash_particles(TargetKey);
     llSetTimerEvent(PARTICLE_UPDATE_RATE);
 }
 
@@ -407,7 +418,7 @@ handle_particles_stop(string msg) {
         return;
     }
     
-    render_chain_particles(NULL_KEY);
+    render_leash_particles(NULL_KEY);
     
     // Always clear source state when stopping
     SourcePlugin = "";
@@ -434,7 +445,7 @@ handle_particles_update(string msg) {
     
     if (new_target != TargetKey) {
         TargetKey = new_target;
-        render_chain_particles(TargetKey);
+        render_leash_particles(TargetKey);
         llSetTimerEvent(PARTICLE_UPDATE_RATE);
     }
 }
@@ -467,7 +478,7 @@ handle_lm_disable() {
         
         // Clear particles if we were the active source
         if (SourcePlugin == "lockmeister") {
-            render_chain_particles(NULL_KEY);
+            render_leash_particles(NULL_KEY);
             SourcePlugin = "";
             TargetKey = NULL_KEY;
         }
@@ -503,7 +514,7 @@ default
         close_lm_listen();
 
         // Clear any leftover particles from before the reset
-        render_chain_particles(NULL_KEY);
+        render_leash_particles(NULL_KEY);
     }
     
     on_rez(integer start_param) {
@@ -524,7 +535,7 @@ default
             LeashpointLink = 0;
             if (ParticlesActive) {
                 LeashpointLink = find_leashpoint_link();
-                render_chain_particles(TargetKey);
+                render_leash_particles(TargetKey);
             }
         }
     }
@@ -583,7 +594,7 @@ default
                 // orphans a later particles.stop (source mismatch) and
                 // leaves particles stuck if the source plugin sends a
                 // follow-up particles.update with a fresh target.
-                render_chain_particles(NULL_KEY);
+                render_leash_particles(NULL_KEY);
 
                 // If Lockmeister was active, stop it
                 if (LmActive) {

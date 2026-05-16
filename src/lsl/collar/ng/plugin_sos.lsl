@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_sos.lsl
 VERSION: 1.10
-REVISION: 11
+REVISION: 12
 PURPOSE: Emergency wearer-accessible actions (OOC safety hatch)
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 12: Rename the user-facing "Runaway" label to "Escape" in the SOS menu and confirmation dialog. Button: "Escape"; bullet: "Escape an abusive setting. Resets the collar to factory settings."; confirm header "EMERGENCY ESCAPE"; confirm title "Escape"; initiation notice "Escape initiated…". Wire protocol unchanged — routing context stays "runaway", policy CSV key stays "Runaway", message type stays settings.runaway, comments / cross-reference to plugin_access's own "Runaway" path untouched. UI label only.
 - v1.1 rev 11: Drop "[SOS]" source prefix from the four user-facing
   notices. Brings this plugin into line with the project convention.
 - v1.1 rev 10: Gate Runaway at ACL 2 by access.enablerunaway. An owned
@@ -223,8 +224,11 @@ show_sos_menu() {
         body += "• Clear Relay - Clear relay restrictions\n";
     }
     if (btn_allowed("Runaway")) {
-        button_data += [btn("Runaway", "runaway")];
-        body += "• Runaway - Nuclear option: erase everything";
+        // UI label is "Escape" (less alarmist than "Runaway" / "Nuclear");
+        // routing context and policy key remain "runaway" / "Runaway" to
+        // keep the wire protocol and ACL CSV stable.
+        button_data += [btn("Escape", "runaway")];
+        body += "• Escape - Escape an abusive setting. Resets the collar to factory settings.";
     }
 
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
@@ -248,7 +252,7 @@ show_runaway_confirm() {
         btn("Yes", "confirm")
     ];
 
-    string body = "EMERGENCY RUNAWAY\n\n";
+    string body = "EMERGENCY ESCAPE\n\n";
     body += "This will remove ownership entirely and erase ALL collar settings. ";
     body += "The collar will return to an unowned, unlocked state.\n\n";
     body += "This cannot be undone.\n\n";
@@ -258,7 +262,7 @@ show_runaway_confirm() {
         "type", "ui.dialog.open",
         "session_id", SessionId,
         "user", (string)CurrentUser,
-        "title", "Runaway",
+        "title", "Escape",
         "body", body,
         "button_data", llList2Json(JSON_ARRAY, button_data),
         "timeout", 30
@@ -302,7 +306,7 @@ action_clear_relay() {
 // access.enablerunaway gate by design — this is the OOC safety hatch and
 // must work even when an owner has trapped the wearer with runaway disabled.
 action_runaway() {
-    llRegionSayTo(CurrentUser, 0, "Runaway initiated. Wiping collar...");
+    llRegionSayTo(CurrentUser, 0, "Escape initiated. Wiping collar...");
 
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type", "settings.runaway"
@@ -424,10 +428,6 @@ default {
 
         cleanup_session();
         register_self();
-    }
-
-    on_rez(integer start_param) {
-        // Preserve state on attach/detach
     }
 
     changed(integer change_mask) {

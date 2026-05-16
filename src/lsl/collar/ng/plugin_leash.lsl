@@ -1,10 +1,25 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 15
-PURPOSE: User interface and configuration for the leashing system
-ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+REVISION: 22
+PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
+         Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
+         multi-step flows (Pass/Offer/Coffle, Post) to hidden sub-plugins.
+ARCHITECTURE: Renderer for the leash module. Picker flows now live in
+              two hidden sub-plugins: plugin_leash_avatar (avatar picker
+              for Pass/Offer/Coffle, plus offer-reception dialog) and
+              plugin_leash_object (object picker for Post). This plugin
+              delegates via ui.menu.start with the sub-plugin's context +
+              subpath; the sub-plugin returns to us via ui.menu.start
+              with our context.
 CHANGES:
+- v1.1 rev 22: All four menus (main / settings / texture / length) now use the project's bottom-nav + top-to-bottom-L-R content convention (canonical: plugin_animate, plugin_leash_object). Length menu was rendering reversed (10/15/20 on top, 1/3/5 below); now reads 1/3/5/10/15/20 top-to-bottom. New nav-count-agnostic reorder_item_buttons helper handles both Back-only menus and the 3-button (<< >> Back) length menu without filler padding — items consume all qualifying slots, no " " survives in the final array.
+- v1.1 rev 21: Add "leash yank" chat subcommand. Was missing from handle_subpath since rev 8 (chat support introduced clip/unclip/turn/length/pass but not yank). Engine-side guards (leasher-only, 5s cooldown) apply unchanged — the chat path just dispatches plugin.leash.action action=yank with id=user, same shape as the menu Yank button.
+- v1.1 rev 20: Destroy dialog after one-shot action dispatch (Yank, Get Holder) instead of re-showing main menu — matches the project's "process finished → dialog gone" convention. Clip/Unclip already followed this; Yank and Get Holder were the outliers.
+- v1.1 rev 19: Architectural split after recurring Mono stack-heap collisions in rev 18 (91.5% / 64KB even after consolidation). Pass/Offer/Coffle avatar picker + offer-reception dialog moved to new plugin_leash_avatar (context ui.core.leash.avatar). Post object picker + sensor scanning moved to new plugin_leash_object (context ui.core.leash.object). Both sub-plugins are hidden from kmod_ui's top menu (no plugin.reg.* write). plugin_leash now: main menu + Settings (length/turn/texture) + Get Holder + state sync + chat dispatch root + direct simple actions (Unclip/Yank/Take). Removed from plugin_leash: showPassMenu, buildAvatarMenu, startSensorScan, displayObjectMenu, showOfferDialog, handleOfferResponse, reorder_item_buttons, sensor/no_sensor events, plugin.leash.offer.pending handler, MenuContext branches for pass/coffle/post, OfferDialog* / SensorMode / SensorCandidates / SensorPage / IsOfferMode / LeashMode / LeashTarget globals. New delegateTo(sub_context, subpath) helper sends ui.menu.start to the appropriate sub-plugin and closes our current session.
+- v1.1 rev 18: Fix O(n²) heap pressure in SensorCandidates construction. Both sites (buildAvatarMenu, sensor event handler) now collect into a local list and assign to the global once after the loop. The local has refcount 1 inside the loop, so Mono can grow it in-place ~O(1) per step; appending directly to a global is O(n) per step because the global slot holds an extra reference. Worst case (96m sensor with hundreds of returns) drops from ~O(N²) heap churn to ~O(N).
+- v1.1 rev 17: Bytecode reduction pass after Mono stack-heap collision in rev 16 (~91.5%). (1) Consolidated showCoffleMenu + showPostMenu into one startSensorScan(mode, type_mask) helper — same shape, only the type bitmask differed. (2) Inlined three single-use helpers: sendSetTexture, cleanupOfferDialog, returnToRoot. (3) Compacted the 7-field plugin.leash.state field-read block by dropping unneeded braces on single-statement if bodies. No behavior change. Aimed to give plugin_leash runtime headroom against heap pressure during link_message dispatch.
+- v1.1 rev 16: Add Texture sub-menu under Settings — wearer picks Chain or Silk for the leash particle stream. New texture field in plugin.leash.state syncs LeashTexture from kmod_leash; Settings dialog body now displays the current selection; texture menu sends set_texture action with the chosen style. Returns to Settings menu after pick so the new selection is visible.
 - v1.1 rev 15: Post sensor mask drops ACTIVE (was PASSIVE|ACTIVE|SCRIPTED).
   ACTIVE matches avatars in llSensor, so the post picker was surfacing
   bystanders alongside hitching posts. Posts are stationary, so
@@ -91,24 +106,19 @@ integer Leashed = FALSE;
 key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
+string LeashTexture = "chain"; // "chain" or "silk"
 integer LeashMode = 0;       // 0=avatar, 1=coffle, 2=post
 key LeashTarget = NULL_KEY;  // Target for coffle/post
 
-// Session/menu state
+// Session/menu state. Pass/Offer/Coffle picker + offer-reception dialog
+// were moved to plugin_leash_avatar; Post picker moved to plugin_leash_object.
+// What stays here is the top-level menu + Settings (length/turn/texture)
+// + Get Holder, plus direct simple actions (Unclip / Yank).
 key CurrentUser = NULL_KEY;
 integer UserAcl = -999;
 list gPolicyButtons = [];  // Cached policy buttons for current user's ACL
 string SessionId = "";
 string MenuContext = "";
-string SensorMode = "";
-list SensorCandidates = [];
-integer SensorPage = 0;  // Current page for sensor results (0-based)
-integer IsOfferMode = FALSE;  // TRUE if ACL 2 offering, FALSE if higher ACL passing
-
-// Offer dialog state (NEW v1.0)
-string OfferDialogSession = "";
-key OfferTarget = NULL_KEY;
-key OfferOriginator = NULL_KEY;
 
 // State query tracking (event-driven, no blocking llSleep)
 integer PendingStateQuery = FALSE;
@@ -159,44 +169,42 @@ showMenu(string context, string title, string body, list button_data) {
     ]), NULL_KEY);
 }
 
-// Reorder items so that an llDialog rendered from the returned list shows
-// them top-to-bottom, left-to-right (matching the order the wearer reads
-// in the dialog's body text). This plugin talks directly to kmod_dialogs
-// rather than going through kmod_menu, so kmod_menu's reorder logic does
-// not apply here — we replicate the same idea with explicit target slot
-// mapping. Assumes 3 fixed nav buttons at indices 0–2 (bottom row); items
-// fill the three rows above in top-to-bottom order. Empty slots are
-// padded with a single-space filler per project dialog convention.
+// Lays out a dialog in the project's bottom-nav / top-to-bottom-L-R
+// content convention (canonical: plugin_animate, plugin_leash_object).
+// Caller provides 1-3 nav buttons (placed at slots 0..nav_count-1) and
+// 0..N content items, which fill the remaining slots in visual
+// top-to-bottom-L-R reading order. No filler is left in the output —
+// items must fully consume the qualifying slots (true for total <= 12
+// minus zero-padding gaps, which holds for all plugin_leash menus).
 list reorder_item_buttons(list nav_buttons, list item_buttons) {
+    integer nav_count  = llGetListLength(nav_buttons);
     integer item_count = llGetListLength(item_buttons);
-    integer total_buttons = 3 + item_count;
+    integer total      = nav_count + item_count;
 
-    // Top row (indices 9,10,11), row 3 (6,7,8), row 2 (3,4,5). Add each
-    // slot only if the total fits — keeps trailing empty grid slots out.
-    list target_slots = [];
-    if (total_buttons > 9)  target_slots += [9];
-    if (total_buttons > 10) target_slots += [10];
-    if (total_buttons > 11) target_slots += [11];
-    if (total_buttons > 6)  target_slots += [6];
-    if (total_buttons > 7)  target_slots += [7];
-    if (total_buttons > 8)  target_slots += [8];
-    if (total_buttons > 3)  target_slots += [3];
-    if (total_buttons > 4)  target_slots += [4];
-    if (total_buttons > 5)  target_slots += [5];
-
-    list final = nav_buttons;
-    integer p = 0;
-    while (p < item_count) {
-        final += [" "];
-        p++;
+    // llDialog slot indices walked in visual top-to-bottom, L-R order.
+    // Filtered to slots that fit within `total` and aren't reserved
+    // for nav (slots < nav_count).
+    list reading_order = [9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2];
+    list slots = [];
+    integer ri = 0;
+    while (ri < 12) {
+        integer rs = llList2Integer(reading_order, ri);
+        if (rs < total && rs >= nav_count) slots += [rs];
+        ri++;
     }
+
+    list final_buttons = nav_buttons;
+    integer p = 0;
+    while (p < item_count) { final_buttons += [btn(" ", " ")]; p++; }
+
     integer i = 0;
     while (i < item_count) {
-        integer slot = llList2Integer(target_slots, i);
-        final = llListReplaceList(final, [llList2String(item_buttons, i)], slot, slot);
+        integer slot = llList2Integer(slots, i);
+        final_buttons = llListReplaceList(final_buttons,
+            [llList2String(item_buttons, i)], slot, slot);
         i++;
     }
-    return final;
+    return final_buttons;
 }
 
 /* -------------------- PLUGIN REGISTRATION -------------------- */
@@ -261,33 +269,34 @@ showMainMenu() {
     // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
-    list button_data = [btn("Back", "back")];
+    list nav_buttons  = [btn("Back", "back")];
+    list item_buttons = [];
 
     // Action buttons — policy defines the superset, state logic narrows
     if (!Leashed) {
-        if (btn_allowed("Clip"))    button_data += [btn("Clip", "clip")];
-        if (btn_allowed("Offer"))   button_data += [btn("Offer", "offer")];
-        if (btn_allowed("Coffle"))  button_data += [btn("Coffle", "coffle")];
-        if (btn_allowed("Post"))    button_data += [btn("Post", "post")];
+        if (btn_allowed("Clip"))    item_buttons += [btn("Clip", "clip")];
+        if (btn_allowed("Offer"))   item_buttons += [btn("Offer", "offer")];
+        if (btn_allowed("Coffle"))  item_buttons += [btn("Coffle", "coffle")];
+        if (btn_allowed("Post"))    item_buttons += [btn("Post", "post")];
     }
     else {
         // Unclip: policy + must be leasher or ACL 3+
         if (btn_allowed("Unclip") && (CurrentUser == Leasher || UserAcl >= 3)) {
-            button_data += [btn("Unclip", "unclip")];
+            item_buttons += [btn("Unclip", "unclip")];
         }
         // Pass/Yank: policy + must be current leasher
         if (CurrentUser == Leasher) {
-            if (btn_allowed("Pass")) button_data += [btn("Pass", "pass")];
-            if (btn_allowed("Yank")) button_data += [btn("Yank", "yank")];
+            if (btn_allowed("Pass")) item_buttons += [btn("Pass", "pass")];
+            if (btn_allowed("Yank")) item_buttons += [btn("Yank", "yank")];
         }
         // Take: policy + not current leasher + ACL 3+
         if (btn_allowed("Take") && CurrentUser != Leasher && UserAcl >= 3) {
-            button_data += [btn("Take", "clip")];
+            item_buttons += [btn("Take", "clip")];
         }
     }
 
-    if (btn_allowed("Get Holder")) button_data += [btn("Get Holder", "get_holder")];
-    if (btn_allowed("Settings"))   button_data += [btn("Settings", "settings")];
+    if (btn_allowed("Get Holder")) item_buttons += [btn("Get Holder", "get_holder")];
+    if (btn_allowed("Settings"))   item_buttons += [btn("Settings", "settings")];
 
     string body;
     if (Leashed) {
@@ -310,227 +319,77 @@ showMainMenu() {
         body = "Not leashed";
     }
 
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
     showMenu("main", "Leash", body, button_data);
 }
 
 showSettingsMenu() {
-    list button_data = [btn("Back", "back"), btn("Length", "length")];
-    if (TurnToFace) {
-        button_data += [btn("Turn: On", "toggle_turn")];
-    }
-    else {
-        button_data += [btn("Turn: Off", "toggle_turn")];
-    }
+    list nav_buttons  = [btn("Back", "back")];
+    list item_buttons = [btn("Length", "length")];
+    if (TurnToFace) item_buttons += [btn("Turn: On",  "toggle_turn")];
+    else            item_buttons += [btn("Turn: Off", "toggle_turn")];
+    item_buttons += [btn("Texture", "texture")];
 
-    string body = "Leash Settings\nLength: " + (string)LeashLength + "m\nTurn to face: " + (string)TurnToFace;
+    string texture_label = "Chain";
+    if (LeashTexture == "silk") texture_label = "Silk";
+
+    string body = "Leash Settings\nLength: " + (string)LeashLength
+                + "m\nTurn to face: " + (string)TurnToFace
+                + "\nTexture: " + texture_label;
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
     showMenu("settings", "Settings", body, button_data);
 }
 
+showTextureMenu() {
+    string current = "Chain";
+    if (LeashTexture == "silk") current = "Silk";
+
+    list nav_buttons  = [btn("Back", "back")];
+    list item_buttons = [btn("Chain", "chain"), btn("Silk", "silk")];
+    list button_data  = reorder_item_buttons(nav_buttons, item_buttons);
+    showMenu("texture", "Texture",
+             "Select leash texture\nCurrent: " + current, button_data);
+}
+
 showLengthMenu() {
-    showMenu("length", "Length", "Select leash length\nCurrent: " + (string)LeashLength + "m",
-              [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back"),
-               btn("1m", "1"), btn("3m", "3"), btn("5m", "5"),
-               btn("10m", "10"), btn("15m", "15"), btn("20m", "20")]);
-}
-
-showPassMenu() {
-    SensorMode = "pass";
-    MenuContext = "pass";
-    buildAvatarMenu();
-}
-
-buildAvatarMenu() {
-    // Use llGetAgentList for nearby avatars (more efficient than sensor)
-    list nearby = llGetAgentList(AGENT_LIST_PARCEL, []);
-
-    key wearer = llGetOwner();
-    SensorCandidates = [];
-    integer i = 0;
-    integer nearby_count = llGetListLength(nearby);
-
-    // Collect all candidates first; sort next; then cap at the dialog's
-    // 9-button budget. Order inside llGetAgentList is not sorted, so
-    // capping before the sort would arbitrarily drop alphabetically-
-    // earlier names when more than 9 avatars are on the parcel.
-    while (i < nearby_count) {
-        key detected = llList2Key(nearby, i);
-        if (detected != wearer && detected != Leasher) {
-            string name = llKey2Name(detected);
-            SensorCandidates += [name, detected];
-        }
-        i++;
-    }
-
-    // Sort the [name, key] strided list by name (stride_index 0).
-    integer stride = 2;
-    if (llGetListLength(SensorCandidates) > stride) {
-        SensorCandidates = llListSortStrided(SensorCandidates, stride, 0, TRUE);
-    }
-
-    // Cap at 9 entries (= 18 strided items). Pass/Offer is a flat dialog
-    // with no pagination, so excess names just get dropped.
-    if (llGetListLength(SensorCandidates) > 18) {
-        SensorCandidates = llList2List(SensorCandidates, 0, 17);
-    }
-
-    if (llGetListLength(SensorCandidates) == 0) {
-        llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
-        showMainMenu();
-        SensorMode = "";
-        return;
-    }
-
-    list names = [];
-    i = 0;
-    while (i < llGetListLength(SensorCandidates)) {
-        names += [llList2String(SensorCandidates, i)];
-        i = i + 2;
-    }
-
-    list nav_buttons = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
-    list item_buttons = [];
-    i = 0;
-    while (i < llGetListLength(names)) {
-        string avatar_name = llList2String(names, i);
-        item_buttons += [btn(avatar_name, "sel:" + avatar_name)];
-        i++;
-    }
+    list nav_buttons  = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
+    list item_buttons = [
+        btn("1m",  "1"),  btn("3m",  "3"),  btn("5m",  "5"),
+        btn("10m", "10"), btn("15m", "15"), btn("20m", "20")
+    ];
     list button_data = reorder_item_buttons(nav_buttons, item_buttons);
-
-    string title = "";
-    if (IsOfferMode) {
-        title = "Offer Leash";
-    }
-    else {
-        title = "Pass Leash";
-    }
-
-    showMenu("pass", title, "Select avatar:", button_data);
+    showMenu("length", "Length",
+             "Select leash length\nCurrent: " + (string)LeashLength + "m",
+             button_data);
 }
 
-showCoffleMenu() {
-    SensorMode = "coffle";
-    MenuContext = "coffle";
-    SensorPage = 0;
-    SensorCandidates = [];  // Clear previous results
-    // Scan for nearby avatars (potential coffle partners wearing a collar).
-    // AGENT type detects worn attachments — the avatar shows up if anything
-    // they wear is in range, which is the right semantic for collar chaining.
-    llSensor("", NULL_KEY, AGENT, 96.0, PI);
-}
+// (Pass/Offer/Coffle avatar picker + offer-reception dialog moved to
+//  plugin_leash_avatar; Post object picker + sensor handling moved to
+//  plugin_leash_object. Main menu delegates to those via ui.menu.start
+//  with the corresponding sub-plugin context.)
 
-showPostMenu() {
-    SensorMode = "post";
-    MenuContext = "post";
-    SensorPage = 0;
-    SensorCandidates = [];  // Clear previous results
-    // Scan for stationary objects (posts) within range. ACTIVE is
-    // omitted because llSensor returns avatars on the ACTIVE bit, and
-    // posts are by definition non-physical / non-moving.
-    llSensor("", NULL_KEY, PASSIVE | SCRIPTED, 96.0, PI);
-}
-
-// Display paginated object menu from existing SensorCandidates
-// Used for pagination navigation without re-scanning
-displayObjectMenu() {
-    if (llGetListLength(SensorCandidates) == 0) return;
-
-    // Calculate pagination (9 items per page)
-    integer total_items = llGetListLength(SensorCandidates) / 2;
-    integer total_pages = (total_items + 8) / 9;  // Ceiling division
-    integer start_index = SensorPage * 9;
-    integer end_index = start_index + 9;
-    if (end_index > total_items) end_index = total_items;
-
-    // Build numbered list body text
-    string body = "";
-    integer i = start_index;
-    integer display_num = 1;
-    while (i < end_index) {
-        string obj_name = llList2String(SensorCandidates, i * 2);
-        body += (string)display_num + ". " + obj_name + "\n";
-        display_num++;
-        i++;
+/* -------------------- SUB-PLUGIN DELEGATION -------------------- */
+// Routes a click on the main menu to a hidden sub-plugin's flow via the
+// standard ui.menu.start protocol with context + subpath. The sub-plugin
+// opens its own dialog and returns to us by sending ui.menu.start back
+// with our PLUGIN_CONTEXT. We also close our current session here so the
+// sub-plugin owns the user's dialog channel until it returns.
+delegateTo(string sub_context, string subpath) {
+    if (SessionId != "") {
+        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+            "type", "ui.dialog.close",
+            "session_id", SessionId
+        ]), NULL_KEY);
+        SessionId = "";
     }
-
-    // Build numbered buttons (only for items on this page) in the visual
-    // order the wearer reads in the body text, then reorder them into the
-    // llDialog grid so they appear top-to-bottom-left-to-right.
-    list nav_buttons = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
-    list item_buttons = [];
-    i = 1;
-    while (i <= (end_index - start_index)) {
-        item_buttons += [btn((string)i, "sel:" + (string)i)];
-        i++;
-    }
-    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
-
-    // Add pagination info to body
-    if (total_pages > 1) {
-        body += "\nPage " + (string)(SensorPage + 1) + "/" + (string)total_pages;
-    }
-
-    string title = "";
-    if (SensorMode == "coffle") {
-        title = "Coffle";
-    }
-    else if (SensorMode == "post") {
-        title = "Post";
-    }
-
-    showMenu(SensorMode, title, body, button_data);
-}
-
-/* -------------------- OFFER DIALOG (NEW v1.0) -------------------- */
-showOfferDialog(key target, key originator) {
-    OfferDialogSession = generate_session_id();
-    OfferTarget = target;
-    OfferOriginator = originator;
-    
-    string offerer_name = llKey2Name(originator);
-    key wearer = llGetOwner();
-    string wearer_name = llKey2Name(wearer);
-    
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "session_id", OfferDialogSession,
-        "user", (string)target,
-        "title", "Leash Offer",
-        "body", offerer_name + " (" + wearer_name + ") is offering you their leash.",
-        "button_data", llList2Json(JSON_ARRAY, [btn("Accept", "accept"), btn("Decline", "decline")]),
-        "timeout", 60
-    ]), NULL_KEY);
-    
-}
-
-handleOfferResponse(string ctx) {
-    if (ctx == "accept") {
-        // Send grab action to kernel with target as leasher
-        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-            "type", "plugin.leash.action",
-            "action", "grab"
-        ]), OfferTarget);
-
-        llRegionSayTo(OfferOriginator, 0, llKey2Name(OfferTarget) + " accepted your leash offer.");
-    }
-    else {
-        llRegionSayTo(OfferOriginator, 0, llKey2Name(OfferTarget) + " declined your leash offer.");
-        llRegionSayTo(OfferTarget, 0, "You declined the leash offer.");
-    }
-    
-    // Clear offer state
-    OfferDialogSession = "";
-    OfferTarget = NULL_KEY;
-    OfferOriginator = NULL_KEY;
-}
-
-cleanupOfferDialog() {
-    if (OfferOriginator != NULL_KEY) {
-        llRegionSayTo(OfferOriginator, 0, "Leash offer to " + llKey2Name(OfferTarget) + " timed out.");
-    }
-    OfferDialogSession = "";
-    OfferTarget = NULL_KEY;
-    OfferOriginator = NULL_KEY;
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.menu.start",
+        "context", sub_context,
+        "acl", (string)UserAcl,
+        "subpath", subpath
+    ]), CurrentUser);
+    // We retain CurrentUser/UserAcl until the sub-plugin returns to us.
+    MenuContext = "";
 }
 
 /* -------------------- ACTIONS -------------------- */
@@ -615,6 +474,10 @@ handle_subpath(key user, integer acl_level, string subpath) {
         sendLeashAction("toggle_turn");
         return;
     }
+    if (action == "yank") {
+        sendLeashAction("yank");
+        return;
+    }
     if (action == "length") {
         if (n < 2) {
             llRegionSayTo(user, 0, "Usage: leash length <meters>");
@@ -642,26 +505,20 @@ handle_subpath(key user, integer acl_level, string subpath) {
         sendLeashActionWithTarget("pass", target);
         return;
     }
-    // coffle/post open the same sensor-menu flow as the dialog buttons.
-    // CurrentUser is already set above so the resulting menu goes to the
-    // chat user.
-    if (action == "coffle") {
-        showCoffleMenu();
-        return;
-    }
-    if (action == "post") {
-        showPostMenu();
-        return;
-    }
+    // coffle/post delegate to sub-plugins (same flow as the dialog
+    // buttons). CurrentUser is already set above so the resulting menu
+    // goes to the chat user.
+    if (action == "coffle") { delegateTo("ui.core.leash.avatar", "coffle"); return; }
+    if (action == "post")   { delegateTo("ui.core.leash.object", "post"); return; }
     llRegionSayTo(user, 0, "Unknown leash subcommand: " + action);
 }
 
 /* -------------------- BUTTON HANDLERS -------------------- */
-// `ctx` is the routing context resolved by kmod_dialogs (button_data context
-// field, or "" when the lookup misses). `btn` is the raw clicked label —
-// used by the pass/offer avatar selection so name matching does not depend
-// on the storage_map round-trip.
-handleButtonClick(string ctx, string btn) {
+// `ctx` is the routing context resolved by kmod_dialogs (button_data
+// context field, or "" when the lookup misses). The raw button label
+// is unused here now — picker flows that matched on label moved to the
+// sub-plugins.
+handleButtonClick(string ctx) {
 
     if (MenuContext == "main") {
         if (ctx == "clip") {
@@ -672,33 +529,31 @@ handleButtonClick(string ctx, string btn) {
             sendLeashAction("release");
             cleanupSession();
         }
-        else if (ctx == "pass") {
-            IsOfferMode = FALSE;
-            showPassMenu();
-        }
-        else if (ctx == "offer") {
-            IsOfferMode = TRUE;
-            showPassMenu();
-        }
-        else if (ctx == "coffle") {
-            showCoffleMenu();
-        }
-        else if (ctx == "post") {
-            showPostMenu();
-        }
+        // Pass / Offer / Coffle delegate to plugin_leash_avatar (avatar
+        // picker). Post delegates to plugin_leash_object (object picker).
+        // Each sub-plugin returns control via ui.menu.start with our
+        // context, re-showing the main menu.
+        else if (ctx == "pass")   delegateTo("ui.core.leash.avatar", "pass");
+        else if (ctx == "offer")  delegateTo("ui.core.leash.avatar", "offer");
+        else if (ctx == "coffle") delegateTo("ui.core.leash.avatar", "coffle");
+        else if (ctx == "post")   delegateTo("ui.core.leash.object", "post");
         else if (ctx == "yank") {
             sendLeashAction("yank");
-            showMainMenu();
+            cleanupSession();
         }
         else if (ctx == "get_holder") {
             giveHolderObject();
-            showMainMenu();
+            cleanupSession();
         }
         else if (ctx == "settings") {
             showSettingsMenu();
         }
         else if (ctx == "back") {
-            returnToRoot();
+            llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+                "type", "ui.menu.return",
+                "user", (string)CurrentUser
+            ]), NULL_KEY);
+            cleanupSession();
         }
     }
     else if (MenuContext == "settings") {
@@ -709,8 +564,24 @@ handleButtonClick(string ctx, string btn) {
             sendLeashAction("toggle_turn");
             scheduleStateQuery("settings");
         }
+        else if (ctx == "texture") {
+            showTextureMenu();
+        }
         else if (ctx == "back") {
             showMainMenu();
+        }
+    }
+    else if (MenuContext == "texture") {
+        if (ctx == "back") {
+            showSettingsMenu();
+        }
+        else if (ctx == "chain" || ctx == "silk") {
+            llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+                "type", "plugin.leash.action",
+                "action", "set_texture",
+                "texture", ctx
+            ]), CurrentUser);
+            scheduleStateQuery("settings");
         }
     }
     else if (MenuContext == "length") {
@@ -733,99 +604,14 @@ handleButtonClick(string ctx, string btn) {
             }
         }
     }
-    else if (MenuContext == "pass") {
-        if (ctx == "back") {
-            showMainMenu();
-        }
-        else if (ctx == "prev" || ctx == "next") {
-            showPassMenu();
-        }
-        else {
-            // Match the raw clicked label against SensorCandidates instead
-            // of decoding "sel:<name>" out of the routing context. The label
-            // is the listen message verbatim, which avoids the case where
-            // kmod_dialogs returns ctx="" because the storage_map lookup
-            // missed for an avatar-name button.
-            key selected = NULL_KEY;
-            integer i = 0;
-            while (i < llGetListLength(SensorCandidates)) {
-                if (llList2String(SensorCandidates, i) == btn) {
-                    selected = llList2Key(SensorCandidates, i + 1);
-                    i = llGetListLength(SensorCandidates);
-                }
-                else {
-                    i = i + 2;
-                }
-            }
-
-            if (selected != NULL_KEY) {
-                string action;
-                if (IsOfferMode) {
-                    action = "offer";
-                }
-                else {
-                    action = "pass";
-                }
-                sendLeashActionWithTarget(action, selected);
-                cleanupSession();
-            }
-            else {
-                llRegionSayTo(CurrentUser, 0, "Avatar not found.");
-                showMainMenu();
-            }
-        }
-    }
-    else if (MenuContext == "coffle" || MenuContext == "post") {
-        if (ctx == "back") {
-            showMainMenu();
-        }
-        else if (ctx == "prev") {
-            if (SensorPage > 0) {
-                SensorPage--;
-            }
-            displayObjectMenu();
-        }
-        else if (ctx == "next") {
-            integer total_items = llGetListLength(SensorCandidates) / 2;
-            integer total_pages = (total_items + 8) / 9;
-            if (SensorPage < (total_pages - 1)) {
-                SensorPage++;
-            }
-            displayObjectMenu();
-        }
-        else if (llSubStringIndex(ctx, "sel:") == 0) {
-            integer button_num = (integer)llGetSubString(ctx, 4, -1);
-            if (button_num >= 1 && button_num <= 9) {
-                integer actual_index = (SensorPage * 9) + (button_num - 1);
-                integer list_index = actual_index * 2;
-
-                if (list_index < llGetListLength(SensorCandidates)) {
-                    key selected = llList2Key(SensorCandidates, list_index + 1);
-                    sendLeashActionWithTarget(MenuContext, selected);
-                    cleanupSession();
-                }
-                else {
-                    llRegionSayTo(CurrentUser, 0, "Invalid selection.");
-                    showMainMenu();
-                }
-            }
-            else {
-                llRegionSayTo(CurrentUser, 0, "Invalid selection.");
-                showMainMenu();
-            }
-        }
-    }
+    // Note: "pass" / "coffle" / "post" MenuContext branches are gone —
+    // those flows now live in plugin_leash_avatar / plugin_leash_object.
+    // The sub-plugin owns its own SessionId and dialog responses, then
+    // returns to us via ui.menu.start with our context (re-entering
+    // showMainMenu).
 }
 
 /* -------------------- NAVIGATION -------------------- */
-returnToRoot() {
-    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.menu.return",
-        "user", (string)CurrentUser
-    ]), NULL_KEY);
-    cleanupSession();
-}
-
 cleanupSession() {
     if (SessionId != "") {
         llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
@@ -838,10 +624,6 @@ cleanupSession() {
     gPolicyButtons = [];
     SessionId = "";
     MenuContext = "";
-    SensorMode = "";
-    SensorCandidates = [];
-    SensorPage = 0;
-    IsOfferMode = FALSE;
 }
 
 queryState() {
@@ -945,29 +727,19 @@ default
 
             if (msg_type == "plugin.leash.state") {
                 string tmp = llJsonGetValue(msg, ["leashed"]);
-                if (tmp != JSON_INVALID) {
-                    Leashed = (integer)tmp;
-                }
+                if (tmp != JSON_INVALID) Leashed = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["leasher"]);
-                if (tmp != JSON_INVALID) {
-                    Leasher = (key)tmp;
-                }
+                if (tmp != JSON_INVALID) Leasher = (key)tmp;
                 tmp = llJsonGetValue(msg, ["length"]);
-                if (tmp != JSON_INVALID) {
-                    LeashLength = (integer)tmp;
-                }
+                if (tmp != JSON_INVALID) LeashLength = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["turnto"]);
-                if (tmp != JSON_INVALID) {
-                    TurnToFace = (integer)tmp;
-                }
+                if (tmp != JSON_INVALID) TurnToFace = (integer)tmp;
+                tmp = llJsonGetValue(msg, ["texture"]);
+                if (tmp != JSON_INVALID) LeashTexture = tmp;
                 tmp = llJsonGetValue(msg, ["mode"]);
-                if (tmp != JSON_INVALID) {
-                    LeashMode = (integer)tmp;
-                }
+                if (tmp != JSON_INVALID) LeashMode = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["target"]);
-                if (tmp != JSON_INVALID) {
-                    LeashTarget = (key)tmp;
-                }
+                if (tmp != JSON_INVALID) LeashTarget = (key)tmp;
 
                 // If we were waiting for state update, show the pending menu
                 if (PendingQueryContext != "") {
@@ -987,13 +759,8 @@ default
                 return;
             }
 
-            if (msg_type == "plugin.leash.offer.pending") {
-                if (llJsonGetValue(msg, ["target"]) == JSON_INVALID || llJsonGetValue(msg, ["originator"]) == JSON_INVALID) return;
-                key target = (key)llJsonGetValue(msg, ["target"]);
-                key originator = (key)llJsonGetValue(msg, ["originator"]);
-                showOfferDialog(target, originator);
-                return;
-            }
+            // plugin.leash.offer.pending is handled by plugin_leash_avatar
+            // (it shows the accept/decline dialog to the offer target).
         }
 
         if (num == DIALOG_BUS) {
@@ -1004,36 +771,15 @@ default
                 if (llJsonGetValue(msg, ["session_id"]) == JSON_INVALID || llJsonGetValue(msg, ["context"]) == JSON_INVALID) return;
 
                 string response_session = llJsonGetValue(msg, ["session_id"]);
+                if (response_session != SessionId) return;  // not ours
                 string ctx = llJsonGetValue(msg, ["context"]);
-                // Raw clicked label (the listen message verbatim). Used by the
-                // pass/offer branch to match avatar names directly, bypassing
-                // kmod_dialogs' storage_map context lookup.
-                string btn = llJsonGetValue(msg, ["button"]);
-                if (btn == JSON_INVALID) btn = "";
-
-                // Check if this is an offer dialog response
-                if (response_session == OfferDialogSession) {
-                    handleOfferResponse(ctx);
-                    return;
-                }
-
-                // Otherwise handle menu dialog response
-                if (response_session != SessionId) return;
-                handleButtonClick(ctx, btn);
+                handleButtonClick(ctx);
                 return;
             }
 
             if (msg_type == "ui.dialog.timeout") {
                 string timeout_session = llJsonGetValue(msg, ["session_id"]);
                 if (timeout_session == JSON_INVALID) return;
-                
-                // Check if this is an offer dialog timeout
-                if (timeout_session == OfferDialogSession) {
-                    cleanupOfferDialog();
-                    return;
-                }
-                
-                // Otherwise handle menu dialog timeout
                 if (timeout_session != SessionId) return;
                 cleanupSession();
                 return;
@@ -1041,68 +787,7 @@ default
             return;
         }
     }
-    
-    sensor(integer num) {
-        // Sensor only used for coffle and post (object detection)
-        // Avatar detection uses llGetAgentList instead
-        if (SensorMode == "") return;
-        if (CurrentUser == NULL_KEY) return;
-        if (SensorMode != "coffle" && SensorMode != "post") return;
 
-        key wearer = llGetOwner();
-        key my_key = llGetKey();
-        SensorCandidates = [];
-        integer i = 0;
-
-        // Detect ALL objects for coffle/post (no limit, we'll paginate)
-        while (i < num) {
-            key detected = llDetectedKey(i);
-            // Exclude self (collar) and wearer
-            if (detected != my_key && detected != wearer) {
-                string name = llDetectedName(i);
-                SensorCandidates += [name, detected];
-            }
-            i = i + 1;
-        }
-
-        // Sort by name (stride_index 0 in a [name, key] pair) so the
-        // paginated coffle/post menu shows results alphabetically.
-        // llSensor returns candidates in detection order, which is
-        // effectively arbitrary.
-        integer stride = 2;
-        if (llGetListLength(SensorCandidates) > stride) {
-            SensorCandidates = llListSortStrided(SensorCandidates, stride, 0, TRUE);
-        }
-
-        if (llGetListLength(SensorCandidates) == 0) {
-            if (SensorMode == "coffle") {
-                llRegionSayTo(CurrentUser, 0, "No nearby avatars found for coffle.");
-            }
-            else if (SensorMode == "post") {
-                llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
-            }
-            showMainMenu();
-            SensorMode = "";
-            return;
-        }
-
-        // Display the menu (starts at page 0)
-        displayObjectMenu();
-    }
-    
-    no_sensor() {
-        // Only handles coffle and post (pass/offer use llGetAgentList)
-        if (SensorMode == "") return;
-        if (CurrentUser == NULL_KEY) return;
-        if (SensorMode != "coffle" && SensorMode != "post") return;
-
-        if (SensorMode == "coffle") {
-            llRegionSayTo(CurrentUser, 0, "No nearby avatars found for coffle.");
-        }
-        else if (SensorMode == "post") {
-            llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
-        }
-        showMainMenu();
-        SensorMode = "";
-    }
+    // sensor() / no_sensor() moved to plugin_leash_object (the only
+    // consumer was the coffle/post object scan, both now in sub-plugins).
 }

@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: Startup coordination, RLV detection, status announcement
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 9: Listen on REMOTE_BUS for `remote.update.complete` (emitted by update_shim rev 5 just before self-deletion). llResetScript on receipt so startup orchestration re-runs once the new script set is live in the collar — RLV probe, register.refresh broadcast, status announcement all replay with the post-update plugin lineup. Handled in both `default` and `state running` link_message handlers so an update during either bootstrap or steady-state restarts correctly.
 - v1.1 rev 8: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 7: Remove unreachable `return;` after `state running` in timer event — state change is immediate, return never executed.
 - v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
@@ -31,7 +32,8 @@ CHANGES:
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
-integer SETTINGS_BUS = 800;
+integer REMOTE_BUS       = 600;
+integer SETTINGS_BUS     = 800;
 
 /* -------------------- RLV DETECTION CONFIG -------------------- */
 integer RLV_PROBE_TIMEOUT_SEC = 60;
@@ -468,6 +470,17 @@ state starting
                 llResetScript();
             }
         }
+
+        /* -------------------- REMOTE BUS -------------------- */
+        // update_shim broadcasts remote.update.complete just before
+        // self-deletion. Restart so the startup orchestration (RLV
+        // probe, register.refresh, status announcement) re-runs with
+        // the new script set live in the collar.
+        else if (num == REMOTE_BUS) {
+            if (msg_type == "remote.update.complete") {
+                llResetScript();
+            }
+        }
     }
 
     changed(integer change) {
@@ -506,6 +519,13 @@ state running
                 llResetScript();
             }
             else if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
+                llResetScript();
+            }
+        }
+        // update_shim broadcasts this just before self-deletion. Restart
+        // so startup orchestration re-runs with the new script set live.
+        else if (num == REMOTE_BUS) {
+            if (msg_type == "remote.update.complete") {
                 llResetScript();
             }
         }

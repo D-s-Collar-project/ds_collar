@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: kmod_rlv.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 3
 PURPOSE: RLV subsystem. Single point of @-command emission for all
   refcount-stateful RLV restrictions in the collar. Owns the third-party
   RLV relay protocol (RELAY_CHANNEL listen, auth queue, ASK dialog,
@@ -20,6 +20,7 @@ ARCHITECTURE: Spun off from plugin_relay v1.10 rev 21 to keep that
     (one-shot or pre-existing semantics — Phase 2 migration), and
     kmod_leash (=force / =clear only, no refcount overlap).
 CHANGES:
+- v1.1 rev 3: Scope safeword to relay-sourced restrictions only. Previous safeword_clear_all emitted llOwnerSay("@clear") which is object-wide — the viewer cleared every restriction tied to the collar's UUID, including plugin_lock's @detach=n, plugin_rlvex's exception entries, and anything else other scripts had issued. Replaced with relay_safeword_clear: walks Sources and calls release_source per-source; claim_clear emits @<behav>=y only when the LAST claim on a behav goes away, so non-relay consumers' claims are preserved. Mirrors Satomi's MR safeword: relay panic cuts the wearer loose from external sources, not from their own collar's lock state. sos.relay.clear notice text updated to reflect the narrowed scope ("Relay restrictions cleared." instead of "All RLV restrictions cleared.").
 - v1.1 rev 2: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 1: Initial implementation. Lift of plugin_relay rev 21's
   refcount engine + relay protocol; adds multi-consumer apply/release
@@ -332,22 +333,42 @@ release_source(key src) {
     rearm_timer();
 }
 
-// Total wipe — Safeword and detach use this. Atomic @clear to viewer
-// rather than walking Baked (wearer wants instant release).
-safeword_clear_all() {
+// Wearer-initiated safeword: clear ONLY relay-sourced restrictions.
+//
+// Previously this issued `llOwnerSay("@clear")` which is object-wide —
+// the viewer clears every restriction tied to the collar's UUID, which
+// means plugin_lock's @detach=n, plugin_rlvex's exceptions, and every
+// other script-issued restriction in the collar disappear too. That's
+// not what a relay safeword means: a relay safeword cuts the wearer
+// loose from EXTERNAL relay sources, not from their own collar's lock
+// state. Mirrors Satomi's MR semantics — release-by-source, scoped.
+//
+// release_source iterates the source's recorded restrictions and calls
+// claim_clear, which emits @<behav>=y per behav only when the LAST
+// claim on that behav goes away. Behavs co-claimed by another consumer
+// (plugin_restrict, plugin_folders, etc.) stay applied; only the relay
+// share of each is dropped. Per-relay-session trust (Temp*White/Black)
+// is also cleared since the wearer is explicitly resetting trust.
+relay_safeword_clear() {
     clear_pending_ask();
     drop_queue();
-    llOwnerSay("@clear");
-    Sources = [];
-    SourceNames = [];
-    SourceChans = [];
-    SourceRestrictions = [];
-    Baked = [];
-    Claims = [];
+
+    // Snapshot Sources because release_source mutates it. Each iteration
+    // removes one source and emits the @<behav>=y commands that lose
+    // their last claim through that release.
+    list snapshot = Sources;
+    integer i = 0;
+    integer n = llGetListLength(snapshot);
+    while (i < n) {
+        release_source(llList2Key(snapshot, i));
+        i += 1;
+    }
+
     TempObjWhite = [];
     TempObjBlack = [];
     TempAvWhite = [];
     TempAvBlack = [];
+
     rearm_timer();
 }
 
@@ -739,7 +760,7 @@ handle_ground_rez(string reason) {
         "value", "0"
     ]), NULL_KEY);
 
-    if (llGetListLength(Sources) > 0) safeword_clear_all();
+    if (llGetListLength(Sources) > 0) relay_safeword_clear();
 
     update_relay_listen_state();
 
@@ -871,7 +892,7 @@ default {
                 return;
             }
             if (msg_type == "relay.safeword") {
-                safeword_clear_all();
+                relay_safeword_clear();
                 return;
             }
             if (msg_type == "relay.ground_rez") {
@@ -881,8 +902,11 @@ default {
                 return;
             }
             if (msg_type == "sos.relay.clear") {
-                safeword_clear_all();
-                llRegionSayTo(llGetOwner(), 0, "All RLV restrictions cleared.");
+                relay_safeword_clear();
+                // Scoped to relay restrictions — non-relay claims
+                // (plugin_lock, plugin_restrict, etc.) are intentionally
+                // not affected, mirror Satomi's MR safeword.
+                llRegionSayTo(llGetOwner(), 0, "Relay restrictions cleared.");
                 return;
             }
             return;

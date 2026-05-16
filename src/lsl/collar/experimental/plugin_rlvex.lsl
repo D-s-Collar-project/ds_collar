@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Manage RLV teleport and IM exceptions for owners and trustees
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 14: state_entry now invokes reconcile_all() immediately instead of relying on apply_settings_sync's 1-second deferred timer. RLV exceptions are viewer-side session state tagged to the script's UUID, so a recompile wipes them; the 1s timer left a window where the wearer's owners / trustees had no exceptions, and any cleanup() (menu open + back, dialog timeout) inside that window cancelled the timer permanently — so trustee exceptions stayed wiped until the next settings.sync. The toggle persistence (rlvex.*tp/im LSD keys) was working; what was missing was a guarantee that the deferred re-emit actually fires. Immediate restore closes the gap.
 - v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_setting sends `settings.delta:<key>:<v>`.
 - v1.1 rev 11: persist_setting stops pre-writing LSD before sending
@@ -549,6 +550,22 @@ default {
         cleanup();
         register_self();
         apply_settings_sync();
+
+        // apply_settings_sync defers reconcile_all() via a 1-second timer
+        // (debouncing rapid settings.sync cascades). On the initial
+        // state_entry we want it immediate — RLV exceptions are
+        // session-scoped to the script's UUID and the viewer wipes the
+        // old script's entries on reset, so there's a 1+ second window
+        // after recompile where trustees / owners lose their exception
+        // privileges. Any menu interaction or session timeout during
+        // that window calls cleanup() which cancels the pending timer
+        // outright, making the wipe permanent until next settings.sync.
+        // Force an immediate emit and clear the deferred path.
+        if (PendingReconcile) {
+            PendingReconcile = FALSE;
+            llSetTimerEvent(0.0);
+            reconcile_all();
+        }
     }
 
     on_rez(integer p) {
