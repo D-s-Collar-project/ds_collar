@@ -301,7 +301,9 @@ default {
         // Permanent listener on REPLY_CHAN: needed in idle to catch
         // remote.updateravailable invitations, and during the touch-driven
         // flow to catch remote.collarready replies to our own discover.
-        ReplyListen = llListen(EXTERNAL_ACL_REPLY_CHAN, "", "", "");
+        // NULL_KEY rather than "" so the implicit string→key cast is
+        // explicit; the open-filter aspect is intentional (sender unknown).
+        ReplyListen = llListen(EXTERNAL_ACL_REPLY_CHAN, "", NULL_KEY, "");
     }
 
     on_rez(integer start_param) {

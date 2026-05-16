@@ -13,7 +13,7 @@ ARCHITECTURE: No link_message interaction with the rest of the collar.
   its next inventory tick — the shim does not touch LSD itself.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
-- v1.1 rev 4: Extend protocol with animations, objects, notecards. LIST_ANIM / LIST_OBJ / LIST_NC + QUERY_ANIM / QUERY_OBJ / QUERY_NC mirror the script flow per-type. Settings notecard ("settings") is hard-excluded — never reported in LIST_NC, never wiped via QUERY_NC (returns EXCLUDE). Non-script types have no SWEEP — items not in bundler are wearer's customs and stay untouched. The shim does the wipe; the bundler does the give batch via llGiveInventoryList after all queries complete.
+- v1.1 rev 4: Extend protocol with animations, objects, notecards. LIST_ANIM / LIST_OBJ / LIST_NC + QUERY_ANIM / QUERY_OBJ / QUERY_NC mirror the script flow per-type. Settings notecard ("settings") is hard-excluded — never reported in LIST_NC, never wiped via QUERY_NC (returns EXCLUDE). Non-script types have no SWEEP — items not in bundler are wearer's customs and stay untouched. Shim wipes stale items synchronously inside verdict_for_typed before reporting GIVE; bundler then calls llGiveInventory(collar_uuid, item) per item — same-owner attached prim transfer is silent at script level and bypasses RLV's edit-block, no wearer interaction required (mirrors OpenCollar's mechanism).
 - v1.1 rev 3: Drop notecard-mode protocol. Replace with inventory-driven
   flow: LIST → INV|<csv> reports collar's collar-namespace inventory;
   QUERY|<name>|<uuid> → REPLY|<name>|GIVE|SKIP compares UUID; SWEEP|<csv>
@@ -221,7 +221,9 @@ default {
         // happens in the listen handler (the bundler's key is not known in
         // advance — we only know it must share the wearer's owner UUID,
         // which is the llRemoteLoadScriptPin precondition anyway).
-        ListenHandle = llListen(SecureChannel, "", "", "");
+        // NULL_KEY rather than "" so the implicit string→key cast is
+        // explicit; the open-filter aspect is intentional.
+        ListenHandle = llListen(SecureChannel, "", NULL_KEY, "");
 
         // Arm the inactivity watchdog.
         llSetTimerEvent(INACTIVITY_TIMEOUT);
