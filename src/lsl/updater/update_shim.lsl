@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: update_shim.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: Transient payload deposited into the collar by updater_driver via
   llRemoteLoadScriptPin. Runs inside the collar, answers inventory and
   ship-decision queries from updater_bundler over the start_param channel,
@@ -13,6 +13,7 @@ ARCHITECTURE: No link_message interaction with the rest of the collar.
   its next inventory tick — the shim does not touch LSD itself.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
+- v1.1 rev 5: Broadcast `remote.update.complete` on REMOTE_BUS in the DONE handler before self-deletion. kmod_bootstrap listens for it and llResetScripts so the startup orchestration (RLV probe, register.refresh, status announcement) re-runs with the new script set live. Only the success path emits — inactivity timeout / CHANGED_OWNER cleanups don't, since those leave the collar half-updated and a "we're done" signal would be misleading.
 - v1.1 rev 4: Extend protocol with animations, objects, notecards. LIST_ANIM / LIST_OBJ / LIST_NC + QUERY_ANIM / QUERY_OBJ / QUERY_NC mirror the script flow per-type. Settings notecard ("settings") is hard-excluded — never reported in LIST_NC, never wiped via QUERY_NC (returns EXCLUDE). Non-script types have no SWEEP — items not in bundler are wearer's customs and stay untouched. Shim wipes stale items synchronously inside verdict_for_typed before reporting GIVE; bundler then calls llGiveInventory(collar_uuid, item) per item — same-owner attached prim transfer is silent at script level and bypasses RLV's edit-block, no wearer interaction required (mirrors OpenCollar's mechanism).
 - v1.1 rev 3: Drop notecard-mode protocol. Replace with inventory-driven
   flow: LIST → INV|<csv> reports collar's collar-namespace inventory;
@@ -43,6 +44,12 @@ float INACTIVITY_TIMEOUT = 120.0;
 // LIST_NC reporting and from QUERY_NC wipe (returns EXCLUDE verdict so
 // the bundler also drops it from its give batch).
 string SETTINGS_NOTECARD = "settings";
+
+// REMOTE_BUS — update-flow link_message channel (matches kmod_remote /
+// plugin_maint). Used by the shim to broadcast remote.update.complete
+// before self-deletion so kmod_bootstrap can restart the startup
+// orchestration once the new scripts are in place.
+integer REMOTE_BUS = 600;
 
 
 /* -------------------- STATE -------------------- */
@@ -243,6 +250,17 @@ default {
         string verb = llList2String(parts, 0);
 
         if (verb == "DONE") {
+            // Update applied successfully. Signal kmod_bootstrap to
+            // restart so it re-runs the startup orchestration (RLV probe,
+            // register.refresh broadcast, status announcement) with the
+            // new script set in place. Only emitted on the success path;
+            // inactivity-timeout and CHANGED_OWNER cleanups intentionally
+            // skip this — those are failure cases where the collar's
+            // state is half-applied and we don't want to nudge plugins
+            // toward a "we're done" interpretation.
+            llMessageLinked(LINK_SET, REMOTE_BUS, llList2Json(JSON_OBJECT, [
+                "type", "remote.update.complete"
+            ]), NULL_KEY);
             cleanup_and_die();
             return;
         }
