@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: update_shim.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Transient payload deposited into the collar by updater_driver via
   llRemoteLoadScriptPin. Runs inside the collar, answers inventory and
   ship-decision queries from updater_bundler over the start_param channel,
@@ -13,6 +13,7 @@ ARCHITECTURE: No link_message interaction with the rest of the collar.
   its next inventory tick — the shim does not touch LSD itself.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
+- v1.1 rev 4: Extend protocol with animations, objects, notecards. LIST_ANIM / LIST_OBJ / LIST_NC + QUERY_ANIM / QUERY_OBJ / QUERY_NC mirror the script flow per-type. Settings notecard ("settings") is hard-excluded — never reported in LIST_NC, never wiped via QUERY_NC (returns EXCLUDE). Non-script types have no SWEEP — items not in bundler are wearer's customs and stay untouched. The shim does the wipe; the bundler does the give batch via llGiveInventoryList after all queries complete.
 - v1.1 rev 3: Drop notecard-mode protocol. Replace with inventory-driven
   flow: LIST → INV|<csv> reports collar's collar-namespace inventory;
   QUERY|<name>|<uuid> → REPLY|<name>|GIVE|SKIP compares UUID; SWEEP|<csv>
@@ -37,6 +38,11 @@ string UPDATER_MARKER = "COLLAR_UPDATER";
 // the 3s per-script throttle of llRemoteLoadScriptPin across a ~30 script
 // package, with slack.
 float INACTIVITY_TIMEOUT = 120.0;
+
+// Wearer-specific config; never managed by the updater. Excluded from
+// LIST_NC reporting and from QUERY_NC wipe (returns EXCLUDE verdict so
+// the bundler also drops it from its give batch).
+string SETTINGS_NOTECARD = "settings";
 
 
 /* -------------------- STATE -------------------- */
@@ -83,6 +89,24 @@ string list_inventory() {
     return llDumpList2String(names, ",");
 }
 
+// Build CSV of inventory of a given non-script type. The settings notecard
+// is hard-excluded from the NC listing — never reported, never managed.
+// No namespace filter applies here; the bundler's own inventory IS the
+// manifest of what's "ours to manage" for non-script types.
+string list_inventory_typed(integer inv_type) {
+    list names = [];
+    integer count = llGetInventoryNumber(inv_type);
+    integer i = 0;
+    while (i < count) {
+        string name = llGetInventoryName(inv_type, i);
+        if (inv_type != INVENTORY_NOTECARD || name != SETTINGS_NOTECARD) {
+            names += [name];
+        }
+        i += 1;
+    }
+    return llDumpList2String(names, ",");
+}
+
 // Compare a single named script: GIVE if missing or UUID-mismatched,
 // SKIP if present and matches.
 string verdict_for(string target_name, key target_uuid) {
@@ -91,6 +115,28 @@ string verdict_for(string target_name, key target_uuid) {
     if (local_uuid == target_uuid && target_uuid != NULL_KEY) return "SKIP";
     // Stale version present. Remove first so the bundler's
     // llRemoteLoadScriptPin lands on a clean slot.
+    llRemoveInventory(target_name);
+    return "GIVE";
+}
+
+// Typed verdict for animation / object / notecard. Same GIVE / SKIP
+// semantics as scripts, plus EXCLUDE for the settings notecard so the
+// bundler skips it even if the packager left one in the installer.
+// The wipe of stale local items happens here (synchronous llRemoveInventory)
+// before the bundler batches the give — that's the "wipe before, send
+// after" sequence the wearer asked for.
+string verdict_for_typed(string target_name, key target_uuid, integer inv_type) {
+    if (inv_type == INVENTORY_NOTECARD && target_name == SETTINGS_NOTECARD) {
+        return "EXCLUDE";
+    }
+    integer have_type = llGetInventoryType(target_name);
+    if (have_type == INVENTORY_NONE) return "GIVE";
+    key local_uuid = llGetInventoryKey(target_name);
+    if (local_uuid == target_uuid && target_uuid != NULL_KEY) return "SKIP";
+    // Stale or wrong-type collision: remove before the bundler ships
+    // the replacement. Non-scripts arrive via llGiveInventoryList after
+    // wearer accept, so the slot must be clear for the drag to land
+    // without an auto-rename collision.
     llRemoveInventory(target_name);
     return "GIVE";
 }
@@ -227,6 +273,52 @@ default {
                 return;
             }
             reply("SWEPT", sweep_inventory(keep));
+            return;
+        }
+
+        // -- Non-script types: animations / objects / notecards --
+        // Same pattern as LIST + QUERY for scripts, but no SWEEP — items
+        // in the collar not in the bundler are wearer's customs and stay
+        // untouched. Wipe of stale items happens inside verdict_for_typed;
+        // the actual give of new versions is the bundler's batched
+        // llGiveInventoryList after all queries complete.
+
+        if (verb == "LIST_ANIM") {
+            reply("ANIM", list_inventory_typed(INVENTORY_ANIMATION));
+            return;
+        }
+        if (verb == "QUERY_ANIM") {
+            if (llGetListLength(parts) < 3) return;
+            string anim_name = llList2String(parts, 1);
+            key    anim_uuid = (key)llList2String(parts, 2);
+            string v = verdict_for_typed(anim_name, anim_uuid, INVENTORY_ANIMATION);
+            reply("REPLY_ANIM", anim_name + "|" + v);
+            return;
+        }
+
+        if (verb == "LIST_OBJ") {
+            reply("OBJ", list_inventory_typed(INVENTORY_OBJECT));
+            return;
+        }
+        if (verb == "QUERY_OBJ") {
+            if (llGetListLength(parts) < 3) return;
+            string obj_name = llList2String(parts, 1);
+            key    obj_uuid = (key)llList2String(parts, 2);
+            string v = verdict_for_typed(obj_name, obj_uuid, INVENTORY_OBJECT);
+            reply("REPLY_OBJ", obj_name + "|" + v);
+            return;
+        }
+
+        if (verb == "LIST_NC") {
+            reply("NC", list_inventory_typed(INVENTORY_NOTECARD));
+            return;
+        }
+        if (verb == "QUERY_NC") {
+            if (llGetListLength(parts) < 3) return;
+            string nc_name = llList2String(parts, 1);
+            key    nc_uuid = (key)llList2String(parts, 2);
+            string v = verdict_for_typed(nc_name, nc_uuid, INVENTORY_NOTECARD);
+            reply("REPLY_NC", nc_name + "|" + v);
             return;
         }
     }

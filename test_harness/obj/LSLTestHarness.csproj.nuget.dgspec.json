@@ -1,20 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\annes\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj": {}
+    "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj": {}
   },
   "projects": {
-    "C:\\Users\\annes\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj": {
+    "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\annes\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj",
+        "projectUniqueName": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj",
         "projectName": "LSLTestHarness",
-        "projectPath": "C:\\Users\\annes\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj",
-        "packagesPath": "C:\\Users\\annes\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\annes\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\obj\\",
+        "projectPath": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj",
+        "packagesPath": "C:\\Users\\Anne Skydancer\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "C:\\Users\\annes\\AppData\\Roaming\\NuGet\\NuGet.Config"
+          "C:\\Users\\Anne Skydancer\\AppData\\Roaming\\NuGet\\NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net8.0"
@@ -37,8 +37,7 @@
           "enableAudit": "true",
           "auditLevel": "low",
           "auditMode": "direct"
-        },
-        "SdkAnalysisLevel": "10.0.100"
+        }
       },
       "frameworks": {
         "net8.0": {
@@ -72,26 +71,12 @@
           ],
           "assetTargetFallback": true,
           "warn": true,
-          "downloadDependencies": [
-            {
-              "name": "Microsoft.AspNetCore.App.Ref",
-              "version": "[8.0.22, 8.0.22]"
-            },
-            {
-              "name": "Microsoft.NETCore.App.Ref",
-              "version": "[8.0.22, 8.0.22]"
-            },
-            {
-              "name": "Microsoft.WindowsDesktop.App.Ref",
-              "version": "[8.0.22, 8.0.22]"
-            }
-          ],
           "frameworkReferences": {
             "Microsoft.NETCore.App": {
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.100/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.421/PortableRuntimeIdentifierGraph.json"
         }
       }
     }
