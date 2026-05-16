@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. On LM_BUNDLE_BEGIN from updater_driver, asks update_shim
   for the collar's current inventory (scripts, animations, objects,
@@ -16,6 +16,7 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   transferred must exist in THIS prim's inventory — llRemoteLoadScriptPin
   and llGiveInventory both source from the calling script's own prim.
 CHANGES:
+- v1.1 rev 4: Update-only-installed model. Candidates is now intersected with CollarInv when each LIST/<type>-reply arrives, so the bundler only QUERYs items that are present in BOTH the bundler AND the collar — the rule is "known to the updater AND present in the collar gets refreshed; known but absent gets ignored; present but unknown stays." No SWEEP (would remove wearer customs); no auto-install of bundler-only items (wearer chose not to install them). ConditionalPairs / lookup_gate / Manifest / SWEEP / SWEPT machinery all retired — the general intersection rule subsumes the 3-script paired-kmod gate. Same model for scripts and non-scripts (animations, objects, notecards).
 - v1.1 rev 3: Extend the script-only diff to a typed phase machine that also covers animations, objects, and notecards. After SWEPT, walk LIST_ANIM / LIST_OBJ / LIST_NC and per-item QUERY_<type>; the shim wipes stale items synchronously and reports GIVE. Bundler then calls llGiveInventory(CollarKey, item) per GIVE — same-owner attached transfer is silent (the "attached = treated as agent" rule applies to cross-owner cases only) and bypasses RLV's edit-block. No SWEEP for non-scripts; items in collar not in bundler are wearer's customs and stay. Settings notecard ("settings") hard-excluded at both ends. Mirrors OpenCollar's update mechanism.
 - v1.1 rev 2: Drop notecard manifest. Replaced by inventory diff: enumerate
   this prim's collar-namespace scripts, ask shim for collar's collar-namespace
@@ -46,16 +47,12 @@ string UPDATER_MARKER = "COLLAR_UPDATER";
 // ships and the wearer's existing settings notecard is never wiped.
 string SETTINGS_NOTECARD = "settings";
 
-// Conditional pairs: <gated_script>, <gate_plugin>. The gated script ships
-// only if the gate plugin is present in collar OR is itself in this prim's
-// inventory and about to ship. This preserves the wearer's installed-set
-// while still healing paired-kmod gaps when the gating plugin is staged.
-list ConditionalPairs = [
-    "kmod_leash",      "plugin_leash",
-    "kmod_particles",  "plugin_leash",
-    "leash_holder",    "plugin_leash"
-];
-integer PAIR_STRIDE = 2;
+// (ConditionalPairs retired in rev 4 — the general "Candidates =
+//  CollarInv ∩ BundlerInv" intersection makes the paired-kmod gate
+//  redundant: kmod_leash / kmod_particles / leash_holder are only ever
+//  queried if the collar already has them, so a wearer who doesn't have
+//  plugin_leash also doesn't have them and they get filtered out
+//  automatically. No hand-curated pairs list needed.)
 
 
 /* -------------------- STATE -------------------- */
@@ -71,15 +68,14 @@ list    CollarInv = [];
 list    Candidates = [];
 integer CandIdx = 0;
 
-// Names the bundler has decided should remain in collar after the update —
-// shipped or acknowledged-current. Sent verbatim to shim as the SWEEP
-// keep-list. Only populated during the "scripts" phase.
-list    Manifest = [];
+// (Manifest list retired in rev 4 — was only used for the SWEEP keep-list,
+//  which is gone now that we no longer remove collar items the bundler
+//  doesn't carry.)
 
 // Name of the item currently awaiting a REPLY from the shim.
 string  PendingName = "";
 
-// Listen on SecureChannel for shim INV / REPLY / SWEPT / typed messages.
+// Listen on SecureChannel for shim INV / REPLY / typed messages.
 integer SecureListen = 0;
 
 // Phase machine. Each phase iterates Candidates (this prim's inventory of
@@ -101,20 +97,6 @@ integer is_collar_script(string name) {
     if (llSubStringIndex(name, "plugin_") == 0) return TRUE;
     if (llSubStringIndex(name, "control_") == 0) return TRUE;
     return FALSE;
-}
-
-// Look up the gate plugin for a given script name. Returns "" if the
-// script isn't gated (which is the common case).
-string lookup_gate(string name) {
-    integer i = 0;
-    integer n = llGetListLength(ConditionalPairs);
-    while (i < n) {
-        if (llList2String(ConditionalPairs, i) == name) {
-            return llList2String(ConditionalPairs, i + 1);
-        }
-        i += PAIR_STRIDE;
-    }
-    return "";
 }
 
 // Build the candidates list: every collar-namespace script in this prim,
@@ -184,7 +166,6 @@ cleanup_bundle() {
     CollarInv = [];
     Candidates = [];
     CandIdx = 0;
-    Manifest = [];
     PendingName = "";
     TypePhase = "";
 }
@@ -234,46 +215,21 @@ advance_phase() {
     else if (TypePhase == "notecards")  begin_phase("done");
 }
 
-// Advance the candidate cursor and send the next typed QUERY. Gate-checks
-// (ConditionalPairs) apply only to scripts — non-script types have no
-// inter-item dependencies. On exhaustion: scripts may SWEEP, non-scripts
-// transition straight to the next phase.
+// Send the next typed QUERY. Candidates was pre-intersected with
+// CollarInv before this function ran (in the LIST/<type>-reply handler),
+// so every entry is guaranteed to be both in this bundler AND in the
+// collar — exactly the "known to the updater AND present in the collar"
+// scope. No gate checks needed; no SWEEP needed. On exhaustion, advance
+// straight to the next phase.
 start_next_query() {
     string verb = query_verb_for_phase();
     integer n = llGetListLength(Candidates);
-    while (CandIdx < n) {
+    if (CandIdx < n) {
         string name = llList2String(Candidates, CandIdx);
-        integer gated_out = FALSE;
-        if (TypePhase == "scripts") {
-            string gate = lookup_gate(name);
-            if (gate != "") {
-                integer gate_in_collar  = (llListFindList(CollarInv, [gate]) >= 0);
-                integer gate_in_bundler = (llGetInventoryType(gate) == INVENTORY_SCRIPT);
-                if (!gate_in_collar && !gate_in_bundler) gated_out = TRUE;
-            }
-        }
-        if (!gated_out) {
-            PendingName = name;
-            key uuid = llGetInventoryKey(name);
-            llWhisper(SecureChannel,
-                verb + "|" + name + "|" + (string)uuid);
-            return;
-        }
-        CandIdx += 1;
-    }
-
-    // Phase exhausted.
-    if (TypePhase == "scripts") {
-        if (llGetListLength(Manifest) == 0) {
-            // Empty installer-side scripts; skip SWEEP (footgun guard
-            // against an empty bundler nuking the collar). Still walk
-            // the non-script phases in case the packager only added
-            // animations / objects / notecards.
-            advance_phase();
-            return;
-        }
+        PendingName = name;
+        key uuid = llGetInventoryKey(name);
         llWhisper(SecureChannel,
-            "SWEEP|" + llDumpList2String(Manifest, ","));
+            verb + "|" + name + "|" + (string)uuid);
         return;
     }
     advance_phase();
@@ -342,21 +298,44 @@ default {
 
         // CollarInv-load verbs (one per phase). The shim's CSV of what
         // the collar currently has of the current type — replies to LIST
-        // (scripts) / LIST_ANIM / LIST_OBJ / LIST_NC.
+        // (scripts) / LIST_ANIM / LIST_OBJ / LIST_NC. Intersect the
+        // bundler-side Candidates with this CollarInv so we only ever
+        // QUERY items that are present in BOTH ends — the "known to the
+        // updater AND present in the collar" rule. Items only in the
+        // bundler get filtered out here (wearer chose not to install
+        // them); items only in the collar are wearer customs that the
+        // updater never touches.
         if (verb == "INV" || verb == "ANIM" || verb == "OBJ" || verb == "NC") {
             string csv = "";
             if (llGetListLength(parts) >= 2) csv = llList2String(parts, 1);
             CollarInv = [];
             if (csv != "") CollarInv = llCSV2List(csv);
+
+            list intersected = [];
+            integer ci = 0;
+            integer cn = llGetListLength(Candidates);
+            while (ci < cn) {
+                string cand = llList2String(Candidates, ci);
+                if (llListFindList(CollarInv, [cand]) != -1) intersected += [cand];
+                ci += 1;
+            }
+            Candidates = intersected;
+
             CandIdx = 0;
+            if (llGetListLength(Candidates) == 0) {
+                advance_phase();
+                return;
+            }
             start_next_query();
             return;
         }
 
         if (verb == "REPLY") {
-            // REPLY|<name>|<verdict> for scripts only — shipped via
-            // llRemoteLoadScriptPin (3s sleep) and recorded in Manifest
-            // for the SWEEP step.
+            // REPLY|<name>|<verdict> for scripts. Candidates were
+            // pre-intersected with CollarInv so we know the collar has
+            // this name — GIVE here means "stale UUID, ship the new
+            // version via PIN" (3s sleep). SKIP means "matching UUID,
+            // nothing to do".
             if (llGetListLength(parts) < 3) return;
             string replied_name = llList2String(parts, 1);
             string verdict = llList2String(parts, 2);
@@ -364,23 +343,20 @@ default {
             PendingName = "";
             if (verdict == "GIVE") {
                 llRemoteLoadScriptPin(CollarKey, replied_name, CollarPin, TRUE, 0);
-                Manifest += [replied_name];
-            } else if (verdict == "SKIP") {
-                Manifest += [replied_name];
             }
-            // Any other verdict: drop silently, do not add to manifest.
+            // SKIP / anything else: do nothing.
             CandIdx += 1;
             start_next_query();
             return;
         }
 
         // REPLY_ANIM / REPLY_OBJ / REPLY_NC — non-script verdicts.
-        // GIVE means the shim already wiped its stale local copy (if any)
-        // and we should ship the replacement now. Same-owner attached
-        // prim-to-prim llGiveInventory is silent at script level — no
-        // dialog, no wearer interaction, item lands directly in the
-        // collar's inventory and bypasses RLV's edit-block. SKIP /
-        // EXCLUDE drop silently (no SWEEP for non-scripts).
+        // Same pre-intersection guarantee as REPLY: collar has it,
+        // GIVE means stale, SKIP means current, EXCLUDE means settings
+        // notecard (drop). Same-owner attached prim-to-prim
+        // llGiveInventory is silent at script level — no dialog, no
+        // wearer interaction, lands in the collar's inventory and
+        // bypasses RLV's edit-block.
         if (verb == "REPLY_ANIM" || verb == "REPLY_OBJ" || verb == "REPLY_NC") {
             if (llGetListLength(parts) < 3) return;
             string nspt_name = llList2String(parts, 1);
@@ -392,14 +368,6 @@ default {
             }
             CandIdx += 1;
             start_next_query();
-            return;
-        }
-
-        if (verb == "SWEPT") {
-            // Scripts SWEEP complete. Body (CSV of removed names) is
-            // informational — we trust the shim. Continue into the
-            // non-script phases.
-            advance_phase();
             return;
         }
     }
