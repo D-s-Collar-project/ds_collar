@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "U9DdgR1WXPA=",
+  "dgSpecHash": "FcSn+KVWo/4=",
   "success": true,
-  "projectFilePath": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\DSCollarTests.csproj",
+  "projectFilePath": "C:\\Users\\Anne Skydancer\\OneDrive\\Documents\\GitHub\\ds_collar_modular\\test_harness\\LSLTestHarness.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\Anne Skydancer\\.nuget\\packages\\microsoft.codecoverage\\17.8.0\\microsoft.codecoverage.17.8.0.nupkg.sha512",
     "C:\\Users\\Anne Skydancer\\.nuget\\packages\\microsoft.net.test.sdk\\17.8.0\\microsoft.net.test.sdk.17.8.0.nupkg.sha512",
