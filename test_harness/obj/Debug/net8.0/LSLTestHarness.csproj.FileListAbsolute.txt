@@ -102,3 +102,12 @@ C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debu
 C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LaunchSLClient.Form1.resources
 C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.opensim_source.OpenSim.Tools.LaunchSLClient.LaunchSLClient.Properties.Resources.resources
 C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.csproj.GenerateResource.cache
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.csproj.AssemblyReference.cache
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.AssemblyInfoInputs.cache
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.AssemblyInfo.cs
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.csproj.CoreCompileInputs.cache
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.sourcelink.json
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.dll
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\refint\LSLTestHarness.dll
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LSLTestHarness.pdb

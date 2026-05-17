@@ -1,5 +1,5 @@
 using System.Windows.Forms;
-using Microsoft.Toolkit.Uwp.Notifications;
+using Microsoft.Windows.AppNotifications;
 using WinGrowl.Core.Gntp;
 using WinGrowl.Core.Registration;
 
@@ -31,14 +31,15 @@ public static class Program
         // Route toast clicks back to the sending app's window. The
         // AddArgument calls in ToastBridge attach 'applicationName';
         // WindowActivator does a process-name prefix match and pulls
-        // the matching window forward. Fires on a background thread —
-        // P/Invoke and process enumeration don't need UI marshaling.
-        ToastNotificationManagerCompat.OnActivated += args =>
+        // the matching window forward. NotificationInvoked fires on a
+        // background thread — P/Invoke and process enumeration don't
+        // need UI marshaling. Register() wires up the COM activator
+        // that lets Windows deliver activation to a running instance.
+        AppNotificationManager.Default.NotificationInvoked += (_, args) =>
         {
             try
             {
-                var parsed = ToastArguments.Parse(args.Argument);
-                if (parsed.TryGetValue("applicationName", out var appName) && !string.IsNullOrEmpty(appName))
+                if (args.Arguments.TryGetValue("applicationName", out var appName) && !string.IsNullOrEmpty(appName))
                 {
                     var focused = WindowActivator.FocusByApplicationName(appName);
                     log.Write($"toast-click app='{appName}' focused={focused}");
@@ -46,6 +47,7 @@ public static class Program
             }
             catch (Exception ex) { log.Write($"toast-click-error: {ex.Message}"); }
         };
+        AppNotificationManager.Default.Register();
 
         server.Diagnostic += msg => log.Write(msg);
         server.Registered += (_, r) => log.Write($"REGISTER app='{r.ApplicationName}' types={r.Types.Count}");

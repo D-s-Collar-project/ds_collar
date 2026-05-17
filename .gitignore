@@ -18,6 +18,11 @@ Thumbs.db
 *.a
 *.so
 
+# WinGrowl publish + installer output (large self-contained binaries
+# that would blow past GitHub's 100 MB file size cap)
+WinGrowl/publish/
+WinGrowl/installer/Output/
+
 # LSL Compiler outputs
 *.cil
 *.out

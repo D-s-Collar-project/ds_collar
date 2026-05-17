@@ -1,5 +1,6 @@
 using System.IO;
-using Microsoft.Toolkit.Uwp.Notifications;
+using Microsoft.Windows.AppNotifications;
+using Microsoft.Windows.AppNotifications.Builder;
 using WinGrowl.Core.Gntp.Messages;
 
 namespace WinGrowl.App;
@@ -16,19 +17,27 @@ public sealed class ToastBridge
 
     public void Show(NotifyMessage n)
     {
-        var builder = new ToastContentBuilder()
+        // WinAppSDK 2.x AppNotificationBuilder. Replaces the deprecated
+        // Microsoft.Toolkit.Uwp.Notifications ToastContentBuilder path.
+        // Builds the same underlying toast XML schema, but routed via
+        // AppNotificationManager.Default which auto-registers the COM
+        // activator needed for click handling in unpackaged apps.
+        var builder = new AppNotificationBuilder()
             .AddText(n.Title)
             .AddText(n.Text);
 
         if (!string.IsNullOrEmpty(n.ApplicationName))
         {
-            builder.AddAttributionText(n.ApplicationName);
+            // No first-class attribution helper in AppNotificationBuilder;
+            // a third AddText reads as a small line under the message,
+            // close enough to GfW's source-app footer.
+            builder.AddText(n.ApplicationName);
         }
 
-        var iconPath = ResolveIcon(n);
-        if (iconPath is not null)
+        var iconUri = ResolveIcon(n);
+        if (iconUri is not null)
         {
-            try { builder.AddAppLogoOverride(new Uri(iconPath), ToastGenericAppLogoCrop.Default); } catch { }
+            try { builder.SetAppLogoOverride(iconUri, AppNotificationImageCrop.Default); } catch { }
         }
 
         if (!string.IsNullOrEmpty(n.NotificationId))
@@ -38,22 +47,18 @@ public sealed class ToastBridge
         builder.AddArgument("applicationName", n.ApplicationName);
         builder.AddArgument("notificationName", n.NotificationName);
 
-        builder.Show(toast =>
+        var notification = builder.BuildNotification();
+        notification.Tag = n.NotificationId ?? Guid.NewGuid().ToString("N");
+        notification.Group = n.ApplicationName ?? string.Empty;
+        if (!n.Sticky)
         {
-            toast.Tag = (n.NotificationId ?? Guid.NewGuid().ToString("N"));
-            toast.Group = n.ApplicationName;
-            if (n.Sticky)
-            {
-                toast.ExpirationTime = null;
-            }
-            else
-            {
-                toast.ExpirationTime = DateTimeOffset.Now.AddSeconds(n.Priority >= NotifyPriority.High ? 15 : 8);
-            }
-        });
+            notification.Expiration = DateTimeOffset.Now.AddSeconds(n.Priority >= NotifyPriority.High ? 15 : 8);
+        }
+
+        AppNotificationManager.Default.Show(notification);
     }
 
-    private string? ResolveIcon(NotifyMessage n)
+    private Uri? ResolveIcon(NotifyMessage n)
     {
         if (n.Icon is { } binary)
         {
@@ -63,12 +68,12 @@ public sealed class ToastBridge
             {
                 try { File.WriteAllBytes(path, binary.Data); } catch { return null; }
             }
-            return path;
+            return new Uri(path);
         }
         if (!string.IsNullOrEmpty(n.IconValue) && Uri.TryCreate(n.IconValue, UriKind.Absolute, out var u) &&
             (u.Scheme == Uri.UriSchemeHttp || u.Scheme == Uri.UriSchemeHttps))
         {
-            return u.AbsoluteUri;
+            return u;
         }
         return null;
     }

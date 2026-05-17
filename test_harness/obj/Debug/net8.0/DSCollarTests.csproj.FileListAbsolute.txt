@@ -105,3 +105,6 @@ C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debu
 C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\LaunchSLClient.Form1.resources
 C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\DSCollarTests.opensim_source.OpenSim.Tools.LaunchSLClient.LaunchSLClient.Properties.Resources.resources
 C:\Users\annes\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\DSCollarTests.csproj.GenerateResource.cache
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\DSCollarTests.dll
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\refint\DSCollarTests.dll
+C:\Users\Anne Skydancer\OneDrive\Documents\GitHub\ds_collar_modular\test_harness\obj\Debug\net8.0\DSCollarTests.pdb
