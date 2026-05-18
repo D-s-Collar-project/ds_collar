@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace WinGrowl.Core.Gntp.Messages;
 
 public enum NotifyPriority { VeryLow = -2, Low = -1, Normal = 0, High = 1, Emergency = 2 }
@@ -18,7 +20,13 @@ public sealed class NotifyMessage
     public string? CallbackContextType { get; init; }
     public string? CallbackTarget { get; init; }
 
-    public static NotifyMessage From(GntpMessage msg)
+    // Client-side TCP endpoint of the inbound NOTIFY. Set by the server,
+    // not parsed from GNTP. Lets the App layer resolve the sender's PID
+    // (via TcpPidResolver) to disambiguate multiple instances of the
+    // same exe — necessary for two Firestorms etc.
+    public IPEndPoint? SenderEndPoint { get; init; }
+
+    public static NotifyMessage From(GntpMessage msg, IPEndPoint? senderEndPoint = null)
     {
         if (msg.Type != GntpMessageType.Notify) throw new InvalidOperationException("Expected NOTIFY message.");
         var iconValue = msg.Headers["Notification-Icon"];
@@ -44,6 +52,7 @@ public sealed class NotifyMessage
             CallbackContext = msg.Headers["Notification-Callback-Context"],
             CallbackContextType = msg.Headers["Notification-Callback-Context-Type"],
             CallbackTarget = msg.Headers["Notification-Callback-Target"],
+            SenderEndPoint = senderEndPoint,
         };
     }
 }

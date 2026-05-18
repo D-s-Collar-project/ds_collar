@@ -15,7 +15,7 @@ public sealed class ToastBridge
         Directory.CreateDirectory(_iconCacheDir);
     }
 
-    public void Show(NotifyMessage n)
+    public void Show(NotifyMessage n, int? senderPid = null)
     {
         // WinAppSDK 2.x AppNotificationBuilder. Replaces the deprecated
         // Microsoft.Toolkit.Uwp.Notifications ToastContentBuilder path.
@@ -46,15 +46,26 @@ public sealed class ToastBridge
         }
         builder.AddArgument("applicationName", n.ApplicationName);
         builder.AddArgument("notificationName", n.NotificationName);
+        // PID lets the click handler focus the exact instance that sent
+        // this notification, instead of name-prefix-matching and possibly
+        // picking the wrong Firestorm. Omitted when unresolved (remote
+        // GNTP client, race with connection teardown, etc.); handler
+        // falls back to FocusByApplicationName.
+        if (senderPid is int pid && pid > 0)
+        {
+            builder.AddArgument("senderPid", pid.ToString());
+        }
 
         var notification = builder.BuildNotification();
         notification.Tag = n.NotificationId ?? Guid.NewGuid().ToString("N");
         notification.Group = n.ApplicationName ?? string.Empty;
-        if (!n.Sticky)
-        {
-            notification.Expiration = DateTimeOffset.Now.AddSeconds(n.Priority >= NotifyPriority.High ? 15 : 8);
-        }
-
+        // No Expiration: that property controls how long the notification
+        // stays in Action Center after first showing, not the banner
+        // duration (banner duration is the user's system setting).
+        // Setting it to a few seconds, as earlier versions did, deleted
+        // the notification from Action Center seconds after it appeared
+        // — meaning nothing the user actually wanted to review later
+        // was findable. Let Windows apply its default retention.
         AppNotificationManager.Default.Show(notification);
     }
 

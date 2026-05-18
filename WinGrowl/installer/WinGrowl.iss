@@ -102,6 +102,8 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName} now"; Flags: no
 
 [UninstallRun]
 ; Stop any running instance before removing files. taskkill returns
-; non-zero if nothing matches; runhidden + 'shellexec' avoids the
-; console window flash.
-Filename: "{cmd}"; Parameters: "/C taskkill /F /IM {#AppExeName} /T"; Flags: runhidden
+; non-zero if nothing matches; runhidden avoids the console window
+; flash. RunOnceId guarantees the kill fires exactly once even if
+; the uninstaller is invoked through a path that re-evaluates this
+; section (e.g. modify/repair).
+Filename: "{cmd}"; Parameters: "/C taskkill /F /IM {#AppExeName} /T"; Flags: runhidden; RunOnceId: "KillWinGrowl"

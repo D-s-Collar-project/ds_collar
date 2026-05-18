@@ -29,6 +29,26 @@ internal static class WindowActivator
 
     private const int SW_RESTORE = 9;
 
+    // Focus the main window of a specific PID. Used for toast click-back
+    // when the originating PID is known (resolved via TcpPidResolver from
+    // the GNTP connection). Disambiguates between multiple instances of
+    // the same exe — a toast from background-Firestorm focuses background-
+    // Firestorm, not whichever Firestorm matched the name first.
+    public static bool FocusByPid(int pid)
+    {
+        if (pid <= 0) return false;
+        Process? p;
+        try { p = Process.GetProcessById(pid); }
+        catch { return false; }
+        using (p)
+        {
+            var hwnd = p.MainWindowHandle;
+            if (hwnd == IntPtr.Zero) return false;
+            if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+            return SetForegroundWindow(hwnd);
+        }
+    }
+
     public static bool FocusByApplicationName(string applicationName)
     {
         if (string.IsNullOrWhiteSpace(applicationName)) return false;

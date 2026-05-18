@@ -111,13 +111,14 @@ public sealed class GntpServer : IAsyncDisposable
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
     {
-        var remote = client.Client.RemoteEndPoint?.ToString() ?? "?";
+        var remoteEp = client.Client.RemoteEndPoint as IPEndPoint;
+        var remote = remoteEp?.ToString() ?? client.Client.RemoteEndPoint?.ToString() ?? "?";
         Diag($"accept {remote}");
         using (client)
         {
             try
             {
-                if (!_options.AllowNetworkClients && client.Client.RemoteEndPoint is IPEndPoint ep && !IPAddress.IsLoopback(ep.Address))
+                if (!_options.AllowNetworkClients && remoteEp is not null && !IPAddress.IsLoopback(remoteEp.Address))
                 {
                     Diag($"reject {remote}: non-loopback");
                     return;
@@ -145,7 +146,7 @@ public sealed class GntpServer : IAsyncDisposable
                     return;
                 }
 
-                await DispatchAsync(stream, parsed, ct).ConfigureAwait(false);
+                await DispatchAsync(stream, parsed, remoteEp, ct).ConfigureAwait(false);
             }
             catch (IOException ex) { Diag($"io-error {remote}: {ex.Message}"); }
             catch (OperationCanceledException) { }
@@ -153,7 +154,7 @@ public sealed class GntpServer : IAsyncDisposable
         }
     }
 
-    private async Task DispatchAsync(NetworkStream stream, GntpMessage msg, CancellationToken ct)
+    private async Task DispatchAsync(NetworkStream stream, GntpMessage msg, IPEndPoint? senderEndPoint, CancellationToken ct)
     {
         try
         {
@@ -170,7 +171,7 @@ public sealed class GntpServer : IAsyncDisposable
                 }
                 case GntpMessageType.Notify:
                 {
-                    var nm = NotifyMessage.From(msg);
+                    var nm = NotifyMessage.From(msg, senderEndPoint);
                     if (!_registry.TryGet(nm.ApplicationName, out _))
                     {
                         var e = GntpWriter.WriteResponse(GntpWriter.Error(GntpErrorCode.UnknownApplication, $"Application '{nm.ApplicationName}' not registered.", "NOTIFY"));
