@@ -66,9 +66,9 @@ ds_collar_modular/
 
 ---
 
-## 🏗️ Architecture & ABI
+## 🏗️ Architecture & ISP
 
-### Consolidated ABI v1.0
+### Consolidated ISP v1.0
 
 The system uses a **5-channel architecture** for all inter-script communication:
 
