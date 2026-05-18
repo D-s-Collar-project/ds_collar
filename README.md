@@ -10,7 +10,7 @@ This project replaces the old monolithic collars with a clean kernel + plugin ar
 ## ✨ Features
 
 - **Modular kernel design** — central kernel (v1.0) with swappable modules and plugins.
-- **Consolidated ABI** — 5-channel architecture (500/700/800/900/950) using structured JSON messaging.
+- **Consolidated ISP** — 5-channel architecture (500/700/800/900/950) using structured JSON messaging.
 - **Access Control (ACL)** — unified ACL engine with support for owners, trustees, public access, and blacklist.
 - **Plugins** — 13 plugins covering owner management, leash, animations, RLV relay/restrictions, TPE mode, and more.
 - **Kernel Modules** — 8 specialized modules for auth, settings, dialogs, leash engine, particles, remote HUD, bootstrap, and UI.
