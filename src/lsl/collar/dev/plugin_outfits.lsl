@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 0
+REVISION: 1
 PURPOSE: Browse #RLV/.outfits subfolders and wear them. Two actions per
          outfit: Wear (attach additively) and Replace (detach all items
          under #RLV/.outfits then attach the chosen folder).
@@ -10,6 +10,10 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              on every menu entry — no persisted manifest. Attach/detach
              commands route through kmod_rlv (rlv.force passthrough).
 CHANGES:
+- v1.10 rev 1: handle_rlv_response pre-allocates Outfits via list
+  doubling and fills with llListReplaceList instead of `+=` inside
+  the parse loop. Matches plugin_folders rev 26 pattern; clears the
+  analyzer's O(N²) loop-concat warning on large .outfits trees.
 - v1.10 rev 0: Initial implementation.
 --------------------*/
 
@@ -365,23 +369,37 @@ handle_rlv_response(string message) {
         // @getinv returns a CSV of immediate subfolder names. Skip
         // dot-prefixed (hidden) and tilde-prefixed (viewer-managed
         // Give-to-#RLV) entries per the project convention used in
-        // plugin_folders.
+        // plugin_folders. Pre-allocate Outfits to the parsed CSV
+        // capacity via list doubling, then fill with llListReplaceList
+        // and truncate — avoids O(N²) heap churn on large outfit trees
+        // (matches the plugin_folders rev 26 pattern).
         list raw = llParseString2List(message, [","], []);
         integer n = llGetListLength(raw);
+
+        if (n > 0) {
+            list buf = [""];
+            while (llGetListLength(buf) < n) buf = buf + buf;
+            Outfits = llList2List(buf, 0, n - 1);
+        }
+
+        integer filled = 0;
         integer i = 0;
         while (i < n) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
             if (entry != "") {
                 string first = llGetSubString(entry, 0, 0);
                 if (first != "." && first != "~") {
-                    Outfits += [entry];
+                    Outfits = llListReplaceList(Outfits, [entry], filled, filled);
+                    filled += 1;
                 }
             }
             i += 1;
         }
-        if (llGetListLength(Outfits) > 0) {
-            Outfits = llListSort(Outfits, 1, TRUE);
-        }
+
+        if (filled == 0)     Outfits = [];
+        else if (filled < n) Outfits = llList2List(Outfits, 0, filled - 1);
+
+        if (filled > 0) Outfits = llListSort(Outfits, 1, TRUE);
     }
 
     if (llGetListLength(Outfits) == 0) {

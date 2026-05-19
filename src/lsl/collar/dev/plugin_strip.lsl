@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Offered to non-wearer parties only (ACL 1 / 3 / 5); the owned
          wearer (ACL 2) and self-owned wearer (ACL 4) are intentionally
@@ -18,6 +18,10 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              worn from #RLV/.base is protected from strip and the
              folder lock is reference-counted with any other consumer.
 CHANGES:
+- v1.10 rev 2: build_worn_list pre-allocates WornItems via list
+  doubling and fills with llListReplaceList instead of `+=` inside
+  the layer/attach loops. Matches plugin_folders rev 26 pattern;
+  clears the analyzer's O(N²) loop-concat warning.
 - v1.10 rev 1: Hide locked items from the picker instead of marking
   them. @getstatusall-detected y/n locks filter immediately; locks
   applied via @detachallthis (e.g., on .base) are caught on the
@@ -320,17 +324,31 @@ list parse_status(string raw, string key_name) {
 // y/n locks, and the session's DiscoveredLocked set populated by
 // verify_attempted_strip when a previous tap silently no-op'd
 // (typically a parent-folder @detachallthis).
+//
+// Pre-allocates WornItems to the worst-case capacity (every strippable
+// layer + every non-HUD attach point, stride 2) via list doubling, then
+// fills with llListReplaceList and truncates the tail — matches the
+// O(N log N) build cost used in plugin_folders rev 26 so the analyzer's
+// loop-concat heuristic stays clean.
 build_worn_list() {
-    WornItems = [];
+    integer max_layers   = llGetListLength(STRIPPABLE_LAYER_IDX);
+    integer max_attaches = llGetListLength(ATTACH_NAMES);
+    integer cap = (max_layers + max_attaches) * 2;
 
+    WornItems = [];
+    if (cap > 0) {
+        list buf = [""];
+        while (llGetListLength(buf) < cap) buf = buf + buf;
+        WornItems = llList2List(buf, 0, cap - 1);
+    }
+
+    integer filled = 0;
     string  item_name;
     integer skip_flag;
-    integer i;
 
     integer layer_count = llStringLength(RawOutfit);
-    integer n_strip = llGetListLength(STRIPPABLE_LAYER_IDX);
-    i = 0;
-    while (i < n_strip) {
+    integer i = 0;
+    while (i < max_layers) {
         integer layer_idx = llList2Integer(STRIPPABLE_LAYER_IDX, i);
         if (layer_idx < layer_count) {
             if (llGetSubString(RawOutfit, layer_idx, layer_idx) == "1") {
@@ -343,16 +361,18 @@ build_worn_list() {
                 if (!skip_flag) {
                     if (llListFindList(DiscoveredLocked, ["L:" + item_name]) != -1) skip_flag = TRUE;
                 }
-                if (!skip_flag) WornItems += ["L", item_name];
+                if (!skip_flag) {
+                    WornItems = llListReplaceList(WornItems, ["L", item_name], filled, filled + 1);
+                    filled += 2;
+                }
             }
         }
         i += 1;
     }
 
     integer attach_count = llStringLength(RawAttach);
-    integer attach_names_n = llGetListLength(ATTACH_NAMES);
     integer p = 1;
-    while (p < attach_count && p < attach_names_n) {
+    while (p < attach_count && p < max_attaches) {
         if (llListFindList(HUD_IDX, [p]) == -1) {
             if (llGetSubString(RawAttach, p, p) == "1") {
                 item_name = llList2String(ATTACH_NAMES, p);
@@ -365,12 +385,18 @@ build_worn_list() {
                     if (!skip_flag) {
                         if (llListFindList(DiscoveredLocked, ["A:" + item_name]) != -1) skip_flag = TRUE;
                     }
-                    if (!skip_flag) WornItems += ["A", item_name];
+                    if (!skip_flag) {
+                        WornItems = llListReplaceList(WornItems, ["A", item_name], filled, filled + 1);
+                        filled += 2;
+                    }
                 }
             }
         }
         p += 1;
     }
+
+    if (filled == 0)       WornItems = [];
+    else if (filled < cap) WornItems = llList2List(WornItems, 0, filled - 1);
 }
 
 // After a strip attempt, re-queries land here before build_worn_list
