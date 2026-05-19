@@ -1,12 +1,13 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 3
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
-         Offered to non-wearer parties only (ACL 1 / 3 / 5); the owned
-         wearer (ACL 2) and self-owned wearer (ACL 4) are intentionally
-         excluded so the wearer cannot strip themselves through this
-         menu.
+         Available to every ACL level (public / owned wearer / trustee /
+         self-owned wearer / primary owner). Items worn from #RLV/.base
+         are folder-locked at register time and never appear in the
+         picker, so the wearer cannot strip their core attachments
+         regardless of the open policy.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Enumerates worn items live via @getoutfit /
              @getattach; reads lock state via @getstatusall;remoutfit /
@@ -18,6 +19,11 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              worn from #RLV/.base is protected from strip and the
              folder lock is reference-counted with any other consumer.
 CHANGES:
+- v1.10 rev 3: Open policy to all ACL levels (1/2/3/4/5). Previous
+  exclusion of ACL 2/4 (owned/self-owned wearer) is dropped at the
+  user's direction; the .base @detachallthis claim already prevents
+  the wearer from stripping their core attachments, so policy-gating
+  the entire plugin was redundant.
 - v1.10 rev 2: build_worn_list pre-allocates WornItems via list
   doubling and fills with llListReplaceList instead of `+=` inside
   the layer/attach loops. Matches plugin_folders rev 26 pattern;
@@ -163,12 +169,16 @@ write_plugin_reg(string label) {
 }
 
 register_self() {
-    // Policy keys present for ACL 1/3/5 only. kmod_ui treats absence of an
-    // ACL key as "do not show this plugin to that level," so the wearer
-    // (ACL 2 / 4) never sees Strip in their root menu.
+    // Open policy: every ACL level sees Strip. The wearer's core
+    // attachments are protected by the @detachallthis:.base claim
+    // applied below, so wearer access here only exposes strippable
+    // (non-.base) items — they cannot strip their core kit even
+    // though the menu is reachable.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
         "1", "Strip",
+        "2", "Strip",
         "3", "Strip",
+        "4", "Strip",
         "5", "Strip"
     ]));
 
