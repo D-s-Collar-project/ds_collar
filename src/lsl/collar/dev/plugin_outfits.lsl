@@ -92,6 +92,14 @@ integer SETTINGS_BUS     = 800;
 integer UI_BUS           = 900;
 integer DIALOG_BUS       = 950;
 
+/* -------------------- TEMPORARY DEBUG -------------------- */
+// ".outfits / .base not detected" diagnostic. Flip to FALSE to silence.
+// Remove this block and all logd(...) calls once the bug is found.
+integer DEBUG_OUTFITS = TRUE;
+logd(string s) {
+    if (DEBUG_OUTFITS) llOwnerSay("[outfits-dbg] " + s);
+}
+
 /* -------------------- PLUGIN IDENTITY -------------------- */
 string PLUGIN_CONTEXT = "ui.core.outfits";
 string PLUGIN_LABEL   = "Outfits";
@@ -332,7 +340,9 @@ release_persisted_locks() {
 
 /* -------------------- RLV -------------------- */
 
+// (logging wrapper added by DEBUG_OUTFITS — see top of file)
 rlv_force(string command) {
+    logd("SEND rlv.force command=\"" + command + "\"");
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",    "rlv.force",
         "command", command
@@ -344,6 +354,9 @@ scan_outfits() {
     MenuContext = "scanning";
     stop_rlv_listen();
     RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
+    logd("LISTEN opened RLV_CHAN=" + (string)RLV_CHAN
+        + " filter=llGetOwner()=" + (string)llGetOwner()
+        + " handle=" + (string)RlvListenHandle);
     llSetTimerEvent(RLV_TIMEOUT);
     rlv_force("@getinv:" + OUTFITS_ROOT + "=" + (string)RLV_CHAN);
     llRegionSayTo(CurrentUser, 0, "Reading #RLV/" + OUTFITS_ROOT + " ...");
@@ -678,9 +691,20 @@ handle_dialog_timeout(string msg) {
 /* -------------------- RLV RESPONSE HANDLER -------------------- */
 
 handle_rlv_response(string message) {
+    logd("HANDLE MenuContext=\"" + MenuContext + "\""
+        + " msg_len=" + (string)llStringLength(message)
+        + " msg=\"" + message + "\""
+        + " expecting BASE_SUBNAME=\"" + BASE_SUBNAME + "\""
+        + " OUTFITS_ROOT=\"" + OUTFITS_ROOT + "\"");
     stop_rlv_listen();
-    if (CurrentUser == NULL_KEY) return;
-    if (MenuContext != "scanning") return;
+    if (CurrentUser == NULL_KEY) {
+        logd("HANDLE drop: CurrentUser==NULL_KEY");
+        return;
+    }
+    if (MenuContext != "scanning") {
+        logd("HANDLE drop: MenuContext != scanning");
+        return;
+    }
 
     // Parse the raw @getinv CSV once. Two pieces of information come out
     // of this single roundtrip: (1) does the protected `.base` subfolder
@@ -707,8 +731,12 @@ handle_rlv_response(string message) {
         integer i = 0;
         while (i < n) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
+            integer matches_base = (entry == BASE_SUBNAME);
+            logd("PARSE entry[" + (string)i + "]=\""
+                + entry + "\" len=" + (string)llStringLength(entry)
+                + " base_match=" + (string)matches_base);
             if (entry != "") {
-                if (entry == BASE_SUBNAME) {
+                if (matches_base) {
                     base_present = TRUE;
                 }
                 string first = llGetSubString(entry, 0, 0);
@@ -719,6 +747,9 @@ handle_rlv_response(string message) {
             }
             i += 1;
         }
+        logd("PARSE summary: total=" + (string)n
+            + " outfits_kept=" + (string)filled
+            + " base_present=" + (string)base_present);
 
         if (filled == 0)     Outfits = [];
         else if (filled < n) Outfits = llList2List(Outfits, 0, filled - 1);
@@ -775,6 +806,9 @@ default {
     timer() {
         // @getinv response timed out — viewer not RLV-enabled or not
         // responding. cleanup_session in return_to_root resets state.
+        logd("TIMEOUT MenuContext=\"" + MenuContext + "\""
+            + " RLV_CHAN=" + (string)RLV_CHAN
+            + " RlvListenHandle=" + (string)RlvListenHandle);
         stop_rlv_listen();
         if (CurrentUser != NULL_KEY) {
             llRegionSayTo(CurrentUser, 0, "RLV not responding. Is RLV mode enabled?");
@@ -783,8 +817,19 @@ default {
     }
 
     listen(integer channel, string name, key id, string message) {
-        if (channel == RLV_CHAN && id == llGetOwner()) {
-            handle_rlv_response(message);
+        if (channel == RLV_CHAN) {
+            // Pre-filter log: prints EVERY chat on RLV_CHAN regardless of
+            // sender, so we can see (a) whether anything is coming back at
+            // all, and (b) whether the sender UUID differs from llGetOwner.
+            logd("LISTEN chan=" + (string)channel
+                + " id=" + (string)id
+                + " name=\"" + name + "\""
+                + " owner=" + (string)llGetOwner()
+                + " filter_match=" + (string)(id == llGetOwner())
+                + " msg=\"" + message + "\"");
+            if (id == llGetOwner()) {
+                handle_rlv_response(message);
+            }
         }
     }
 
