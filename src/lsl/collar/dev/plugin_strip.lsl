@@ -53,6 +53,14 @@ integer KERNEL_LIFECYCLE = 500;
 integer UI_BUS           = 900;
 integer DIALOG_BUS       = 950;
 
+/* -------------------- TEMPORARY DEBUG -------------------- */
+// "RLV not responding" diagnostic. Flip to FALSE to silence.
+// Remove this block and all logd(...) calls once the bug is found.
+integer DEBUG_STRIP = TRUE;
+logd(string s) {
+    if (DEBUG_STRIP) llOwnerSay("[strip-dbg] " + s);
+}
+
 /* -------------------- PLUGIN IDENTITY -------------------- */
 string PLUGIN_CONTEXT = "ui.core.strip";
 string PLUGIN_LABEL   = "Strip";
@@ -270,6 +278,7 @@ return_to_root() {
 /* -------------------- RLV -------------------- */
 
 rlv_force(string command) {
+    logd("SEND rlv.force command=\"" + command + "\"");
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",    "rlv.force",
         "command", command
@@ -279,6 +288,9 @@ rlv_force(string command) {
 start_listen_if_needed() {
     if (RlvListenHandle == 0) {
         RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
+        logd("LISTEN opened on RLV_CHAN=" + (string)RLV_CHAN
+            + " filter=llGetOwner()=" + (string)llGetOwner()
+            + " handle=" + (string)RlvListenHandle);
     }
 }
 
@@ -603,7 +615,12 @@ handle_dialog_timeout(string msg) {
 /* -------------------- RLV RESPONSE HANDLER -------------------- */
 
 handle_rlv_response(string message) {
-    if (CurrentUser == NULL_KEY) return;
+    logd("HANDLE QState=" + (string)QState + " msg_len=" + (string)llStringLength(message)
+        + " msg=\"" + message + "\"");
+    if (CurrentUser == NULL_KEY) {
+        logd("HANDLE drop: CurrentUser==NULL_KEY");
+        return;
+    }
 
     if (QState == 1) {
         RawOutfit = message;
@@ -671,6 +688,9 @@ default {
 
     timer() {
         // RLV query timed out — viewer is not RLV-enabled or not responding.
+        logd("TIMEOUT QState=" + (string)QState
+            + " RLV_CHAN=" + (string)RLV_CHAN
+            + " RlvListenHandle=" + (string)RlvListenHandle);
         stop_rlv_listen();
         if (CurrentUser != NULL_KEY) {
             llRegionSayTo(CurrentUser, 0, "RLV not responding. Is RLV mode enabled?");
@@ -679,8 +699,19 @@ default {
     }
 
     listen(integer channel, string name, key id, string message) {
-        if (channel == RLV_CHAN && id == llGetOwner()) {
-            handle_rlv_response(message);
+        if (channel == RLV_CHAN) {
+            // Pre-filter log: prints EVERY chat on RLV_CHAN regardless of
+            // sender, so we can see (a) whether anything is coming back at
+            // all, and (b) whether the sender UUID differs from llGetOwner.
+            logd("LISTEN chan=" + (string)channel
+                + " id=" + (string)id
+                + " name=\"" + name + "\""
+                + " owner=" + (string)llGetOwner()
+                + " filter_match=" + (string)(id == llGetOwner())
+                + " msg=\"" + message + "\"");
+            if (id == llGetOwner()) {
+                handle_rlv_response(message);
+            }
         }
     }
 

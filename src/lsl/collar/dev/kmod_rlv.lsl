@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: kmod_rlv.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: RLV subsystem. Single point of @-command emission for all
   refcount-stateful RLV restrictions in the collar. Owns the third-party
   RLV relay protocol (RELAY_CHANNEL listen, auth queue, ASK dialog,
@@ -20,6 +20,15 @@ ARCHITECTURE: Spun off from plugin_relay v1.10 rev 21 to keep that
     (one-shot or pre-existing semantics — Phase 2 migration), and
     kmod_leash (=force / =clear only, no refcount overlap).
 CHANGES:
+- v1.1 rev 4: say_to_source always uses llRegionSayTo instead of the
+  distance-based ladder (llWhisper / llSay / llShout / llRegionSay).
+  Functional reach is unchanged — the source's listen fires on any
+  speech method as long as the channel matches — but llRegionSayTo
+  produces no entry in the wearer's local chat history, while the
+  other speech methods render as "<collar> whispers: RLV,...,ok" and
+  expose the relay protocol traffic to the wearer. Drops the
+  MR-faithful distance scaling Satomi MR uses; no relay source cares
+  which speech method delivered the ack.
 - v1.1 rev 3: Scope safeword to relay-sourced restrictions only. Previous safeword_clear_all emitted llOwnerSay("@clear") which is object-wide — the viewer cleared every restriction tied to the collar's UUID, including plugin_lock's @detach=n, plugin_rlvex's exception entries, and anything else other scripts had issued. Replaced with relay_safeword_clear: walks Sources and calls release_source per-source; claim_clear emits @<behav>=y only when the LAST claim on a behav goes away, so non-relay consumers' claims are preserved. Mirrors Satomi's MR safeword: relay panic cuts the wearer loose from external sources, not from their own collar's lock state. sos.relay.clear notice text updated to reflect the narrowed scope ("Relay restrictions cleared." instead of "All RLV restrictions cleared.").
 - v1.1 rev 2: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 1: Initial implementation. Lift of plugin_relay rev 21's
@@ -168,19 +177,20 @@ rearm_timer() {
 
 /* -------------------- OUTBOUND CHAT (DISTANCE-TIERED) -------------------- */
 
-// MR-faithful: pick whisper / say / shout / regionsay by source distance.
+// Region-wide targeted ack, silent in the wearer's local chat history.
+//
+// The earlier MR-faithful distance ladder (whisper < 10m, say < 20m,
+// shout < 100m, region-say otherwise) functioned correctly — the
+// source's listen fires regardless of speech method — but llWhisper /
+// llSay / llShout / llRegionSay all render the speaker in the wearer's
+// local chat as "<collar> whispers/says: RLV,...,ok", exposing the
+// relay protocol traffic to the wearer. llRegionSayTo targets the
+// source directly and produces no chat-history entry on either side,
+// so the wearer no longer sees protocol noise from their own collar.
+// Reach is unchanged in practice (sources are nearly always
+// in-region; if offsim, none of the speech methods reached them).
 say_to_source(key src, integer chan, string text) {
-    list det = llGetObjectDetails(src, [OBJECT_POS]);
-    vector pos = llList2Vector(det, 0);
-    if (pos == ZERO_VECTOR) {
-        llRegionSayTo(src, chan, text);
-        return;
-    }
-    float d = llVecDist(pos, llGetRootPosition());
-    if (d < 10.0)       llWhisper(chan, text);
-    else if (d < 20.0)  llSay(chan, text);
-    else if (d < 100.0) llShout(chan, text);
-    else                llRegionSay(chan, text);
+    llRegionSayTo(src, chan, text);
 }
 
 // Wire-format an ack to a source: <ident>,<wearer>,<command>,<ack>
