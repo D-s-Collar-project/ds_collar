@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_proto.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 6
 PURPOSE: Holder-discovery handshake protocol for the leashing engine
 ARCHITECTURE: True LSL state machine.
                 default          — idle / coffle responder
@@ -14,6 +14,33 @@ ARCHITECTURE: True LSL state machine.
               (mode_str + validation_target + oc_ping_target). IPC reuses
               SETTINGS_BUS so no new bus number is consumed.
 CHANGES:
+- v1.1 rev 6: Revert the rev 5 responder widening. The "A coffles B
+  to A" path that motivated it is now handled at the source — the
+  engine (kmod_leash_engine rev 32+) tags the user's original
+  claim mode in persistent state (LeashClaimMode) and sendProtoStart
+  emits that tag verbatim instead of deriving from
+  Leasher == FollowTarget. So a coffle action stays mode=coffle on
+  the wire even when the user picked themselves as the anchor, and
+  THIS responder gets to answer (no race against a hand-held
+  leash_holder). Strict mode separation restored:
+    coffle  → collar LeashPoint (this responder)
+    grab    → hand-held leash_holder.lsl
+    post    → static-object linkset root
+- v1.1 rev 5: Coffle responder now also answers grab requests (still
+  skips post). Diagnosed second-order to rev 4 via the same DEBUG_LEASH
+  trail: in the "A coffles B to A" RP path (A is ordered to chain B to
+  themselves), claimLeash sets Leasher == FollowTarget == A.
+  sendProtoStart's state-derived mode classifier sees that equality
+  and emits mode=grab on the wire, even though A's collar LeashPoint
+  is the appropriate anchor. The earlier coffle-only filter then kept
+  A's collar silent; the handshake expired and particles fell back to
+  OCPingTarget = A's avatar center. Negative-listing post (which
+  resolves to a static linkset root) keeps the responder honest while
+  unblocking this case. The other shape that fires mode=grab — A
+  grabs B's leash with a hand-held leash_holder worn — still works
+  because both responders answer; the validator pins whichever
+  arrives first.
+  (Superseded by rev 6's engine-side tag.)
 - v1.1 rev 4: Fix validateAndExtractHolder rejecting valid avatar/coffle
   replies whose `holder` field is a CHILD prim of the responder's
   attachment. llGetObjectDetails(<child_prim_key>, [OBJECT_ATTACHED_POINT,
@@ -183,6 +210,12 @@ leashProtoNativeRequest(string msg) {
 
     // Only answer coffle requests. Grab/post belong to the leasher's
     // hand-held holder; if we replied there we'd race against it.
+    //
+    // The "A coffles B to A" RP path is supported because the engine
+    // now tags the original claim mode (kmod_leash_engine rev 32+
+    // persists LeashClaimMode) and sendProtoStart emits mode=coffle
+    // for that case, so this responder fires correctly even when
+    // Leasher == FollowTarget on the engine side.
     string requester_mode = llJsonGetValue(msg, ["mode"]);
     if (requester_mode != JSON_INVALID && requester_mode != "coffle") {
         logd("RESPONDER skip: mode=" + requester_mode + " (not coffle)");
