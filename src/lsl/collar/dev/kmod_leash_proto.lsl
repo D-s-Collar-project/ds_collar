@@ -38,6 +38,14 @@ CHANGES:
 integer KERNEL_LIFECYCLE = 500;
 integer SETTINGS_BUS     = 800;
 
+/* -------------------- TEMPORARY DEBUG -------------------- */
+// Coffle-to-self diagnostic. Flip to FALSE to silence. Remove this
+// block and all logd(...) calls once the bug is found.
+integer DEBUG_LEASH = TRUE;
+logd(string s) {
+    if (DEBUG_LEASH) llOwnerSay("[leash-dbg proto] " + s);
+}
+
 /* -------------------- PROTOCOL CONSTANTS -------------------- */
 integer LEASH_CHAN_LM     = -8888;
 integer LEASH_CHAN_NATIVE = -192837465;
@@ -79,6 +87,7 @@ key findLeashpointPrim() {
 
 /* -------------------- ENGINE NOTIFICATION -------------------- */
 notifyHolder(key holder) {
+    logd("notifyHolder -> engine, holder=" + (string)holder);
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type",   "leash.proto.holder",
         "holder", (string)holder
@@ -86,6 +95,7 @@ notifyHolder(key holder) {
 }
 
 notifyFallback(key target) {
+    logd("notifyFallback -> engine, target=" + (string)target + " (mode=" + ModeStr + ")");
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type",   "leash.proto.fallback",
         "target", (string)target
@@ -129,6 +139,9 @@ restartNativeProbe() {
         "origin",     "leashpoint",
         "mode",       ModeStr
     ]);
+    logd("BROADCAST plugin.leash.request collar=" + (string)llGetKey()
+        + " mode=" + ModeStr + " session=" + (string)HolderSession
+        + " ValidationTarget=" + (string)ValidationTarget);
     llRegionSay(LEASH_CHAN_NATIVE, req);
 
     llSetTimerEvent(NATIVE_PHASE_DURATION);
@@ -139,22 +152,40 @@ restartNativeProbe() {
 // Independent of our own handshake — we always answer.
 leashProtoNativeRequest(string msg) {
     key requesting_collar = (key)llJsonGetValue(msg, ["collar"]);
-    if (requesting_collar == NULL_KEY) return;
-    if (requesting_collar == llGetKey()) return;       // ignore self-broadcast
+    if (requesting_collar == NULL_KEY) {
+        logd("RESPONDER skip: requesting_collar=NULL_KEY");
+        return;
+    }
+    if (requesting_collar == llGetKey()) {
+        logd("RESPONDER skip: self-broadcast (requesting_collar==llGetKey)");
+        return;
+    }
     string session_str = llJsonGetValue(msg, ["session"]);
-    if (session_str == JSON_INVALID) return;
+    if (session_str == JSON_INVALID) {
+        logd("RESPONDER skip: session JSON_INVALID");
+        return;
+    }
 
     // Only answer coffle requests. Grab/post belong to the leasher's
     // hand-held holder; if we replied there we'd race against it.
     string requester_mode = llJsonGetValue(msg, ["mode"]);
-    if (requester_mode != JSON_INVALID && requester_mode != "coffle") return;
+    if (requester_mode != JSON_INVALID && requester_mode != "coffle") {
+        logd("RESPONDER skip: mode=" + requester_mode + " (not coffle)");
+        return;
+    }
 
     key target_prim = findLeashpointPrim();
+    key root_key    = llGetLinkKey(1);
+    logd("RESPONDER reply: from=" + (string)requesting_collar
+        + " session=" + session_str
+        + " mode=" + requester_mode
+        + " holder=" + (string)target_prim
+        + " root=" + (string)root_key);
     string reply = llList2Json(JSON_OBJECT, [
         "type",    "plugin.leash.target",
         "ok",      "1",
         "holder",  (string)target_prim,
-        "root",    (string)llGetLinkKey(1),
+        "root",    (string)root_key,
         "name",    llGetObjectName(),
         "session", session_str
     ]);
@@ -166,30 +197,71 @@ leashProtoNativeRequest(string msg) {
 // or NULL_KEY if anything fails. Validates session nonce, mode-specific
 // post-root or attachment-owner constraint.
 key validateAndExtractHolder(string msg) {
-    if (llJsonGetValue(msg, ["type"]) != "plugin.leash.target") return NULL_KEY;
-    if (llJsonGetValue(msg, ["ok"])   != "1")                   return NULL_KEY;
+    string type_str = llJsonGetValue(msg, ["type"]);
+    if (type_str != "plugin.leash.target") {
+        logd("VALIDATE reject: type=" + type_str);
+        return NULL_KEY;
+    }
+    string ok_str = llJsonGetValue(msg, ["ok"]);
+    if (ok_str != "1") {
+        logd("VALIDATE reject: ok=" + ok_str);
+        return NULL_KEY;
+    }
     integer session = (integer)llJsonGetValue(msg, ["session"]);
-    if (session != HolderSession) return NULL_KEY;
+    if (session != HolderSession) {
+        logd("VALIDATE reject: session=" + (string)session
+            + " expected=" + (string)HolderSession);
+        return NULL_KEY;
+    }
 
     key candidate = (key)llJsonGetValue(msg, ["holder"]);
-    if (candidate == NULL_KEY) return NULL_KEY;
+    if (candidate == NULL_KEY) {
+        logd("VALIDATE reject: candidate=NULL_KEY");
+        return NULL_KEY;
+    }
+
+    logd("VALIDATE candidate=" + (string)candidate + " mode=" + ModeStr
+        + " ValidationTarget=" + (string)ValidationTarget);
 
     if (ModeStr == "post") {
         // Post mode: responder's linkset root must equal the post UUID
         // the user clicked (ValidationTarget = LeashTarget engine-side).
         string root_str = llJsonGetValue(msg, ["root"]);
-        if (root_str == JSON_INVALID) return NULL_KEY;
-        if ((key)root_str != ValidationTarget) return NULL_KEY;
+        if (root_str == JSON_INVALID) {
+            logd("VALIDATE reject (post): root missing");
+            return NULL_KEY;
+        }
+        if ((key)root_str != ValidationTarget) {
+            logd("VALIDATE reject (post): root=" + root_str
+                + " != ValidationTarget=" + (string)ValidationTarget);
+            return NULL_KEY;
+        }
     }
     else {
         // Avatar/coffle: responder must be an attachment owned by the
         // expected wearer (ValidationTarget = Leasher in avatar mode,
         // CoffleTargetAvatar in coffle mode — engine-side leashFollowTarget).
         list odetails = llGetObjectDetails(candidate, [OBJECT_ATTACHED_POINT, OBJECT_OWNER]);
-        if (llGetListLength(odetails) < 2) return NULL_KEY;
-        if (llList2Integer(odetails, 0) == 0) return NULL_KEY;
-        if (llList2Key(odetails, 1) != ValidationTarget) return NULL_KEY;
+        if (llGetListLength(odetails) < 2) {
+            logd("VALIDATE reject: odetails len=" + (string)llGetListLength(odetails)
+                + " (candidate may be offsim)");
+            return NULL_KEY;
+        }
+        integer attach_pt = llList2Integer(odetails, 0);
+        key     owner     = llList2Key(odetails, 1);
+        logd("VALIDATE odetails attach_pt=" + (string)attach_pt
+            + " owner=" + (string)owner);
+        if (attach_pt == 0) {
+            logd("VALIDATE reject: attach_pt=0 (candidate not on attachment)");
+            return NULL_KEY;
+        }
+        if (owner != ValidationTarget) {
+            logd("VALIDATE reject: owner=" + (string)owner
+                + " != ValidationTarget=" + (string)ValidationTarget);
+            return NULL_KEY;
+        }
     }
+    logd("VALIDATE accept: candidate=" + (string)candidate);
     return candidate;
 }
 

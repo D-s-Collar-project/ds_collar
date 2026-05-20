@@ -195,6 +195,14 @@ integer MODE_AVATAR = 0;  // Clip: grab leash, wearer follows the clicker
 integer MODE_COFFLE = 1;  // Coffle: wearer follows a different avatar
 integer MODE_POST = 2;    // Post: wearer follows a static object
 
+/* -------------------- TEMPORARY DEBUG -------------------- */
+// Coffle-to-self diagnostic. Flip to FALSE to silence. Remove this
+// block and all logd(...) calls once the bug is found.
+integer DEBUG_LEASH = TRUE;
+logd(string s) {
+    if (DEBUG_LEASH) llOwnerSay("[leash-dbg engine] " + s);
+}
+
 // Settings keys
 string KEY_LEASHED = "leash.leashedavatar";
 string KEY_LEASHER = "leash.leasherkey";
@@ -460,6 +468,10 @@ sendProtoStart(key controller) {
     // attachment owned by FollowTarget; for post the responder's linkset
     // root must equal FollowTarget. The OC LM ping is addressed to the
     // same UUID and the responder echoes it back as the nonce.
+    logd("sendProtoStart mode=" + mode_str
+        + " controller=" + (string)controller
+        + " FollowTarget=" + (string)FollowTarget
+        + " Leasher=" + (string)Leasher);
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type",              "leash.proto.start",
         "controller",        (string)controller,
@@ -1259,8 +1271,12 @@ default
                 // discards pending events when proto state-changes, so a
                 // queued proto.shutdown can be lost and the handshake
                 // continues in the background until natural timeout.
-                if (!Leashed) return;
+                if (!Leashed) {
+                    logd("engine: drop late proto.holder (Leashed=FALSE)");
+                    return;
+                }
                 HolderTarget = (key)jsonGet(msg, "holder", (string)NULL_KEY);
+                logd("engine: proto.holder pinned HolderTarget=" + (string)HolderTarget);
                 if (HolderTarget != NULL_KEY) setParticlesState(TRUE, HolderTarget);
             }
             else if (msg_type == "leash.proto.fallback") {
@@ -1268,8 +1284,13 @@ default
                 // anchor (proto picked it). HolderTarget stays NULL_KEY
                 // so followTick falls back to leashFollowTarget too.
                 // Same stale-message guard as proto.holder above.
-                if (!Leashed) return;
+                if (!Leashed) {
+                    logd("engine: drop late proto.fallback (Leashed=FALSE)");
+                    return;
+                }
                 key fallback = (key)jsonGet(msg, "target", (string)NULL_KEY);
+                logd("engine: proto.fallback target=" + (string)fallback
+                    + " (HolderTarget stays NULL_KEY; particles aim at fallback)");
                 if (fallback != NULL_KEY) setParticlesState(TRUE, fallback);
             }
             return;

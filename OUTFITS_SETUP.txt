@@ -1,0 +1,180 @@
+=========================================
+ D/s Collar — Outfits Plugin Setup
+=========================================
+
+The Outfits menu reads from your #RLV shared folder. The folder
+layout the collar expects is:
+
+    #RLV/
+        .outfits/
+            .base/       ← non-strippable base kit (REQUIRED)
+            Casual/      ← one folder per outfit
+            Formal/
+            BDSM/
+            ...
+
+Two things must exist before the Outfits menu will open:
+
+  1. #RLV/.outfits/               — the outfits library root
+  2. #RLV/.outfits/.base/         — the protected base kit subfolder
+
+The collar refuses to open the Outfits picker until .base exists,
+because Wear would otherwise risk pulling off items you treat as
+part of your avatar identity.
+
+-----------------------------------------------------------------
+ 1. Make sure you have a #RLV shared folder
+-----------------------------------------------------------------
+
+In Firestorm (or any RLV-capable viewer):
+
+  Inventory window  →  + (New)  →  New Folder
+  Name the folder exactly: #RLV
+  (The # symbol is required.)
+
+If a #RLV folder already exists, skip this step.
+
+-----------------------------------------------------------------
+ 2. Create #RLV/.outfits
+-----------------------------------------------------------------
+
+Inside #RLV, create a subfolder named exactly:
+
+    .outfits
+
+(Yes, the leading dot is required. Dot-prefixed folders are hidden
+from the regular Outfits picker but the collar still sees them.)
+
+-----------------------------------------------------------------
+ 3. Create #RLV/.outfits/.base
+-----------------------------------------------------------------
+
+Inside #RLV/.outfits, create a subfolder named exactly:
+
+    .base
+
+Drop links to your "always on" items into .base:
+
+  - Your body / mesh head
+  - AO / animation overrider
+  - The collar itself (optional)
+  - Any jewelry, piercings, or implants you treat as permanent
+  - HUDs you always wear
+
+How to add a link: right-click an item in your inventory →
+"Copy", then in the .base folder → "Paste as Link". Always link;
+never move the original. RLV needs the link, not the item.
+
+The collar automatically locks #RLV/.outfits/.base with
+@detachallthis the moment it boots, so nothing under .base can be
+removed by the Strip menu, the Wear action, the Remove action,
+or any external relay — even if you forget to lock items
+individually.
+
+-----------------------------------------------------------------
+ 4. Create one folder per outfit under #RLV/.outfits
+-----------------------------------------------------------------
+
+Alongside .base, create one subfolder per outfit. Each holds
+links to the items in that look. Example tree:
+
+    #RLV/
+        .outfits/
+            .base/
+                (body, AO, collar, jewelry — links)
+            Casual/
+                (jeans, t-shirt, sneakers — links)
+            Formal/
+                (dress, heels, gloves — links)
+            BDSM/
+                (corset, cuffs, gag — links)
+
+The Outfits picker lists everything under .outfits *except*
+folders whose names start with "." or "~", so .base is hidden
+from the picker even though it's protecting your kit.
+
+-----------------------------------------------------------------
+ 5. Using the Outfits menu
+-----------------------------------------------------------------
+
+Tap an outfit in the picker to open its action menu. Five actions
+are available; which ones you see depends on the touching avatar's
+ACL level.
+
+  Add     — Attach this folder additively. Items already worn at
+            slots the new folder would fill are NOT kicked off —
+            the new items layer on top. Uses @attachallover.
+
+  Wear    — Replace. Detach everything currently worn from anywhere
+            under #RLV/.outfits, then attach the chosen folder.
+            Items under #RLV/.outfits/.base are protected and are
+            NOT removed. Items worn from outside #RLV (regular
+            inventory folders, HUDs not linked into .base, etc.)
+            are also untouched.
+
+  Remove  — Detach this outfit's items. Blocked silently if the
+            outfit is locked.
+
+  Lock    — Apply a folder lock (@detachallthis) to this outfit.
+            While locked, the outfit cannot be removed by the
+            Strip menu, the Remove action, or external relays.
+            Available to ACL 3 (trustee), ACL 4 (self-owned wearer),
+            and ACL 5 (primary owner) only.
+
+  Unlock  — Release the lock. Same ACL gating as Lock.
+
+Lock state is **persistent**: it lives in the collar's linkset data
+and is automatically re-applied on every script start. Detaching
+and re-attaching the collar does NOT clear locks — RLV restrictions
+survive the rez cycle because the collar itself is the issuing
+object.
+
+A lock is released only when:
+  - You tap **Unlock** in the picker for that outfit.
+  - You **factory-reset** the collar (Maintenance → Reset). The
+    plugin releases viewer-side restrictions explicitly before the
+    reset so nothing is left orphaned.
+
+Locked outfits are marked with a "*" in the picker.
+
+-----------------------------------------------------------------
+ ACL summary
+-----------------------------------------------------------------
+
+  ACL 1 (public)             : Add, Wear, Remove
+  ACL 2 (owned wearer)       : Add, Wear, Remove
+  ACL 3 (trustee)            : Add, Wear, Remove, Lock, Unlock
+  ACL 4 (self-owned wearer)  : Add, Wear, Remove, Lock, Unlock
+  ACL 5 (primary owner)      : Add, Wear, Remove, Lock, Unlock
+
+-----------------------------------------------------------------
+ Troubleshooting
+-----------------------------------------------------------------
+
+"Outfits base folder not configured."
+    The collar didn't find #RLV/.outfits/.base. Create it as
+    described in step 3 above and try the Outfits menu again.
+    No reset needed — the check runs every time you open the
+    menu.
+
+"No outfits found in #RLV/.outfits."
+    .outfits and .base exist, but no outfit subfolders sit
+    alongside .base. Create at least one regular subfolder
+    (e.g. Casual) and put item links inside it.
+
+"RLV not responding."
+    Make sure RLV (or RLVa) is enabled in your viewer
+    preferences. Firestorm: Preferences → Privacy → General →
+    "Enable Restrained Love API".
+
+Outfit still won't change.
+    Check capitalization on folder names — RLV is case-sensitive.
+    Make sure .base is spelled exactly ".base" (with the leading
+    dot) and lives directly under #RLV/.outfits, not somewhere
+    else.
+
+Remove does nothing.
+    The outfit is probably locked (look for "*" in the picker)
+    or one of its items has its own @detachallthis lock from a
+    different source (plugin_folders, an RLV relay, etc.).
+    Unlock the outfit first, then Remove.

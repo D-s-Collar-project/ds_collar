@@ -1,13 +1,15 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
-         self-owned wearer / primary owner). Items worn from #RLV/.base
-         are folder-locked at register time and never appear in the
-         picker, so the wearer cannot strip their core attachments
-         regardless of the open policy.
+         self-owned wearer / primary owner). Items worn from
+         #RLV/.outfits/.base are folder-locked at register time and
+         never appear in the picker, so the wearer cannot strip their
+         outfit-system base kit regardless of the open policy. Pairs
+         with plugin_outfits (#RLV/.outfits/ as the outfits library;
+         the .base subfolder is the protected "non-strippable" set).
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Enumerates worn items live via @getoutfit /
              @getattach; reads lock state via @getstatusall;remoutfit /
@@ -19,6 +21,15 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              worn from #RLV/.base is protected from strip and the
              folder lock is reference-counted with any other consumer.
 CHANGES:
+- v1.10 rev 4: Move the protected-folder lock from `.base` (top-level)
+  to `.outfits/.base` (nested) to match the OC-style outfit-system
+  convention paired with plugin_outfits: `#RLV/.outfits/` is the
+  outfits library, `#RLV/.outfits/.base/` is the non-strippable
+  subfolder. Items linked from `.outfits/<name>/` (regular outfits)
+  are no longer folder-locked, so plugin_outfits' Replace
+  (@detachall:.outfits=force + @attachall:.outfits/<new>=force) can
+  swap them; .base items are silently skipped by the force command
+  because of the @detachallthis lock applied here.
 - v1.10 rev 3: Open policy to all ACL levels (1/2/3/4/5). Previous
   exclusion of ACL 2/4 (owned/self-owned wearer) is dropped at the
   user's direction; the .base @detachallthis claim already prevents
@@ -49,8 +60,8 @@ string PLUGIN_LABEL   = "Strip";
 /* -------------------- RLV -------------------- */
 integer RLV_CHAN    = 1888771;
 float   RLV_TIMEOUT = 10.0;
-string  BASE_FOLDER = ".base";   // #RLV-relative; items here are never strippable.
-string  RLV_CONSUMER = "strip";  // kmod_rlv consumer id for our @detachallthis claim.
+string  BASE_FOLDER = ".outfits/.base";  // #RLV-relative; items here are never strippable.
+string  RLV_CONSUMER = "strip";          // kmod_rlv consumer id for our @detachallthis claim.
 
 /* -------------------- LAYER NAMES (matches @getoutfit response order) -------------------- */
 // RLV @getoutfit returns a 0/1 string with characters in this canonical
@@ -192,11 +203,11 @@ register_self() {
     ]), NULL_KEY);
 
     // Claim @detachallthis:<BASE_FOLDER> through kmod_rlv so items
-    // worn from #RLV/.base are non-strippable from any source. claim_add
-    // in kmod_rlv is idempotent — re-applying on every state_entry /
-    // kernel.register.refresh is safe and ensures the lock survives
-    // any kmod_rlv reset (claims clear on factory reset; we re-claim
-    // here on our own restart).
+    // worn from #RLV/.outfits/.base are non-strippable from any source.
+    // claim_add in kmod_rlv is idempotent — re-applying on every
+    // state_entry / kernel.register.refresh is safe and ensures the
+    // lock survives any kmod_rlv reset (claims clear on factory reset;
+    // we re-claim here on our own restart).
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",     "rlv.apply",
         "consumer", RLV_CONSUMER,
