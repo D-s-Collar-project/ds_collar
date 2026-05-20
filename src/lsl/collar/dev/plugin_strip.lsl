@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -21,6 +21,16 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              worn from #RLV/.base is protected from strip and the
              folder lock is reference-counted with any other consumer.
 CHANGES:
+- v1.10 rev 5: Fix the @getstatusall lock-detection probes. The
+  syntax was inverted — `@getstatusall;remoutfit=<chan>` (semicolon)
+  vs the canonical `@getstatusall:<filter>=<chan>` (colon). The
+  semicolon-form is reserved for an optional custom separator
+  AFTER a filter; using it as the filter-delimiter parses as an
+  unrecognised command and the viewer silently drops it. Diagnosed
+  via DEBUG_STRIP: @getoutfit and @getattach responded correctly,
+  then QState 3 timed out at exactly the broken probe. Both
+  invocations corrected to use the colon form. Debug scaffolding
+  still in place pending confirmation; will strip in a follow-up rev.
 - v1.10 rev 4: Move the protected-folder lock from `.base` (top-level)
   to `.outfits/.base` (nested) to match the OC-style outfit-system
   convention paired with plugin_outfits: `#RLV/.outfits/` is the
@@ -318,11 +328,11 @@ advance_query() {
         return;
     }
     if (QState == 3) {
-        rlv_force("@getstatusall;remoutfit=" + (string)RLV_CHAN);
+        rlv_force("@getstatusall:remoutfit=" + (string)RLV_CHAN);
         return;
     }
     if (QState == 4) {
-        rlv_force("@getstatusall;remattach=" + (string)RLV_CHAN);
+        rlv_force("@getstatusall:remattach=" + (string)RLV_CHAN);
     }
 }
 
