@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_proto.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Holder-discovery handshake protocol for the leashing engine
 ARCHITECTURE: True LSL state machine.
                 default          — idle / coffle responder
@@ -14,6 +14,21 @@ ARCHITECTURE: True LSL state machine.
               (mode_str + validation_target + oc_ping_target). IPC reuses
               SETTINGS_BUS so no new bus number is consumed.
 CHANGES:
+- v1.1 rev 4: Fix validateAndExtractHolder rejecting valid avatar/coffle
+  replies whose `holder` field is a CHILD prim of the responder's
+  attachment. llGetObjectDetails(<child_prim_key>, [OBJECT_ATTACHED_POINT,
+  ...]) returns 0 — only the linkset root reports the real attach point.
+  Symptom: grabs/coffles where the leasher's LeashPoint lived as a
+  child prim (named "leashpoint" or desc "leash:point") timed out the
+  4-second handshake and fell back to OCPingTarget = leasher avatar,
+  so particles aimed at avatar center instead of the LeashPoint.
+  Validation now runs against the `root` field already included in
+  every reply (legacy fallback to `candidate` when the field is
+  absent). The candidate is still returned to the engine as the
+  particle target so the leash docks visually at the LeashPoint prim.
+  Diagnosed via in-world DEBUG_LEASH logs: `attach_pt=0 owner=<leasher
+  uuid>` on the candidate, confirming the linkset (root) WAS attached
+  and owned correctly but the child prim's OBJECT_ATTACHED_POINT was 0.
 - v1.1 rev 3: Defensive validProtoStart(msg) gate before captureProtoStart in all three paths that consume leash.proto.start (default's link_message, proto_native's link_message restart, proto_oc_lm's link_message restart). Without it, a malformed leash.proto.start (missing field) would silently corrupt the handshake — llJsonGetValue returns the literal string "JSON_INVALID" for missing fields, (key)"JSON_INVALID" yields garbage, proto_native's request would carry that garbage controller / mode. Engine always sends all fields today, but defends against future protocol drift / typos.
 - v1.1 rev 2: Convert HolderState integer-flag dispatch to actual LSL
   states. HOLDER_STATE_* constants and HolderState global gone — the
@@ -241,18 +256,34 @@ key validateAndExtractHolder(string msg) {
         // Avatar/coffle: responder must be an attachment owned by the
         // expected wearer (ValidationTarget = Leasher in avatar mode,
         // CoffleTargetAvatar in coffle mode — engine-side leashFollowTarget).
-        list odetails = llGetObjectDetails(candidate, [OBJECT_ATTACHED_POINT, OBJECT_OWNER]);
+        //
+        // Validation runs against the responder's LINKSET ROOT, not
+        // against the candidate prim. The candidate is whatever
+        // findLeashpointPrim/leashPrimKey returned, which is typically
+        // a child prim named "leashpoint" — and llGetObjectDetails on a
+        // child prim key returns OBJECT_ATTACHED_POINT = 0 (only the
+        // linkset root reports a real attach point). The reply always
+        // includes a "root" field; we use it here. The candidate is
+        // still returned to the engine as the particle target so the
+        // leash docks visually at the LeashPoint prim.
+        string root_str = llJsonGetValue(msg, ["root"]);
+        key validate_key = candidate;
+        if (root_str != JSON_INVALID && (key)root_str != NULL_KEY) {
+            validate_key = (key)root_str;
+        }
+        list odetails = llGetObjectDetails(validate_key, [OBJECT_ATTACHED_POINT, OBJECT_OWNER]);
         if (llGetListLength(odetails) < 2) {
             logd("VALIDATE reject: odetails len=" + (string)llGetListLength(odetails)
-                + " (candidate may be offsim)");
+                + " (validate_key may be offsim)");
             return NULL_KEY;
         }
         integer attach_pt = llList2Integer(odetails, 0);
         key     owner     = llList2Key(odetails, 1);
         logd("VALIDATE odetails attach_pt=" + (string)attach_pt
-            + " owner=" + (string)owner);
+            + " owner=" + (string)owner
+            + " validate_key=" + (string)validate_key);
         if (attach_pt == 0) {
-            logd("VALIDATE reject: attach_pt=0 (candidate not on attachment)");
+            logd("VALIDATE reject: attach_pt=0 (validate_key not on attachment)");
             return NULL_KEY;
         }
         if (owner != ValidationTarget) {
