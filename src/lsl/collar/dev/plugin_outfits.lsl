@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -13,14 +13,18 @@ PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
            Lock   — claim @detachallthis on the outfit (locks it
                     against removal by Strip, Remove, or relays)
            Unlock — release the lock
-         Requires #RLV/.outfits/.base to exist as the wearer's
-         protected non-strippable kit folder.
+         The picker also exposes a Help button that delivers the
+         "D/s Collar outfits setup" notecard describing the expected
+         #RLV/.outfits/.base layout.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Subfolder enumeration via @getinv:.outfits on
-             every menu entry — no persisted manifest. The same
-             @getinv response is also the .base presence check; if
-             .base is missing, the menu opens a one-button dialog and
-             on OK delivers the setup notecard. Lock state is
+             every menu entry — no persisted manifest. The
+             .outfits/.base subfolder is intentionally invisible to
+             every RLV enumeration command (dot-prefixed names are
+             systematically hidden by the API), so the plugin cannot
+             programmatically verify it exists; instead the picker
+             offers a Help button that delivers the setup notecard
+             on demand. Lock state is
              persistent via kmod_settings (KEY_LOCKED CSV in LSD),
              mirroring the plugin_lock / plugin_folders pattern:
              locks survive detach/reattach and script reset, and only
@@ -39,6 +43,13 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
              Lock/Unlock.
 CHANGES:
+- v1.10 rev 7: Drop the .base precheck — RLV systematically hides
+  dot-prefixed folders from every enumeration command, so the
+  @getinv:.outfits response can never report .base regardless of
+  whether the wearer has set it up. The precheck was rejecting
+  fully-configured wearers. Replaced with a Help button on the
+  picker that delivers the setup notecard on demand; picker
+  PageSize drops from 9 to 8 to reserve a slot for Help.
 - v1.10 rev 6: Rename the setup notecard from
   "D/s Collar - Outfits Setup" to "D/s Collar outfits setup".
   llGetInventoryType lookup is case-sensitive, so the in-prim
@@ -108,7 +119,6 @@ string PLUGIN_LABEL   = "Outfits";
 integer RLV_CHAN    = 1888772;
 float   RLV_TIMEOUT = 10.0;
 string  OUTFITS_ROOT  = ".outfits";   // #RLV-relative root for outfit subfolders.
-string  BASE_SUBNAME  = ".base";      // Required subfolder inside .outfits (precheck target).
 string  RLV_CONSUMER  = "outfits";    // kmod_rlv consumer id for lock claims.
 
 /* -------------------- SETTINGS KEYS -------------------- */
@@ -124,10 +134,7 @@ list    gPolicyButtons = [];
 string  SessionId      = "";
 
 // Menu-state machine values used by show_*/handle_dialog_response:
-//   "scanning"     = awaiting @getinv:.outfits response (also doubles as
-//                    the .base presence check — no extra roundtrip)
-//   "base_missing" = one-button dialog shown when .base is absent;
-//                    OK delivers the setup notecard
+//   "scanning"     = awaiting @getinv:.outfits response
 //   "pick"         = paginated outfit picker
 //   "action"       = per-outfit Wear/Replace submenu
 string  MenuContext      = "";
@@ -136,7 +143,7 @@ string  SelectedOutfit   = "";
 list    Outfits          = [];
 integer PickPage         = 0;
 integer LastMaxPage      = 0;
-integer PageSize         = 9;
+integer PageSize         = 8;  // 12 dialog slots − 3 nav − 1 Help action = 8 content items
 
 // Persistent outfit lock state. Holds outfit names (not full paths)
 // that have an active @detachallthis claim under our consumer id.
@@ -402,18 +409,21 @@ show_picker(integer page) {
         }
     }
 
-    // Layout per project convention: slots 0-2 = nav (<<, >>, Back),
-    // slots 3-11 = content, fills top-down so item 1 is always top-left.
+    // Layout: slots 0-2 = nav (<<, >>, Back), slot 3 = Help action
+    // (delivers the setup notecard), slots 4-11 = content. Content
+    // fills top-down so item 1 is always top-left of the content
+    // area (slot 9 = top-left when the page is full).
     list button_data = [
         btn("<<",   "prev"),
         btn(">>",   "next"),
-        btn("Back", "back")
+        btn("Back", "back"),
+        btn("Help", "help")
     ];
 
     integer pad_i;
     for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
 
-    integer total_buttons = 3 + count;
+    integer total_buttons = 4 + count;
     list target_slots = [];
     if (total_buttons > 9)  target_slots += [9];
     if (total_buttons > 10) target_slots += [10];
@@ -421,7 +431,6 @@ show_picker(integer page) {
     if (total_buttons > 6)  target_slots += [6];
     if (total_buttons > 7)  target_slots += [7];
     if (total_buttons > 8)  target_slots += [8];
-    if (total_buttons > 3)  target_slots += [3];
     if (total_buttons > 4)  target_slots += [4];
     if (total_buttons > 5)  target_slots += [5];
 
@@ -494,32 +503,16 @@ show_action(string outfit_name) {
     ]), NULL_KEY);
 }
 
-// Shown when #RLV/.outfits exists but its .base subfolder is missing.
-// The picker is suppressed until the wearer creates .base — Replace
-// could otherwise pull off items the wearer expects to stay attached
-// (the lock from plugin_strip is the protection mechanism, and it
-// only protects what's inside .base).
-show_base_missing() {
-    SessionId   = generate_session_id();
-    MenuContext = "base_missing";
-
-    string body = "Outfits base folder not configured.\n\n";
-    body += "#RLV/" + OUTFITS_ROOT + "/" + BASE_SUBNAME + " does not exist.\n";
-    body += "Tap OK to receive setup instructions.";
-
-    list button_data = [btn("OK", "ok")];
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
-    ]), NULL_KEY);
-}
-
+// Delivers the setup notecard to the action user. Wired to the Help
+// button on the outfit picker; the picker's body footer mentions it.
+// Previously also auto-fired from a `.base`-not-found precheck — that
+// precheck was dropped because RLV systematically hides dot-prefixed
+// folders from every enumeration command (@getinv, @getinvworn, …),
+// making it fundamentally impossible for the plugin to verify a
+// dot-prefixed protected subfolder exists. The .outfits/.base lock
+// applied by plugin_strip still works (locks act on the path
+// regardless of hidden status); we just can't validate the wearer's
+// setup, so we expose the notecard as opt-in help instead.
 give_setup_notecard() {
     if (llGetInventoryType(SETUP_NOTECARD) != INVENTORY_NOTECARD) {
         llRegionSayTo(CurrentUser, 0,
@@ -617,15 +610,6 @@ handle_dialog_response(string msg) {
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
 
-    if (MenuContext == "base_missing") {
-        // Single OK button — any response delivers the notecard and
-        // returns to the main menu. The dialog timeout falls through
-        // to handle_dialog_timeout, which closes silently.
-        give_setup_notecard();
-        return_to_root();
-        return;
-    }
-
     if (MenuContext == "pick") {
         if (ctx == "back") {
             return_to_root();
@@ -639,6 +623,14 @@ handle_dialog_response(string msg) {
         if (ctx == "next") {
             if (PickPage >= LastMaxPage) show_picker(0);
             else                         show_picker(PickPage + 1);
+            return;
+        }
+        if (ctx == "help") {
+            // Help button on the picker — delivers the setup notecard
+            // to the action user and stays in the picker so they can
+            // continue browsing.
+            give_setup_notecard();
+            show_picker(PickPage);
             return;
         }
         if (llSubStringIndex(ctx, "pick:") == 0) {
@@ -694,7 +686,6 @@ handle_rlv_response(string message) {
     logd("HANDLE MenuContext=\"" + MenuContext + "\""
         + " msg_len=" + (string)llStringLength(message)
         + " msg=\"" + message + "\""
-        + " expecting BASE_SUBNAME=\"" + BASE_SUBNAME + "\""
         + " OUTFITS_ROOT=\"" + OUTFITS_ROOT + "\"");
     stop_rlv_listen();
     if (CurrentUser == NULL_KEY) {
@@ -706,11 +697,12 @@ handle_rlv_response(string message) {
         return;
     }
 
-    // Parse the raw @getinv CSV once. Two pieces of information come out
-    // of this single roundtrip: (1) does the protected `.base` subfolder
-    // exist, and (2) the list of user-facing outfit names (with hidden
-    // dot-prefixed and tilde-prefixed entries filtered).
-    integer base_present = FALSE;
+    // Parse the raw @getinv CSV. Dot-prefixed and tilde-prefixed entries
+    // are filtered out — the protected .base folder is hidden by RLV's
+    // @getinv rule (every enumeration command suppresses dot-prefixed
+    // names per the RLV API spec), so there is no programmatic way to
+    // verify .base exists. The wearer can request setup instructions via
+    // the picker's Help button if needed.
     Outfits = [];
 
     if (message != "") {
@@ -731,14 +723,9 @@ handle_rlv_response(string message) {
         integer i = 0;
         while (i < n) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
-            integer matches_base = (entry == BASE_SUBNAME);
             logd("PARSE entry[" + (string)i + "]=\""
-                + entry + "\" len=" + (string)llStringLength(entry)
-                + " base_match=" + (string)matches_base);
+                + entry + "\" len=" + (string)llStringLength(entry));
             if (entry != "") {
-                if (matches_base) {
-                    base_present = TRUE;
-                }
                 string first = llGetSubString(entry, 0, 0);
                 if (first != "." && first != "~") {
                     Outfits = llListReplaceList(Outfits, [entry], filled, filled);
@@ -748,18 +735,12 @@ handle_rlv_response(string message) {
             i += 1;
         }
         logd("PARSE summary: total=" + (string)n
-            + " outfits_kept=" + (string)filled
-            + " base_present=" + (string)base_present);
+            + " outfits_kept=" + (string)filled);
 
         if (filled == 0)     Outfits = [];
         else if (filled < n) Outfits = llList2List(Outfits, 0, filled - 1);
 
         if (filled > 0) Outfits = llListSort(Outfits, 1, TRUE);
-    }
-
-    if (!base_present) {
-        show_base_missing();
-        return;
     }
 
     if (llGetListLength(Outfits) == 0) {
