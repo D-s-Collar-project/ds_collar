@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 5
+REVISION: 6
 PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -39,6 +39,10 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
              Lock/Unlock.
 CHANGES:
+- v1.10 rev 6: Rename the setup notecard from
+  "D/s Collar - Outfits Setup" to "D/s Collar outfits setup".
+  llGetInventoryType lookup is case-sensitive, so the in-prim
+  notecard must match exactly.
 - v1.10 rev 5: Migrate locks from session-only to persistent. Rev 4's
   premise (locks die on script reset, so session-only is fine with an
   rlv.clear cleanup) was wrong: RLV restrictions on the viewer survive
@@ -72,7 +76,7 @@ CHANGES:
 - v1.10 rev 2: Pre-flight check for #RLV/.outfits/.base. The picker
   no longer opens if .base is not configured under .outfits;
   a "base folder not configured" dialog opens instead, and OK
-  delivers the "D/s Collar - Outfits Setup" notecard. The check
+  delivers the "D/s Collar outfits setup" notecard. The check
   piggybacks on the existing @getinv:.outfits roundtrip — no
   additional RLV query needed.
 - v1.10 rev 1: handle_rlv_response pre-allocates Outfits via list
@@ -103,7 +107,7 @@ string  RLV_CONSUMER  = "outfits";    // kmod_rlv consumer id for lock claims.
 string  KEY_LOCKED = "outfits.locked";  // CSV of locked outfit names (managed by kmod_settings).
 
 /* -------------------- INVENTORY -------------------- */
-string  SETUP_NOTECARD = "D/s Collar - Outfits Setup";
+string  SETUP_NOTECARD = "D/s Collar outfits setup";
 
 /* -------------------- STATE -------------------- */
 key     CurrentUser    = NULL_KEY;
