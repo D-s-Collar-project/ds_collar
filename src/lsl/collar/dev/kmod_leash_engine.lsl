@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl
 VERSION: 1.10
-REVISION: 32
+REVISION: 33
 PURPOSE: Leashing engine — state, ACL, claim/release/pass/yank, follow
          mechanics, settings persistence, broadcasts. Holder-discovery
          handshake protocol lives in sibling kmod_leash_proto.lsl.
@@ -11,6 +11,10 @@ ARCHITECTURE: Engine + sibling proto. Engine owns leash state and the
               machine. IPC reuses SETTINGS_BUS so no new bus number is
               consumed (proto filters on type prefix "leash.proto.*").
 CHANGES:
+- v1.1 rev 33: Strip the temporary DEBUG_LEASH scaffolding (constant +
+  logd helper + every logd call site) added during the avatar-center
+  fallback diagnosis. Underlying bugs are fixed in rev 32 + proto rev
+  6/7; the diagnostic trail is no longer needed.
 - v1.1 rev 32: Tag the user's original claim mode so sendProtoStart
   emits the correct wire mode even when the (Leasher, FollowTarget)
   state alone is ambiguous. Motivating case: "A coffles B to A"
@@ -217,13 +221,6 @@ integer MODE_AVATAR = 0;  // Clip: grab leash, wearer follows the clicker
 integer MODE_COFFLE = 1;  // Coffle: wearer follows a different avatar
 integer MODE_POST = 2;    // Post: wearer follows a static object
 
-/* -------------------- TEMPORARY DEBUG -------------------- */
-// Coffle-to-self diagnostic. Flip to FALSE to silence. Remove this
-// block and all logd(...) calls once the bug is found.
-integer DEBUG_LEASH = TRUE;
-logd(string s) {
-    if (DEBUG_LEASH) llOwnerSay("[leash-dbg engine] " + s);
-}
 
 // Settings keys
 string KEY_LEASHED = "leash.leashedavatar";
@@ -519,10 +516,6 @@ sendProtoStart(key controller) {
     // attachment owned by FollowTarget; for post the responder's linkset
     // root must equal FollowTarget. The OC LM ping is addressed to the
     // same UUID and the responder echoes it back as the nonce.
-    logd("sendProtoStart mode=" + mode_str
-        + " controller=" + (string)controller
-        + " FollowTarget=" + (string)FollowTarget
-        + " Leasher=" + (string)Leasher);
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type",              "leash.proto.start",
         "controller",        (string)controller,
@@ -1324,12 +1317,8 @@ default
                 // discards pending events when proto state-changes, so a
                 // queued proto.shutdown can be lost and the handshake
                 // continues in the background until natural timeout.
-                if (!Leashed) {
-                    logd("engine: drop late proto.holder (Leashed=FALSE)");
-                    return;
-                }
+                if (!Leashed) return;
                 HolderTarget = (key)jsonGet(msg, "holder", (string)NULL_KEY);
-                logd("engine: proto.holder pinned HolderTarget=" + (string)HolderTarget);
                 if (HolderTarget != NULL_KEY) setParticlesState(TRUE, HolderTarget);
             }
             else if (msg_type == "leash.proto.fallback") {
@@ -1337,13 +1326,8 @@ default
                 // anchor (proto picked it). HolderTarget stays NULL_KEY
                 // so followTick falls back to leashFollowTarget too.
                 // Same stale-message guard as proto.holder above.
-                if (!Leashed) {
-                    logd("engine: drop late proto.fallback (Leashed=FALSE)");
-                    return;
-                }
+                if (!Leashed) return;
                 key fallback = (key)jsonGet(msg, "target", (string)NULL_KEY);
-                logd("engine: proto.fallback target=" + (string)fallback
-                    + " (HolderTarget stays NULL_KEY; particles aim at fallback)");
                 if (fallback != NULL_KEY) setParticlesState(TRUE, fallback);
             }
             return;

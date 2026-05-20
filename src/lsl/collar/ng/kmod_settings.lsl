@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 16
+REVISION: 17
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -17,6 +17,9 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               notecard reload; consumers fall back to in-script defaults
               via lsd_int(key, fallback) when the notecard omits a key.
 CHANGES:
+- v1.1 rev 17: Register outfits.locked in MANAGED_SETTINGS_KEYS for
+  plugin_outfits rev 5 (persistent per-outfit @detachallthis locks,
+  same pattern as folders.locked / lock.locked).
 - v1.1 rev 16: Fix settings.delta CSV parser silently dropping empty-value writes. llParseString2List discards trailing empty tokens, so `settings.delta:foo:` parsed to length 2 and bailed the `!= 3` guard, leaving LSD with the stale previous value. Switched to llParseStringKeepNulls. Root cause of the folder-lock reactivation: plugin_folders' unlock-last sent an empty-CSV delta, kmod_settings dropped it, folders.locked stayed populated, next settings.sync re-applied. Plugins should also prefer settings.delete for empty/no-value cases — see plugin_folders rev 31 / plugin_restrict rev 15.
 - v1.1 rev 15: Register leash.texture in MANAGED_SETTINGS_KEYS — new wearer-pick visual style for the leash particle stream (chain / silk). Still on the settings.set JSON path along with the rest of the leash.* family.
 - v1.1 rev 14: Expand MANAGED_SETTINGS_KEYS to the full plugin settings family (19 keys). Plugin migrations to the settings.delta CSV protocol: plugin_public, plugin_tpe, plugin_folders, plugin_relay, plugin_chat, plugin_bell, plugin_rlvex, plugin_restrict, plugin_access (runaway).
@@ -219,6 +222,7 @@ list MANAGED_SETTINGS_KEYS = [
     "public.mode",            // plugin_public
     "tpe.mode",               // plugin_tpe
     "folders.locked",         // plugin_folders
+    "outfits.locked",         // plugin_outfits
     "relay.mode",             // plugin_relay
     "relay.hardcoremode",     // plugin_relay
     "chat.prefix",            // plugin_chat

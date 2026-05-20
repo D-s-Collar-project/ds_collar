@@ -1,10 +1,25 @@
 /*--------------------
 MODULE: collar_kernel.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Plugin registry, lifecycle management, heartbeat monitoring
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 7: Heap-pressure fixes for the plugin-count growth path
+  (plugin_strip + plugin_outfits pushed the linkset to a stack-heap
+  collision at boot). Four hot loops rewritten:
+  * prune_dead_plugins and prune_missing_scripts now iterate the
+    registry backward and call llDeleteSubList in place. The previous
+    pattern rebuilt three parallel new_* lists via `+=` inside the
+    scan, allocating O(N²) on every heartbeat / inv-sweep even when
+    nothing was pruned. Common-case cost drops to zero allocations.
+  * queue_add stops rebuilding RegistrationQueue via `+=` to drop one
+    matching context; finds-then-deletes the stride instead.
+  * discover_plugins's KnownScriptUUIDs rebuild pre-allocates via
+    list doubling and fills with llListReplaceList (analyzer-flagged
+    O(N²) at the `+=` site).
+  Removed unused REG_CONTEXT stride constant — the refactored prune
+  paths no longer reference it.
 - v1.1 rev 6: Owner-change LSD wipe safeguard. On any detected owner
   change (runtime CHANGED_OWNER OR cold-start mismatch between the
   persisted safeguard.last_owner key and llGetOwner()), kernel calls
@@ -55,7 +70,6 @@ float   DISCOVERY_INTERVAL_SEC = 5.0;  // Active plugin discovery interval
 
 /* Registry stride: [context, label, script, script_uuid, last_seen_unix] */
 integer REG_STRIDE = 5;
-integer REG_CONTEXT = 0;
 integer REG_LABEL = 1;
 integer REG_SCRIPT = 2;
 integer REG_SCRIPT_UUID = 3;
@@ -112,22 +126,31 @@ integer count_scripts() {
 // - Guarantees queue contains at most one operation per context
 // - Alternative (defer to batch) would process duplicates and cause multiple broadcasts
 integer queue_add(string op_type, string context, string label, string script) {
-    // Remove any existing queue entry for this context (newest operation wins)
-    list new_queue = [];
+    // Locate any existing queue entry for this context (newest wins) and
+    // delete its stride in place, then append. The old implementation
+    // rebuilt new_queue via `+=` inside the scan loop — O(N²) heap churn
+    // on every registration and a contributor to the kernel's stack-heap
+    // pressure under 20+ plugin loads. In-place delete is O(N) read,
+    // one allocation when an entry is replaced, zero allocations on the
+    // common "new context" path.
+    integer found_at = -1;
     integer i = 0;
     integer queue_len = llGetListLength(RegistrationQueue);
     while (i < queue_len) {
-        string queued_context = llList2String(RegistrationQueue, i + QUEUE_CONTEXT);
-        if (queued_context != context) {
-            new_queue += llList2List(RegistrationQueue, i, i + QUEUE_STRIDE - 1);
+        if (llList2String(RegistrationQueue, i + QUEUE_CONTEXT) == context) {
+            found_at = i;
+            i = queue_len;
         }
-        i += QUEUE_STRIDE;
+        else {
+            i += QUEUE_STRIDE;
+        }
+    }
+    if (found_at != -1) {
+        RegistrationQueue = llDeleteSubList(RegistrationQueue,
+            found_at, found_at + QUEUE_STRIDE - 1);
     }
 
-    // Add new operation to queue
-    integer timestamp = now();
-    new_queue += [op_type, context, label, script, timestamp];
-    RegistrationQueue = new_queue;
+    RegistrationQueue += [op_type, context, label, script, now()];
 
 
     // Schedule batch processing if not already scheduled
@@ -267,7 +290,13 @@ integer update_last_seen(string context) {
     return 1;
 }
 
-// Remove dead plugins (haven't responded to ping in PING_TIMEOUT_SEC)
+// Remove dead plugins (haven't responded to ping in PING_TIMEOUT_SEC).
+//
+// Iterates backward and deletes in place. The previous implementation
+// built three parallel new_* lists via `+=` inside the scan loop —
+// O(N²) heap churn on every heartbeat, even when nothing was pruned.
+// Now: zero allocations on the common "no dead plugins" path; only
+// the actually-pruned entries cost an llDeleteSubList each.
 integer prune_dead_plugins() {
     integer now_unix = llGetUnixTime();
 
@@ -277,34 +306,21 @@ integer prune_dead_plugins() {
     LastRegionCrossUnix = 0;
 
     integer cutoff = now_unix - PING_TIMEOUT_SEC;
-    
     integer pruned = 0;
-    
-    list new_registry = [];
-    list new_contexts = [];
-    list new_scripts = [];
-    integer i = 0;
-    integer reg_len = llGetListLength(PluginRegistry);
-    while (i < reg_len) {
+
+    integer i = llGetListLength(PluginRegistry) - REG_STRIDE;
+    while (i >= 0) {
         integer last_seen = llList2Integer(PluginRegistry, i + REG_LAST_SEEN);
-        
-        if (last_seen >= cutoff) {
-            // Keep this plugin
-            new_registry += llList2List(PluginRegistry, i, i + REG_STRIDE - 1);
-            new_contexts += [llList2String(PluginRegistry, i + REG_CONTEXT)];
-            new_scripts += [llList2String(PluginRegistry, i + REG_SCRIPT)];
-        }
-        else {
-            // Prune dead plugin
+        if (last_seen < cutoff) {
+            integer list_idx = i / REG_STRIDE;
+            PluginRegistry = llDeleteSubList(PluginRegistry, i, i + REG_STRIDE - 1);
+            PluginContexts = llDeleteSubList(PluginContexts, list_idx, list_idx);
+            PluginScripts  = llDeleteSubList(PluginScripts,  list_idx, list_idx);
             pruned += 1;
         }
-        
-        i += REG_STRIDE;
+        i -= REG_STRIDE;
     }
-    
-    PluginRegistry = new_registry;
-    PluginContexts = new_contexts;
-    PluginScripts = new_scripts;
+
     return pruned;
 }
 
@@ -313,32 +329,23 @@ integer prune_dead_plugins() {
 // entries whose owning script is gone — the plugin can't run its own
 // cleanup in that case, so the kernel prunes on its behalf.
 integer prune_missing_scripts() {
-    list new_registry = [];
-    list new_contexts = [];
-    list new_scripts = [];
     integer pruned = 0;
-    integer i = 0;
-    integer reg_len2 = llGetListLength(PluginRegistry);
-    while (i < reg_len2) {
-        string script = llList2String(PluginRegistry, i + REG_SCRIPT);
 
-        if (llGetInventoryType(script) == INVENTORY_SCRIPT) {
-            // Script still exists, keep plugin
-            new_registry += llList2List(PluginRegistry, i, i + REG_STRIDE - 1);
-            new_contexts += [llList2String(PluginRegistry, i + REG_CONTEXT)];
-            new_scripts += [script];
-        }
-        else {
-            // Script missing, prune plugin
+    // Backward in-place delete (same rationale as prune_dead_plugins):
+    // zero allocations when every script is still in inventory, which is
+    // the common case in steady-state.
+    integer i = llGetListLength(PluginRegistry) - REG_STRIDE;
+    while (i >= 0) {
+        string script = llList2String(PluginRegistry, i + REG_SCRIPT);
+        if (llGetInventoryType(script) != INVENTORY_SCRIPT) {
+            integer list_idx = i / REG_STRIDE;
+            PluginRegistry = llDeleteSubList(PluginRegistry, i, i + REG_STRIDE - 1);
+            PluginContexts = llDeleteSubList(PluginContexts, list_idx, list_idx);
+            PluginScripts  = llDeleteSubList(PluginScripts,  list_idx, list_idx);
             pruned += 1;
         }
-
-        i += REG_STRIDE;
+        i -= REG_STRIDE;
     }
-
-    PluginRegistry = new_registry;
-    PluginContexts = new_contexts;
-    PluginScripts = new_scripts;
 
     // LSD sweep: any plugin.reg.<ctx> whose embedded script is no longer in
     // inventory gets deleted, along with its ACL policy sibling. kmod_ui's
@@ -388,14 +395,27 @@ integer discover_plugins() {
     }
 
     if (discoveries > 0) {
-        // Rebuild known UUIDs from current inventory
+        // Rebuild known UUIDs from current inventory. Pre-allocate via
+        // list doubling and fill with llListReplaceList — the previous
+        // `+=` per iteration was O(N²) heap churn (analyzer-flagged) and
+        // a contributor to startup memory pressure.
         KnownScriptUUIDs = [];
+        if (inv_count > 0) {
+            list buf = [""];
+            while (llGetListLength(buf) < inv_count) buf = buf + buf;
+            KnownScriptUUIDs = llList2List(buf, 0, inv_count - 1);
+        }
+        integer filled = 0;
         for (i = 0; i < inv_count; i = i + 1) {
             string sn = llGetInventoryName(INVENTORY_SCRIPT, i);
             if (sn != llGetScriptName()) {
-                KnownScriptUUIDs += [llGetInventoryKey(sn)];
+                KnownScriptUUIDs = llListReplaceList(KnownScriptUUIDs,
+                    [llGetInventoryKey(sn)], filled, filled);
+                filled += 1;
             }
         }
+        if (filled == 0)             KnownScriptUUIDs = [];
+        else if (filled < inv_count) KnownScriptUUIDs = llList2List(KnownScriptUUIDs, 0, filled - 1);
         broadcast_register_now();
     }
 

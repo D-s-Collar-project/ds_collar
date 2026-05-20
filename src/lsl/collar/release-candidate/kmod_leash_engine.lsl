@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl
 VERSION: 1.10
-REVISION: 31
+REVISION: 33
 PURPOSE: Leashing engine — state, ACL, claim/release/pass/yank, follow
          mechanics, settings persistence, broadcasts. Holder-discovery
          handshake protocol lives in sibling kmod_leash_proto.lsl.
@@ -11,6 +11,32 @@ ARCHITECTURE: Engine + sibling proto. Engine owns leash state and the
               machine. IPC reuses SETTINGS_BUS so no new bus number is
               consumed (proto filters on type prefix "leash.proto.*").
 CHANGES:
+- v1.1 rev 33: Strip the temporary DEBUG_LEASH scaffolding (constant +
+  logd helper + every logd call site) added during the avatar-center
+  fallback diagnosis. Underlying bugs are fixed in rev 32 + proto rev
+  6/7; the diagnostic trail is no longer needed.
+- v1.1 rev 32: Tag the user's original claim mode so sendProtoStart
+  emits the correct wire mode even when the (Leasher, FollowTarget)
+  state alone is ambiguous. Motivating case: "A coffles B to A"
+  (A is ordered to chain B to themselves, A is both action user and
+  picked target) collapses to Leasher == FollowTarget == A, which the
+  rev 31 state-derived classifier mapped to mode=grab — the proto's
+  coffle-only responder then stayed silent, the handshake expired,
+  and particles fell back to A's avatar center. Now setLeashState
+  takes a claim_mode arg (MODE_AVATAR/MODE_COFFLE/MODE_POST) and
+  stores it in LeashClaimMode; sendProtoStart derives mode_str from
+  that tag directly. Three callers updated: claimLeash passes its
+  `mode` arg; passLeashInternal and handleLmGrabbed both pass
+  MODE_AVATAR (pass reverts to grab; LM is avatar-only). The
+  responder mutex in kmod_leash_proto (coffle-only) is safe to keep
+  strict — kmod_leash_proto reverted to rev 6 accordingly.
+  Tag is in-memory only: applySettingsSync already documents that
+  coffle/post sessions don't restore the original FollowTarget across
+  cold restart (it falls back to FollowTarget=Leasher, i.e. avatar
+  semantics), so the session the tag would protect is already
+  collapsing into grab. LeashClaimMode's global initialiser (0 =
+  MODE_AVATAR) matches that fallback. Persistence considered and
+  dropped — no kmod_settings touch needed.
 - v1.1 rev 31: Fix post-mode leash re-pinning to wearer's leashpoint after ~10s. applySettingsSync's cold-restart default (FollowTarget=Leasher, FollowIsAvatar=TRUE) was firing on every settings.sync broadcast, not just at boot. After claimLeash persisted leashed/leasher, the resulting settings.sync round-tripped through this handler and clobbered an active post/coffle session back into grab mode. The next 10s retry timer then sent a mode=grab handshake with ValidationTarget=Leasher, and any attached responder owned by Leasher (e.g. another worn collar's leashpoint) validated successfully — particles re-aimed to it. Guard the defaulting with FollowTarget == NULL_KEY so it only fires when there's no in-memory mode (true cold restart).
 - v1.1 rev 30: Drop stale leash.proto.holder / leash.proto.fallback messages from kmod_leash_proto when !Leashed. Proto can emit a late holder/fallback notification after an Unclip because LSL discards pending events on state change — a queued proto.shutdown gets dropped if proto state-changes first, so the handshake keeps running in the background until natural timeout (~4s). Without this guard, a real responder reply during that window would re-pin HolderTarget on a released leash, lighting particles to a phantom holder. One-line `if (!Leashed) return;` at the top of each handler.
 - v1.1 rev 29: Architectural split — handshake protocol moved to kmod_leash_proto.lsl. Engine retains leash state, ACL, claim/release/pass/yank, follow mechanics, controls, settings persistence, broadcasts, Lockmeister grab inflow. Removed from engine: HOLDER_STATE_* constants, HolderState/HolderPhaseStart/HolderListen/HolderListenOC/HolderSession globals, NATIVE_PHASE_DURATION/OC_PHASE_DURATION, LEASH_CHAN_LM/LEASH_CHAN_NATIVE constants, leashingModeQuery / findLeashpointPrim / leashProtoNativeRequest / leashProtoNativeResponse / leashProtoOCTargetHelper / leashProtoOCCompat / leashProtoHandover / leashProtoListenerTerminate / completeHandshake helpers, listen() event, native listener in state_entry, leashProtoHandover() tick. Engine keeps HolderTarget (the truth — proto reports, engine pins). IPC contract on SETTINGS_BUS: engine→proto sends leash.proto.start (controller, mode_str, validation_target, oc_ping_target) and leash.proto.shutdown; proto→engine sends leash.proto.holder (handshake found a holder) and leash.proto.fallback (handshake timed out, particle fallback target). Re-handshake retry in timer now sends leash.proto.start unconditionally (proto handles its own state idempotently). claimLeash and passLeashInternal call sendProtoStart instead of leashingModeQuery. clearLeashState calls sendProtoShutdown instead of leashProtoListenerTerminate. Renamed file: kmod_leash.lsl → kmod_leash_engine.lsl.
@@ -195,6 +221,7 @@ integer MODE_AVATAR = 0;  // Clip: grab leash, wearer follows the clicker
 integer MODE_COFFLE = 1;  // Coffle: wearer follows a different avatar
 integer MODE_POST = 2;    // Post: wearer follows a static object
 
+
 // Settings keys
 string KEY_LEASHED = "leash.leashedavatar";
 string KEY_LEASHER = "leash.leasherkey";
@@ -212,6 +239,14 @@ integer TurnToFace = FALSE;
 string LeashTexture = "chain";    // Particle style — "chain" (default) or "silk"
 key FollowTarget = NULL_KEY;       // Who/what the wearer follows physically
 integer FollowIsAvatar = TRUE;     // TRUE → avatar (RLV @follow + attachment validation); FALSE → object (root validation)
+
+// Original claim mode (MODE_AVATAR / MODE_COFFLE / MODE_POST). Set in
+// setLeashState from the action the user actually clicked, persisted
+// under KEY_CLAIM_MODE, and read by sendProtoStart to derive mode_str
+// for the wire. Decouples wire mode from the (Leasher, FollowTarget)
+// equality test, so "A coffles B to A" stays mode=coffle even though
+// Leasher == FollowTarget.
+integer LeashClaimMode = 0;        // 0 = MODE_AVATAR (the default for cold restart)
 
 // Follow mechanics
 integer FollowActive = FALSE;
@@ -367,15 +402,19 @@ applySettingsSync() {
     tmp = llLinksetDataRead(KEY_LEASH_TEXTURE);
     if (tmp == "chain" || tmp == "silk") LeashTexture = tmp;
 
-    // FollowTarget / FollowIsAvatar aren't persisted (mode survives only
-    // in-memory; coffle/post sessions don't restore across script reset
-    // — matches pre-unification behavior). If we wake up Leashed with no
-    // in-memory follow target, default to avatar mode with Leasher as the
-    // follow target; the 10s retry timer will re-handshake to discover
-    // the real leashpoint. The FollowTarget == NULL_KEY guard is what
-    // makes this cold-restart-only — mid-session settings.sync (triggered
-    // by our own persistLeashState during claimLeash) must NOT clobber an
-    // active post/coffle session back into grab mode.
+    // FollowTarget / FollowIsAvatar / LeashClaimMode aren't persisted
+    // — mode survives only in-memory; coffle/post sessions don't
+    // restore the original FollowTarget across script reset (matches
+    // pre-unification behavior). If we wake up Leashed with no
+    // in-memory follow target, default to avatar mode with Leasher as
+    // the follow target (LeashClaimMode already defaults to MODE_AVATAR
+    // = 0 via its global initialiser, so sendProtoStart consistently
+    // emits mode=grab in this cold-restart fallback). The 10s retry
+    // timer then re-handshakes to discover the real leashpoint. The
+    // FollowTarget == NULL_KEY guard makes this cold-restart-only —
+    // mid-session settings.sync (triggered by our own persistLeashState
+    // during claimLeash) must NOT clobber an active post/coffle
+    // session back into grab mode.
     if (Leashed && Leasher != NULL_KEY && FollowTarget == NULL_KEY) {
         FollowTarget = Leasher;
         FollowIsAvatar = TRUE;
@@ -394,13 +433,23 @@ integer clampLeashLength(integer len) {
 // Helper to set common leash state. `follow_target` is who/what the
 // wearer will follow physically; `follow_is_avatar` distinguishes
 // avatar-mode (RLV @follow + attachment-owner validation) from
-// object-mode (no @follow + linkset-root validation).
-setLeashState(key user, key follow_target, integer follow_is_avatar) {
+// object-mode (no @follow + linkset-root validation). `claim_mode` is
+// the user's original action (MODE_AVATAR/MODE_COFFLE/MODE_POST) so
+// sendProtoStart can emit the right wire mode even when the
+// (Leasher, FollowTarget) state alone is ambiguous (the "A coffles
+// B to A" path collapses Leasher == FollowTarget for grab AND
+// self-targeted coffle). In-memory only — coffle/post sessions
+// already don't restore the original FollowTarget across cold
+// restart (per applySettingsSync's documented fallback), so
+// persisting the tag would only protect a session that's already
+// collapsing into avatar/grab semantics anyway.
+setLeashState(key user, key follow_target, integer follow_is_avatar, integer claim_mode) {
     Leashed = TRUE;
     Leasher = user;
     LastLeasher = user;
     FollowTarget = follow_target;
     FollowIsAvatar = follow_is_avatar;
+    LeashClaimMode = claim_mode;
     persistLeashState(TRUE, user);
     broadcastState();
 }
@@ -411,6 +460,7 @@ clearLeashState(integer clear_reclip) {
     Leasher = NULL_KEY;
     FollowTarget = NULL_KEY;
     FollowIsAvatar = TRUE;
+    LeashClaimMode = 0;
     persistLeashState(FALSE, NULL_KEY);
     HolderTarget = NULL_KEY;
     AuthorizedLmController = NULL_KEY;
@@ -448,12 +498,18 @@ notifyLeashTransfer(key from_user, key to_user, string action) {
 //   leash.proto.holder   — handshake found a holder, pin it
 //   leash.proto.fallback — handshake timed out, particle-aim target
 sendProtoStart(key controller) {
-    // mode_str derived from current state for wire-protocol compatibility
-    // (other DS / OC collars still receive "grab" / "coffle" / "post").
+    // mode_str follows the persisted LeashClaimMode tag — the user's
+    // original action intent. Deriving from (Leasher, FollowTarget)
+    // alone loses information: both regular grab and self-targeted
+    // coffle collapse to Leasher == FollowTarget, but they need
+    // different responders (hand-held leash_holder for grab; the peer
+    // collar's LeashPoint via kmod_leash_proto for coffle). The wire
+    // strings stay legacy-compatible ("grab" / "coffle" / "post"), so
+    // other DS / OC collars are unaffected.
     string mode_str;
-    if (!FollowIsAvatar)            mode_str = "post";
-    else if (FollowTarget == Leasher) mode_str = "grab";
-    else                              mode_str = "coffle";
+    if      (LeashClaimMode == MODE_POST)   mode_str = "post";
+    else if (LeashClaimMode == MODE_COFFLE) mode_str = "coffle";
+    else                                    mode_str = "grab";
 
     // Unified model: both validation_target and oc_ping_target are
     // FollowTarget. For avatar-modes the responder is expected to be an
@@ -967,8 +1023,10 @@ claimLeash(key user, integer mode, key target_key, integer acl_level) {
         notice = "Posted to " + llList2String(details, 1);
     }
 
-    // Common claim sequence.
-    setLeashState(user, follow_target, follow_is_avatar);
+    // Common claim sequence. Tag claim mode so sendProtoStart can emit
+    // the right wire mode (the user's action intent is otherwise lost
+    // once state collapses to (Leasher, FollowTarget, FollowIsAvatar)).
+    setLeashState(user, follow_target, follow_is_avatar, mode);
     sendProtoStart(user);
     // LM authorization only when wearer follows the controller (regular
     // leash). Coffle and post don't enable LM.
@@ -1006,7 +1064,7 @@ passLeashInternal(key new_leasher) {
 
     // Reset to avatar mode (if was in coffle/post, revert to standard
     // leashing). Pass = full transfer of both controller and follow target.
-    setLeashState(new_leasher, new_leasher, TRUE);
+    setLeashState(new_leasher, new_leasher, TRUE, MODE_AVATAR);
 
     // Start holder handshake for new leasher
     sendProtoStart(new_leasher);
@@ -1059,7 +1117,7 @@ yankToLeasher() {
 // before this is called.
 handleLmGrabbed(key controller) {
     if (Leashed) return;
-    setLeashState(controller, controller, TRUE);
+    setLeashState(controller, controller, TRUE, MODE_AVATAR);
     startFollow();
     llRegionSayTo(llGetOwner(), 0, "Leashed by " + llKey2Name(controller) + " (Lockmeister)");
 }

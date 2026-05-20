@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_proto.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 7
 PURPOSE: Holder-discovery handshake protocol for the leashing engine
 ARCHITECTURE: True LSL state machine.
                 default          — idle / coffle responder
@@ -14,6 +14,53 @@ ARCHITECTURE: True LSL state machine.
               (mode_str + validation_target + oc_ping_target). IPC reuses
               SETTINGS_BUS so no new bus number is consumed.
 CHANGES:
+- v1.1 rev 7: Strip the temporary DEBUG_LEASH scaffolding (constant +
+  logd helper + every logd call site) added during the avatar-center
+  fallback diagnosis. The two underlying bugs are fixed (rev 4
+  validator now uses linkset root, rev 6 + engine rev 32 carry the
+  claim-mode tag), so the diagnostic trail is no longer needed.
+- v1.1 rev 6: Revert the rev 5 responder widening. The "A coffles B
+  to A" path that motivated it is now handled at the source — the
+  engine (kmod_leash_engine rev 32+) tags the user's original
+  claim mode in persistent state (LeashClaimMode) and sendProtoStart
+  emits that tag verbatim instead of deriving from
+  Leasher == FollowTarget. So a coffle action stays mode=coffle on
+  the wire even when the user picked themselves as the anchor, and
+  THIS responder gets to answer (no race against a hand-held
+  leash_holder). Strict mode separation restored:
+    coffle  → collar LeashPoint (this responder)
+    grab    → hand-held leash_holder.lsl
+    post    → static-object linkset root
+- v1.1 rev 5: Coffle responder now also answers grab requests (still
+  skips post). Diagnosed second-order to rev 4 via the same DEBUG_LEASH
+  trail: in the "A coffles B to A" RP path (A is ordered to chain B to
+  themselves), claimLeash sets Leasher == FollowTarget == A.
+  sendProtoStart's state-derived mode classifier sees that equality
+  and emits mode=grab on the wire, even though A's collar LeashPoint
+  is the appropriate anchor. The earlier coffle-only filter then kept
+  A's collar silent; the handshake expired and particles fell back to
+  OCPingTarget = A's avatar center. Negative-listing post (which
+  resolves to a static linkset root) keeps the responder honest while
+  unblocking this case. The other shape that fires mode=grab — A
+  grabs B's leash with a hand-held leash_holder worn — still works
+  because both responders answer; the validator pins whichever
+  arrives first.
+  (Superseded by rev 6's engine-side tag.)
+- v1.1 rev 4: Fix validateAndExtractHolder rejecting valid avatar/coffle
+  replies whose `holder` field is a CHILD prim of the responder's
+  attachment. llGetObjectDetails(<child_prim_key>, [OBJECT_ATTACHED_POINT,
+  ...]) returns 0 — only the linkset root reports the real attach point.
+  Symptom: grabs/coffles where the leasher's LeashPoint lived as a
+  child prim (named "leashpoint" or desc "leash:point") timed out the
+  4-second handshake and fell back to OCPingTarget = leasher avatar,
+  so particles aimed at avatar center instead of the LeashPoint.
+  Validation now runs against the `root` field already included in
+  every reply (legacy fallback to `candidate` when the field is
+  absent). The candidate is still returned to the engine as the
+  particle target so the leash docks visually at the LeashPoint prim.
+  Diagnosed via in-world DEBUG_LEASH logs: `attach_pt=0 owner=<leasher
+  uuid>` on the candidate, confirming the linkset (root) WAS attached
+  and owned correctly but the child prim's OBJECT_ATTACHED_POINT was 0.
 - v1.1 rev 3: Defensive validProtoStart(msg) gate before captureProtoStart in all three paths that consume leash.proto.start (default's link_message, proto_native's link_message restart, proto_oc_lm's link_message restart). Without it, a malformed leash.proto.start (missing field) would silently corrupt the handshake — llJsonGetValue returns the literal string "JSON_INVALID" for missing fields, (key)"JSON_INVALID" yields garbage, proto_native's request would carry that garbage controller / mode. Engine always sends all fields today, but defends against future protocol drift / typos.
 - v1.1 rev 2: Convert HolderState integer-flag dispatch to actual LSL
   states. HOLDER_STATE_* constants and HolderState global gone — the
@@ -146,6 +193,12 @@ leashProtoNativeRequest(string msg) {
 
     // Only answer coffle requests. Grab/post belong to the leasher's
     // hand-held holder; if we replied there we'd race against it.
+    //
+    // The "A coffles B to A" RP path is supported because the engine
+    // tags the original claim mode (kmod_leash_engine rev 32+'s
+    // LeashClaimMode) and sendProtoStart emits mode=coffle for that
+    // case, so this responder fires correctly even when
+    // Leasher == FollowTarget on the engine side.
     string requester_mode = llJsonGetValue(msg, ["mode"]);
     if (requester_mode != JSON_INVALID && requester_mode != "coffle") return;
 
@@ -185,7 +238,22 @@ key validateAndExtractHolder(string msg) {
         // Avatar/coffle: responder must be an attachment owned by the
         // expected wearer (ValidationTarget = Leasher in avatar mode,
         // CoffleTargetAvatar in coffle mode — engine-side leashFollowTarget).
-        list odetails = llGetObjectDetails(candidate, [OBJECT_ATTACHED_POINT, OBJECT_OWNER]);
+        //
+        // Validation runs against the responder's LINKSET ROOT, not
+        // against the candidate prim. The candidate is whatever
+        // findLeashpointPrim/leashPrimKey returned, which is typically
+        // a child prim named "leashpoint" — and llGetObjectDetails on a
+        // child prim key returns OBJECT_ATTACHED_POINT = 0 (only the
+        // linkset root reports a real attach point). The reply always
+        // includes a "root" field; we use it here. The candidate is
+        // still returned to the engine as the particle target so the
+        // leash docks visually at the LeashPoint prim.
+        string root_str = llJsonGetValue(msg, ["root"]);
+        key validate_key = candidate;
+        if (root_str != JSON_INVALID && (key)root_str != NULL_KEY) {
+            validate_key = (key)root_str;
+        }
+        list odetails = llGetObjectDetails(validate_key, [OBJECT_ATTACHED_POINT, OBJECT_OWNER]);
         if (llGetListLength(odetails) < 2) return NULL_KEY;
         if (llList2Integer(odetails, 0) == 0) return NULL_KEY;
         if (llList2Key(odetails, 1) != ValidationTarget) return NULL_KEY;

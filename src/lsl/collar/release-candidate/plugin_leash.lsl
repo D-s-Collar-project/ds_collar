@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 22
+REVISION: 23
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
          multi-step flows (Pass/Offer/Coffle, Post) to hidden sub-plugins.
@@ -13,6 +13,11 @@ ARCHITECTURE: Renderer for the leash module. Picker flows now live in
               subpath; the sub-plugin returns to us via ui.menu.start
               with our context.
 CHANGES:
+- v1.1 rev 23: Expose Coffle to ACL 1 (public). Previous policy listed
+  Coffle for ACL 3/4/5 only; public touchers can now coffle the wearer
+  to a third-party avatar via the standard avatar picker. Engine-side
+  POL_COFFLE gate at kmod_leash_engine.lsl:594 already reads from this
+  LSD policy, so no engine change is required.
 - v1.1 rev 22: All four menus (main / settings / texture / length) now use the project's bottom-nav + top-to-bottom-L-R content convention (canonical: plugin_animate, plugin_leash_object). Length menu was rendering reversed (10/15/20 on top, 1/3/5 below); now reads 1/3/5/10/15/20 top-to-bottom. New nav-count-agnostic reorder_item_buttons helper handles both Back-only menus and the 3-button (<< >> Back) length menu without filler padding — items consume all qualifying slots, no " " survives in the final array.
 - v1.1 rev 21: Add "leash yank" chat subcommand. Was missing from handle_subpath since rev 8 (chat support introduced clip/unclip/turn/length/pass but not yank). Engine-side guards (leasher-only, 5s cooldown) apply unchanged — the chat path just dispatches plugin.leash.action action=yank with id=user, same shape as the menu Yank button.
 - v1.1 rev 20: Destroy dialog after one-shot action dispatch (Yank, Get Holder) instead of re-showing main menu — matches the project's "process finished → dialog gone" convention. Clip/Unclip already followed this; Yank and Get Holder were the outliers.
@@ -231,7 +236,7 @@ register_self() {
     // limits the button to cases where CurrentUser == Leasher — so only
     // a public user who holds the leash themselves can release it.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
-        "1", "Clip,Unclip,Post,Get Holder,Settings",
+        "1", "Clip,Unclip,Coffle,Post,Get Holder,Settings",
         "2", "Offer",
         "3", "Clip,Unclip,Pass,Yank,Take,Coffle,Post,Get Holder,Settings",
         "4", "Clip,Unclip,Pass,Yank,Coffle,Post,Get Holder,Settings",
