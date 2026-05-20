@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -12,19 +12,28 @@ PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          the .base subfolder is the protected "non-strippable" set).
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Enumerates worn items live via @getoutfit +
-             llGetAttachedList; reads lock state via @getstatusall;
-             remoutfit / ;remattach; then walks the attachment list
-             via per-slot @getpath to drop rows whose inventory path is
-             under .outfits/.base. Strip operations route through
-             kmod_rlv (rlv.force passthrough). Locked items are
-             filtered from the picker entirely — taps only ever target
-             strippable items. On register the plugin claims a
-             permanent @detachallthis:.outfits/.base lock through
-             kmod_rlv as defense in depth (manual detach, folder-wide
-             @detachall, relay-issued detaches); the path-verify pass
-             handles per-slot @remattach which RLVa does not reliably
-             gate on folder locks across versions.
+             llGetAttachedList; reads lock state via @getstatusall on
+             three keyspaces (remoutfit, remattach, detach); then
+             walks the attachment list via per-slot @getpath to drop
+             rows whose inventory path falls under any locked folder.
+             Strip operations route through kmod_rlv (rlv.force
+             passthrough). Locked items are filtered from the picker
+             entirely — taps only ever target strippable items. On
+             register the plugin claims a permanent @detachallthis:
+             .outfits/.base lock through kmod_rlv as defense in depth
+             (manual detach, folder-wide @detachall, relay-issued
+             detaches); the detach-keyspace query plus path-verify
+             pass handle per-slot @remattach which RLVa does not
+             reliably gate on folder locks across versions.
 CHANGES:
+- v1.10 rev 10: Add @getstatusall:detach query as QState=4 (path-check
+  bumped to QState=5). Catches three more lock sources that previously
+  slipped through to the picker: bare @detach=n (hides all
+  attachments), per-point @detach:<pt>=n (hides that slot), and
+  @detachallthis:<path> folder locks beyond .outfits/.base (hides
+  slots whose inventory path falls under any reported folder). One
+  more RLV roundtrip on menu open; reuses the existing path-verify
+  pass for folder-scoped filtering.
 - v1.10 rev 9: Pre-filter the attachment picker by inventory path. The
   @detachallthis:.outfits/.base claim was not blocking @remattach:<pt>
   =force across RLVa versions, so .base items were being stripped
@@ -155,10 +164,14 @@ string  SessionId      = "";
 //   1 = waiting for @getoutfit response
 //   2 = waiting for @getstatusall:remoutfit response
 //   3 = waiting for @getstatusall:remattach response
-//   4 = walking WornAttach with @getpath:<slot> queries; the slot at
+//   4 = waiting for @getstatusall:detach response — captures per-point
+//       @detach:<pt>=n locks, bare @detach=n, and any @detachallthis:
+//       <path> folder locks that govern detachment but aren't covered
+//       by the remoutfit/remattach filters above.
+//   5 = walking WornAttach with @getpath:<slot> queries; the slot at
 //       PathCheckIdx is the one currently being verified. Each response
-//       either drops the row from WornAttach (path inside .outfits/.base)
-//       or advances the index.
+//       either drops the row from WornAttach (path inside .outfits/.base
+//       or any folder reported in LockedFolders) or advances the index.
 //   0 = idle (results assembled, category menu rendered)
 //
 // Note: @getattach (the bit-string attach query) is GONE — replaced by
@@ -166,19 +179,21 @@ string  SessionId      = "";
 // also yields real attached-object item names (not just slot names).
 integer QState = 0;
 
-// QState=4 cursor into WornAttach. The path-verification pass is needed
+// QState=5 cursor into WornAttach. The path-verification pass is needed
 // because RLV's @detachallthis folder lock is not reliably enforced
 // against per-slot @remattach:<point>=force across RLVa versions — we
 // pre-query @getpath:<slot> for each attached item and drop rows whose
-// inventory path is under .outfits/.base, so the picker never offers
+// inventory path is under any locked folder, so the picker never offers
 // them as strip targets.
 integer PathCheckIdx = 0;
 
 string  RawOutfit          = "";
 integer GlobalOutfitLocked = FALSE;
 integer GlobalAttachLocked = FALSE;
+integer GlobalDetachLocked = FALSE;  // bare @detach=n — hides all attachments
 list    LockedLayers       = [];
-list    LockedAttach       = [];
+list    LockedAttach       = [];     // per-point @remattach:<pt>=n AND @detach:<pt>=n
+list    LockedFolders      = [];     // @detachallthis:<path> entries from @getstatusall:detach
 
 // Per-category worn-item tables built after the RLV queries complete.
 //   WornLayers : stride 1, [layer_name]                — from @getoutfit.
@@ -327,8 +342,10 @@ cleanup_session() {
     RawOutfit           = "";
     GlobalOutfitLocked  = FALSE;
     GlobalAttachLocked  = FALSE;
+    GlobalDetachLocked  = FALSE;
     LockedLayers        = [];
     LockedAttach        = [];
+    LockedFolders       = [];
     WornLayers          = [];
     WornAttach          = [];
     CurrentCategory     = "";
@@ -363,16 +380,18 @@ start_listen_if_needed() {
     }
 }
 
-// Kick off the three-step RLV query chain at QState=1. Attachments are
-// enumerated synchronously via llGetAttachedList after QState 3 lands,
+// Kick off the four-step RLV query chain at QState=1. Attachments are
+// enumerated synchronously via llGetAttachedList after QState 4 lands,
 // so they don't burn an RLV roundtrip. Called at session start and
 // after every successful strip (to refresh the data).
 begin_query() {
     RawOutfit          = "";
     GlobalOutfitLocked = FALSE;
     GlobalAttachLocked = FALSE;
+    GlobalDetachLocked = FALSE;
     LockedLayers       = [];
     LockedAttach       = [];
+    LockedFolders      = [];
     WornLayers         = [];
     WornAttach         = [];
 
@@ -390,16 +409,66 @@ advance_query() {
     }
     if (QState == 3) {
         rlv_force("@getstatusall:remattach=" + (string)RLV_CHAN);
+        return;
+    }
+    if (QState == 4) {
+        rlv_force("@getstatusall:detach=" + (string)RLV_CHAN);
     }
 }
 
-// True if the inventory path is the .outfits/.base folder itself or a
-// sub-folder of it. @getpath returns paths relative to #RLV with no
-// leading slash, so this matches against BASE_FOLDER (".outfits/.base").
-integer path_in_base(string path) {
+// True if the inventory path is locked: matches .outfits/.base
+// (defense-in-depth against the kmod_rlv claim race) or any folder
+// reported by @getstatusall:detach as @detachallthis:<folder>.
+// @getpath returns paths relative to #RLV with no leading slash.
+integer path_locked(string path) {
+    if (path == "")          return FALSE;
     if (path == BASE_FOLDER) return TRUE;
     if (llSubStringIndex(path, BASE_FOLDER + "/") == 0) return TRUE;
+
+    integer i = 0;
+    integer n = llGetListLength(LockedFolders);
+    while (i < n) {
+        string locked = llList2String(LockedFolders, i);
+        if (path == locked) return TRUE;
+        if (llSubStringIndex(path, locked + "/") == 0) return TRUE;
+        i += 1;
+    }
     return FALSE;
+}
+
+// Parse a @getstatusall:detach response. Extracts:
+//   bare "/detach"                  → GlobalDetachLocked = TRUE
+//   "/detach:<point>"               → appended to LockedAttach (slot
+//                                     gets filtered from the picker)
+//   "/detachallthis:<path>"         → appended to LockedFolders (path
+//                                     check in QState=5 hides slots whose
+//                                     inventory path falls under it)
+// Ignores "/detachthis" (no-path or per-issuer variant — we cannot
+// usefully attribute it to a slot without per-script context).
+parse_detach_status(string raw) {
+    if (raw == "") return;
+    list parts = llParseString2List(raw, ["/"], []);
+    integer n = llGetListLength(parts);
+    integer i = 0;
+    while (i < n) {
+        string p = llStringTrim(llList2String(parts, i), STRING_TRIM);
+        if (p == "detach") {
+            GlobalDetachLocked = TRUE;
+        }
+        else if (llSubStringIndex(p, "detach:") == 0) {
+            string point = llGetSubString(p, 7, -1);
+            if (point != "" && llListFindList(LockedAttach, [point]) == -1) {
+                LockedAttach += [point];
+            }
+        }
+        else if (llSubStringIndex(p, "detachallthis:") == 0) {
+            string folder = llGetSubString(p, 14, -1);
+            if (folder != "" && llListFindList(LockedFolders, [folder]) == -1) {
+                LockedFolders += [folder];
+            }
+        }
+        i += 1;
+    }
 }
 
 // Parse "/remoutfit:shirt/remoutfit" style responses. A bare "remoutfit"
@@ -514,6 +583,9 @@ build_worn_attach() {
                 if (slot_name != "") {
                     integer skip_flag = FALSE;
                     if (GlobalAttachLocked) skip_flag = TRUE;
+                    // Bare @detach=n blocks all attachment detachment
+                    // (no per-point info available — hide everything).
+                    if (!skip_flag && GlobalDetachLocked) skip_flag = TRUE;
                     if (!skip_flag) {
                         if (llListFindList(LockedAttach, [slot_name]) != -1) skip_flag = TRUE;
                     }
@@ -832,11 +904,12 @@ show_current_picker(integer page) {
     else                              show_category_menu();
 }
 
-// Kick off QState=4: walk WornAttach and query @getpath:<slot> for each
-// row. Responses land in handle_rlv_response at QState=4, which either
-// drops the row (path under .outfits/.base) or advances PathCheckIdx.
-// When the cursor walks off the end, the picker is rendered. If there
-// are no attachments to verify, jumps straight to render.
+// Kick off QState=5: walk WornAttach and query @getpath:<slot> for each
+// row. Responses land in handle_rlv_response at QState=5, which either
+// drops the row (path in any LockedFolders entry or under .outfits/.base)
+// or advances PathCheckIdx. When the cursor walks off the end, the
+// picker is rendered. If there are no attachments to verify, jumps
+// straight to render.
 begin_path_check() {
     if (llGetListLength(WornAttach) == 0) {
         QState = 0;
@@ -845,7 +918,7 @@ begin_path_check() {
         return;
     }
     PathCheckIdx = 0;
-    QState = 4;
+    QState = 5;
     start_listen_if_needed();
     llSetTimerEvent(RLV_TIMEOUT);
     string slot = llList2String(WornAttach, 0);
@@ -936,10 +1009,10 @@ handle_rlv_response(string message) {
         return;
     }
     if (QState == 3) {
-        // @getstatusall:remattach response — attach-point locks. Last
-        // of the bulk RLV queries; build worn lists then enter the
-        // per-slot @getpath verification pass (QState=4) which renders
-        // the picker when complete.
+        // @getstatusall:remattach response — attach-point locks under the
+        // remattach keyspace. Records them in LockedAttach (per-point)
+        // and GlobalAttachLocked (bare), then fires the detach-keyspace
+        // query so per-point @detach:<pt>=n and folder locks land too.
         list parsed_attach = parse_status(message, "remattach");
         if (llGetListLength(parsed_attach) > 0) {
             if (llList2String(parsed_attach, 0) == "") {
@@ -948,25 +1021,37 @@ handle_rlv_response(string message) {
             }
         }
         LockedAttach = parsed_attach;
-        verify_attempted_strip();
-        build_worn_layers();
-        build_worn_attach();
-        // begin_path_check transitions QState to 4 and starts walking
-        // WornAttach. If there are no attachments to verify it shows
-        // the picker directly with QState reset to 0. After a strip
-        // attempt CurrentCategory is preserved so the post-requery
-        // render returns to the same picker the user tapped from; on a
-        // fresh menu entry CurrentCategory is "" and the category
-        // chooser is shown instead.
-        begin_path_check();
+        QState = 4;
+        advance_query();
         return;
     }
     if (QState == 4) {
+        // @getstatusall:detach response — bare @detach=n, per-point
+        // @detach:<pt>=n, and @detachallthis:<path> folder locks.
+        // parse_detach_status augments GlobalDetachLocked / LockedAttach
+        // / LockedFolders before the worn-list build runs, so the picker
+        // never displays slots locked by any of these mechanisms. After
+        // the build, begin_path_check transitions QState to 5 and walks
+        // WornAttach via @getpath to catch path-based folder locks. If
+        // there are no attachments to verify, the picker is rendered
+        // directly with QState reset to 0. On a fresh menu entry
+        // CurrentCategory is "" and the category chooser is shown; after
+        // a strip attempt CurrentCategory is preserved so we land back
+        // on the same picker the user tapped from.
+        parse_detach_status(message);
+        verify_attempted_strip();
+        build_worn_layers();
+        build_worn_attach();
+        begin_path_check();
+        return;
+    }
+    if (QState == 5) {
         // @getpath response for WornAttach[PathCheckIdx*2]. If the path
-        // is inside .outfits/.base, drop the row entirely; otherwise
-        // advance. When the cursor walks off the end of WornAttach, the
-        // picker is rendered.
-        if (path_in_base(message)) {
+        // is in any locked folder (.outfits/.base or anything caught
+        // earlier by parse_detach_status), drop the row entirely;
+        // otherwise advance. When the cursor walks off the end of
+        // WornAttach, the picker is rendered.
+        if (path_locked(message)) {
             WornAttach = llDeleteSubList(WornAttach,
                 PathCheckIdx * 2, PathCheckIdx * 2 + 1);
             // Don't advance — the next row has shifted into this slot.
