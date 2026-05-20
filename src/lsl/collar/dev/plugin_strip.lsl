@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -21,6 +21,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              worn from #RLV/.base is protected from strip and the
              folder lock is reference-counted with any other consumer.
 CHANGES:
+- v1.10 rev 7: Strip DEBUG_STRIP scaffolding and logd() calls now
+  that rev 5's @getstatusall syntax fix and rev 6's UI split are
+  confirmed working in-world.
 - v1.10 rev 6: UI split + free attachment names. The unified picker
   (mixed L:/A: rows) is replaced by a top-level category chooser
   (Layers / Attachments / Back) that drills into a paginated
@@ -41,18 +44,13 @@ CHANGES:
       always lands on the category chooser.
     * verify_attempted_strip's bit-string check for attach is replaced
       by is_attach_slot_worn (re-queries llGetAttachedList).
-  Debug scaffolding (DEBUG_STRIP + logd) is still in place pending
-  in-world confirmation of the new flow; will strip in a follow-up.
 - v1.10 rev 5: Fix the @getstatusall lock-detection probes. The
   syntax was inverted — `@getstatusall;remoutfit=<chan>` (semicolon)
   vs the canonical `@getstatusall:<filter>=<chan>` (colon). The
   semicolon-form is reserved for an optional custom separator
   AFTER a filter; using it as the filter-delimiter parses as an
-  unrecognised command and the viewer silently drops it. Diagnosed
-  via DEBUG_STRIP: @getoutfit and @getattach responded correctly,
-  then QState 3 timed out at exactly the broken probe. Both
-  invocations corrected to use the colon form. Debug scaffolding
-  still in place pending confirmation; will strip in a follow-up rev.
+  unrecognised command and the viewer silently drops it. Both
+  invocations corrected to use the colon form.
 - v1.10 rev 4: Move the protected-folder lock from `.base` (top-level)
   to `.outfits/.base` (nested) to match the OC-style outfit-system
   convention paired with plugin_outfits: `#RLV/.outfits/` is the
@@ -84,14 +82,6 @@ CHANGES:
 integer KERNEL_LIFECYCLE = 500;
 integer UI_BUS           = 900;
 integer DIALOG_BUS       = 950;
-
-/* -------------------- TEMPORARY DEBUG -------------------- */
-// "RLV not responding" diagnostic. Flip to FALSE to silence.
-// Remove this block and all logd(...) calls once the bug is found.
-integer DEBUG_STRIP = TRUE;
-logd(string s) {
-    if (DEBUG_STRIP) llOwnerSay("[strip-dbg] " + s);
-}
 
 /* -------------------- PLUGIN IDENTITY -------------------- */
 string PLUGIN_CONTEXT = "ui.core.strip";
@@ -322,7 +312,6 @@ return_to_root() {
 /* -------------------- RLV -------------------- */
 
 rlv_force(string command) {
-    logd("SEND rlv.force command=\"" + command + "\"");
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",    "rlv.force",
         "command", command
@@ -332,9 +321,6 @@ rlv_force(string command) {
 start_listen_if_needed() {
     if (RlvListenHandle == 0) {
         RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
-        logd("LISTEN opened on RLV_CHAN=" + (string)RLV_CHAN
-            + " filter=llGetOwner()=" + (string)llGetOwner()
-            + " handle=" + (string)RlvListenHandle);
     }
 }
 
@@ -855,12 +841,7 @@ handle_dialog_timeout(string msg) {
 /* -------------------- RLV RESPONSE HANDLER -------------------- */
 
 handle_rlv_response(string message) {
-    logd("HANDLE QState=" + (string)QState + " msg_len=" + (string)llStringLength(message)
-        + " msg=\"" + message + "\"");
-    if (CurrentUser == NULL_KEY) {
-        logd("HANDLE drop: CurrentUser==NULL_KEY");
-        return;
-    }
+    if (CurrentUser == NULL_KEY) return;
 
     if (QState == 1) {
         // @getoutfit response — raw 0/1 bit string per clothing layer.
@@ -931,9 +912,6 @@ default {
 
     timer() {
         // RLV query timed out — viewer is not RLV-enabled or not responding.
-        logd("TIMEOUT QState=" + (string)QState
-            + " RLV_CHAN=" + (string)RLV_CHAN
-            + " RlvListenHandle=" + (string)RlvListenHandle);
         stop_rlv_listen();
         if (CurrentUser != NULL_KEY) {
             llRegionSayTo(CurrentUser, 0, "RLV not responding. Is RLV mode enabled?");
@@ -943,15 +921,6 @@ default {
 
     listen(integer channel, string name, key id, string message) {
         if (channel == RLV_CHAN) {
-            // Pre-filter log: prints EVERY chat on RLV_CHAN regardless of
-            // sender, so we can see (a) whether anything is coming back at
-            // all, and (b) whether the sender UUID differs from llGetOwner.
-            logd("LISTEN chan=" + (string)channel
-                + " id=" + (string)id
-                + " name=\"" + name + "\""
-                + " owner=" + (string)llGetOwner()
-                + " filter_match=" + (string)(id == llGetOwner())
-                + " msg=\"" + message + "\"");
             if (id == llGetOwner()) {
                 handle_rlv_response(message);
             }
