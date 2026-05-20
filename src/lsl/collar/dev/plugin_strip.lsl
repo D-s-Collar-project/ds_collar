@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -11,16 +11,29 @@ PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          with plugin_outfits (#RLV/.outfits/ as the outfits library;
          the .base subfolder is the protected "non-strippable" set).
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
-             visibility. Enumerates worn items live via @getoutfit /
-             @getattach; reads lock state via @getstatusall;remoutfit /
-             ;remattach. Strip operations route through kmod_rlv
-             (rlv.force passthrough). Locked items are filtered from
-             the picker entirely — taps only ever target strippable
-             items. On register the plugin claims a permanent
-             @detachallthis:.base lock through kmod_rlv so anything
-             worn from #RLV/.base is protected from strip and the
-             folder lock is reference-counted with any other consumer.
+             visibility. Enumerates worn items live via @getoutfit +
+             llGetAttachedList; reads lock state via @getstatusall;
+             remoutfit / ;remattach; then walks the attachment list
+             via per-slot @getpath to drop rows whose inventory path is
+             under .outfits/.base. Strip operations route through
+             kmod_rlv (rlv.force passthrough). Locked items are
+             filtered from the picker entirely — taps only ever target
+             strippable items. On register the plugin claims a
+             permanent @detachallthis:.outfits/.base lock through
+             kmod_rlv as defense in depth (manual detach, folder-wide
+             @detachall, relay-issued detaches); the path-verify pass
+             handles per-slot @remattach which RLVa does not reliably
+             gate on folder locks across versions.
 CHANGES:
+- v1.10 rev 9: Pre-filter the attachment picker by inventory path. The
+  @detachallthis:.outfits/.base claim was not blocking @remattach:<pt>
+  =force across RLVa versions, so .base items were being stripped
+  despite the lock. After the existing 3-query build pass, the plugin
+  now walks WornAttach via @getpath:<slot> (new QState=4) and drops
+  any row whose inventory path is in .outfits/.base before rendering
+  the picker. Adds N RLV roundtrips on menu open (typically <1s for
+  5-10 attachments). The folder-lock claim is kept for defense in
+  depth against other detach paths (manual, @detachall:.outfits, relay).
 - v1.10 rev 8: Ellipsize attachment item names in show_attach_picker
   to 30 chars. Mesh-body names regularly exceed 50 chars and 9 such
   rows + header overflowed llDialog's 512-char body limit.
@@ -142,12 +155,24 @@ string  SessionId      = "";
 //   1 = waiting for @getoutfit response
 //   2 = waiting for @getstatusall:remoutfit response
 //   3 = waiting for @getstatusall:remattach response
+//   4 = walking WornAttach with @getpath:<slot> queries; the slot at
+//       PathCheckIdx is the one currently being verified. Each response
+//       either drops the row from WornAttach (path inside .outfits/.base)
+//       or advances the index.
 //   0 = idle (results assembled, category menu rendered)
 //
 // Note: @getattach (the bit-string attach query) is GONE — replaced by
 // llGetAttachedList(llGetOwner()) which is synchronous, faster, and
 // also yields real attached-object item names (not just slot names).
 integer QState = 0;
+
+// QState=4 cursor into WornAttach. The path-verification pass is needed
+// because RLV's @detachallthis folder lock is not reliably enforced
+// against per-slot @remattach:<point>=force across RLVa versions — we
+// pre-query @getpath:<slot> for each attached item and drop rows whose
+// inventory path is under .outfits/.base, so the picker never offers
+// them as strip targets.
+integer PathCheckIdx = 0;
 
 string  RawOutfit          = "";
 integer GlobalOutfitLocked = FALSE;
@@ -311,6 +336,7 @@ cleanup_session() {
     LastMaxPage         = 0;
     AttemptedItem       = "";
     DiscoveredLocked    = [];
+    PathCheckIdx        = 0;
 }
 
 return_to_root() {
@@ -365,6 +391,15 @@ advance_query() {
     if (QState == 3) {
         rlv_force("@getstatusall:remattach=" + (string)RLV_CHAN);
     }
+}
+
+// True if the inventory path is the .outfits/.base folder itself or a
+// sub-folder of it. @getpath returns paths relative to #RLV with no
+// leading slash, so this matches against BASE_FOLDER (".outfits/.base").
+integer path_in_base(string path) {
+    if (path == BASE_FOLDER) return TRUE;
+    if (llSubStringIndex(path, BASE_FOLDER + "/") == 0) return TRUE;
+    return FALSE;
 }
 
 // Parse "/remoutfit:shirt/remoutfit" style responses. A bare "remoutfit"
@@ -797,6 +832,26 @@ show_current_picker(integer page) {
     else                              show_category_menu();
 }
 
+// Kick off QState=4: walk WornAttach and query @getpath:<slot> for each
+// row. Responses land in handle_rlv_response at QState=4, which either
+// drops the row (path under .outfits/.base) or advances PathCheckIdx.
+// When the cursor walks off the end, the picker is rendered. If there
+// are no attachments to verify, jumps straight to render.
+begin_path_check() {
+    if (llGetListLength(WornAttach) == 0) {
+        QState = 0;
+        stop_rlv_listen();
+        show_current_picker(PickPage);
+        return;
+    }
+    PathCheckIdx = 0;
+    QState = 4;
+    start_listen_if_needed();
+    llSetTimerEvent(RLV_TIMEOUT);
+    string slot = llList2String(WornAttach, 0);
+    rlv_force("@getpath:" + slot + "=" + (string)RLV_CHAN);
+}
+
 handle_dialog_response(string msg) {
     if (!json_has(msg, ["session_id"])) return;
     if (llJsonGetValue(msg, ["session_id"]) != SessionId) return;
@@ -882,8 +937,9 @@ handle_rlv_response(string message) {
     }
     if (QState == 3) {
         // @getstatusall:remattach response — attach-point locks. Last
-        // RLV roundtrip in the chain; build worn lists synchronously
-        // and route to the appropriate view.
+        // of the bulk RLV queries; build worn lists then enter the
+        // per-slot @getpath verification pass (QState=4) which renders
+        // the picker when complete.
         list parsed_attach = parse_status(message, "remattach");
         if (llGetListLength(parsed_attach) > 0) {
             if (llList2String(parsed_attach, 0) == "") {
@@ -892,14 +948,43 @@ handle_rlv_response(string message) {
             }
         }
         LockedAttach = parsed_attach;
-        QState = 0;
-        stop_rlv_listen();
         verify_attempted_strip();
         build_worn_layers();
         build_worn_attach();
-        // After a strip attempt we return to the same picker the user
-        // tapped from (CurrentCategory preserved). On a fresh menu
-        // entry CurrentCategory is "" and we show the category chooser.
+        // begin_path_check transitions QState to 4 and starts walking
+        // WornAttach. If there are no attachments to verify it shows
+        // the picker directly with QState reset to 0. After a strip
+        // attempt CurrentCategory is preserved so the post-requery
+        // render returns to the same picker the user tapped from; on a
+        // fresh menu entry CurrentCategory is "" and the category
+        // chooser is shown instead.
+        begin_path_check();
+        return;
+    }
+    if (QState == 4) {
+        // @getpath response for WornAttach[PathCheckIdx*2]. If the path
+        // is inside .outfits/.base, drop the row entirely; otherwise
+        // advance. When the cursor walks off the end of WornAttach, the
+        // picker is rendered.
+        if (path_in_base(message)) {
+            WornAttach = llDeleteSubList(WornAttach,
+                PathCheckIdx * 2, PathCheckIdx * 2 + 1);
+            // Don't advance — the next row has shifted into this slot.
+        }
+        else {
+            PathCheckIdx += 1;
+        }
+
+        integer remaining = llGetListLength(WornAttach) / 2;
+        if (PathCheckIdx < remaining) {
+            llSetTimerEvent(RLV_TIMEOUT);
+            string next_slot = llList2String(WornAttach, PathCheckIdx * 2);
+            rlv_force("@getpath:" + next_slot + "=" + (string)RLV_CHAN);
+            return;
+        }
+
+        QState = 0;
+        stop_rlv_listen();
         show_current_picker(PickPage);
     }
 }
