@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -21,6 +21,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              worn from #RLV/.base is protected from strip and the
              folder lock is reference-counted with any other consumer.
 CHANGES:
+- v1.10 rev 8: Ellipsize attachment item names in show_attach_picker
+  to 30 chars. Mesh-body names regularly exceed 50 chars and 9 such
+  rows + header overflowed llDialog's 512-char body limit.
 - v1.10 rev 7: Strip DEBUG_STRIP scaffolding and logd() calls now
   that rev 5's @getstatusall syntax fix and rev 6's UI split are
   confirmed working in-world.
@@ -206,6 +209,16 @@ list get_policy_buttons(string ctx, integer acl) {
 
 integer btn_allowed(string label) {
     return (llListFindList(gPolicyButtons, [label]) != -1);
+}
+
+// Truncate long strings for dialog-body display. llDialog caps the body
+// at 512 chars; mesh-body attachments routinely have item names longer
+// than 50 chars, and 9 such rows blow past the limit. Returns at most
+// max_len characters, appending "..." when truncated.
+string ellipsize(string s, integer max_len) {
+    if (llStringLength(s) <= max_len) return s;
+    if (max_len <= 3)                 return llGetSubString(s, 0, max_len - 1);
+    return llGetSubString(s, 0, max_len - 4) + "...";
 }
 
 /* -------------------- LIFECYCLE -------------------- */
@@ -694,7 +707,10 @@ show_attach_picker(integer page) {
         while (k < count) {
             integer item_idx = start_idx + k;
             string slot = llList2String(WornAttach, item_idx * 2);
-            string name = llList2String(WornAttach, item_idx * 2 + 1);
+            // 30-char cap on the item name keeps a 9-row body under
+            // llDialog's 512-char limit even with worst-case slot names
+            // ("right shoulder" = 14 chars) and the two-digit page header.
+            string name = ellipsize(llList2String(WornAttach, item_idx * 2 + 1), 30);
             body += (string)(k + 1) + ". " + name + " @" + slot + "\n";
             k += 1;
         }
