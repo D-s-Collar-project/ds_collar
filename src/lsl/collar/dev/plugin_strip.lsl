@@ -1,14 +1,14 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
-         #RLV/.outfits/.base are folder-locked at register time and
-         never appear in the picker, so the wearer cannot strip their
-         outfit-system base kit regardless of the open policy. Pairs
-         with plugin_outfits (#RLV/.outfits/ as the outfits library;
+         #RLV/.outfits/.base are protected against strip whenever
+         plugin_outfits is in its active state (its @detachallthis lock
+         on .outfits/.base blocks the strip command at force time).
+         Pairs with plugin_outfits (#RLV/.outfits/ as the outfits library;
          the .base subfolder is the protected "non-strippable" set).
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Enumerates worn items live via @getoutfit +
@@ -22,11 +22,18 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              appear in the picker on first session entry; the
              verify_attempted_strip → DiscoveredLocked discovery pair
              catches them on the first click and hides them for the
-             rest of the session. On register the plugin claims a
-             permanent @detachallthis:.outfits/.base lock through
-             kmod_rlv (defense in depth — also honored by the strip
-             command itself, which silently no-ops on locked items).
+             rest of the session. No @detachallthis claim is issued
+             here — plugin_outfits owns the .outfits/.base lock (it
+             needs to be releasable via the outfits on/off toggle).
 CHANGES:
+- v1.10 rev 13: Drop the @detachallthis:.outfits/.base claim from
+  register_self — plugin_outfits rev 9 now owns the .base lock so it
+  can be released by the on/off toggle. plugin_strip's role shrinks
+  to "enumerate worn items, show picker, force-strip on click";
+  .base protection comes entirely from whichever consumer is
+  currently claiming the folder (default: plugin_outfits while
+  active). BASE_FOLDER and RLV_CONSUMER constants removed (their
+  only use was the claim).
 - v1.10 rev 12: Internal refactor — no behavior change. Merge
   show_layer_picker + show_attach_picker into a single
   show_picker(category, page); the two were ~75 lines each and
@@ -136,8 +143,6 @@ string PLUGIN_LABEL   = "Strip";
 /* -------------------- RLV -------------------- */
 integer RLV_CHAN    = 1888771;
 float   RLV_TIMEOUT = 10.0;
-string  BASE_FOLDER = ".outfits/.base";  // #RLV-relative; items here are never strippable.
-string  RLV_CONSUMER = "strip";          // kmod_rlv consumer id for our @detachallthis claim.
 
 /* -------------------- LAYER NAMES (matches @getoutfit response order) -------------------- */
 // RLV @getoutfit returns a 0/1 string with characters in this canonical
@@ -288,10 +293,10 @@ write_plugin_reg(string label) {
 
 register_self() {
     // Open policy: every ACL level sees Strip. The wearer's core
-    // attachments are protected by the @detachallthis:.base claim
-    // applied below, so wearer access here only exposes strippable
-    // (non-.base) items — they cannot strip their core kit even
-    // though the menu is reachable.
+    // attachments are protected by plugin_outfits's @detachallthis:
+    // .outfits/.base claim (when its toggle is on), so wearer access
+    // here only exposes strippable items — the strip command silently
+    // no-ops on locked items.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
         "1", "Strip",
         "2", "Strip",
@@ -307,18 +312,6 @@ register_self() {
         "context", PLUGIN_CONTEXT,
         "label",   PLUGIN_LABEL,
         "script",  llGetScriptName()
-    ]), NULL_KEY);
-
-    // Claim @detachallthis:<BASE_FOLDER> through kmod_rlv so items
-    // worn from #RLV/.outfits/.base are non-strippable from any source.
-    // claim_add in kmod_rlv is idempotent — re-applying on every
-    // state_entry / kernel.register.refresh is safe and ensures the
-    // lock survives any kmod_rlv reset (claims clear on factory reset;
-    // we re-claim here on our own restart).
-    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",     "rlv.apply",
-        "consumer", RLV_CONSUMER,
-        "behav",    "detachallthis:" + BASE_FOLDER
     ]), NULL_KEY);
 }
 
