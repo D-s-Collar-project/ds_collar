@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 5
+REVISION: 6
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -21,6 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 6: All three finish_* paths now route through restart_after_operation: 5-second "Please wait, restarting..." notice then llResetScript. Earlier llSleep(2.0) + cleanup_all left stale state visible to queued touch events, producing repeated "session already in progress" errors after completion. Hard reset wipes Phase and listeners cleanly.
 - v1.1 rev 5: Replace first-responder-wins discovery with scan-and-pick. Touch-initiated update/install paths now collect every remote.collarready for SCAN_WINDOW (5s), then auto-proceed if exactly one collar responded or show a picker dialog otherwise. Picker label is the collar object name (single-wearer case) or 'Wearer: Object name' (multi-wearer), clipped to the 24-char dialog limit. Invite-path collar handshake is untouched — it's already point-to-point and doesn't need scanning. handle_collar_ready removed; touch flow routes through record_scan_response + finalize_scan.
 - v1.1 rev 4: Make the install fork explicit. Picking 'Install Scripts' now opens a sub-menu [Existing collar / Empty object / Cancel] instead of auto-branching on discovery success/failure. Discovery-based branching pre-empted the install_shim path whenever the wearer's collar was in range, so 'Empty object' fresh-installs were silently impossible. Existing-collar timeout no longer falls back to install_shim — the wearer chose that path explicitly, so surface the timeout and let them re-touch.
 - v1.1 rev 3: Add Install Scripts path. Top-level touch menu forks update vs install; install discovers, then either runs a multi-select feature picker against a discovered collar or hands the wearer install_shim for fresh-install onto an empty target (Minimal / Full / Bespoke). Bespoke walks features sequentially with Yes/No prompts. Pagination at 9 features per page.
@@ -329,9 +330,10 @@ string scan_label_for(integer idx, integer multi_wearer) {
     return clip24(wname + ": " + oname);
 }
 
-// Render the scan picker. Pagination at 9/page; nav row Cancel / pad /
-// Prev-or-Next mirrors the install-mode picker convention. With <=9
-// collars no nav arrow is needed.
+// Render the scan picker. Buttons are just (Cancel, [Prev|Next if multi-
+// page], collar labels...), padded to a multiple of 3 for layout
+// cosmetics — no fixed-width slot reservation, so a 2-collar picker
+// shows ~3 buttons total rather than 12 with a wall of " " fillers.
 show_scan_picker() {
     integer n = llGetListLength(ScanResults) / 4;
     integer pages = (n + COLLARS_PER_PAGE - 1) / COLLARS_PER_PAGE;
@@ -342,23 +344,16 @@ show_scan_picker() {
     integer stop = start + COLLARS_PER_PAGE;
     if (stop > n) stop = n;
 
-    list buttons = [];
+    list buttons = ["Cancel"];
+    if (pages > 1) {
+        if (ScanPage == 0) buttons += ["Next >"];
+        else buttons += ["< Prev"];
+    }
     integer i = start;
     while (i < stop) {
         buttons += [scan_label_for(i, multi)];
         i += 1;
     }
-    integer slots_on_page = stop - start;
-    while (slots_on_page < COLLARS_PER_PAGE) {
-        buttons += [" "];
-        slots_on_page += 1;
-    }
-    string nav3 = " ";
-    if (pages > 1) {
-        if (ScanPage == 0) nav3 = "Next >";
-        else nav3 = "< Prev";
-    }
-    buttons += ["Cancel", " ", nav3];
 
     string body = "Pick a collar to ";
     if (ScanNextAction == "install") body += "install into";
@@ -369,7 +364,7 @@ show_scan_picker() {
     if (DialogListen) llListenRemove(DialogListen);
     DialogChan = random_channel();
     DialogListen = llListen(DialogChan, "", Wearer, "");
-    llDialog(Wearer, body, buttons, DialogChan);
+    llDialog(Wearer, body, pad_buttons(buttons), DialogChan);
     llSetTimerEvent(DIALOG_TIMEOUT);
 }
 
@@ -533,36 +528,41 @@ dispatch_install_bundle() {
     notice("Detecting missing components...");
 }
 
+// Each finish_* path ends with restart_after_operation rather than
+// cleanup_all + return-to-idle. llResetScript wipes every global cleanly,
+// avoiding "session already in progress" races caused by leftover Phase /
+// listener state on the next touch. 5-second visible delay so the wearer
+// reads the completion notice before the prim respawns.
+restart_after_operation() {
+    Phase = "resetting";
+    llSetTimerEvent(0.0);
+    notice("Please wait, restarting...");
+    llSleep(5.0);
+    llResetScript();
+}
+
 finish_update() {
     llWhisper(SecureChannel, "DONE");
-    Phase = "done";
-    llSetTimerEvent(0.0);
     notice("Update complete. Collar is now at version " + BUILD_VERSION + ".");
-    llSleep(2.0);
-    cleanup_all();
+    restart_after_operation();
 }
 
 finish_install() {
     llWhisper(SecureChannel, "DONE");
-    Phase = "done";
-    llSetTimerEvent(0.0);
     notice("Install complete. Selected components are now in the collar.");
-    llSleep(2.0);
-    cleanup_all();
+    restart_after_operation();
 }
 
 finish_shim_install() {
-    // Tell install_shim to disarm PIN and self-delete.
+    // Tell install_shim to disarm PIN, restart its parked collar scripts,
+    // and self-delete.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "install.shim.done",
         "shim", (string)ShimTarget
     ]);
     llRegionSay(EXTERNAL_ACL_QUERY_CHAN, msg);
-    Phase = "done";
-    llSetTimerEvent(0.0);
     notice("Fresh install complete. Wear or rez the target to bring it online.");
-    llSleep(2.0);
-    cleanup_all();
+    restart_after_operation();
 }
 
 

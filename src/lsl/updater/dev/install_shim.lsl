@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: install_shim.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 3
 PURPOSE: Empty-target receiver for the installer's fresh-install path. Wearer
   drops this single script into an object they want to turn into a collar;
   it sets a remote-load PIN, announces itself on EXTERNAL_ACL_REPLY_CHAN, and
@@ -14,6 +14,7 @@ ARCHITECTURE: Lives alone in the fresh target object. Uses kmod_remote's
   already present (drop into a non-empty target is a user error, not a
   reinstall path; that's what 'Update Collar' is for).
 CHANGES:
+- v1.1 rev 3: Inhibit the half-installed collar during the bundle phase. state_entry now stamps the prim with UPDATER_MARKER after the safety checks; every collar script's dormancy guard (universal across 33 scripts) sees the marker in their state_entry and parks via llSetScriptState(self, FALSE). install.shim.done now calls activate_collar_scripts before cleanup_and_die: clear the desc, then llSetScriptState(name, TRUE) + llResetOtherScript(name) per script so they re-enter state_entry and init normally. OriginalDesc preserved across the marker stamp and restored on every cleanup path (success and failure).
 - v1.1 rev 2: Fix ready-message instruction — installer's permanent REPLY_CHAN listener picks up the broadcast automatically, so the wearer should NOT touch the installer again (doing so triggered 'session already in progress' because Phase = shim_offer_waiting).
 - v1.1 rev 1: Initial implementation. Mirrors update_shim's PIN/secure-channel
   shape but doesn't speak the LIST/QUERY diff protocol — the target is empty
@@ -56,6 +57,11 @@ integer ListenHandle = 0;
 key     InstallerKey = NULL_KEY;
 integer Broadcasting = TRUE;
 float   ElapsedBroadcast = 0.0;
+
+// Saved object description from before we stamped UPDATER_MARKER. Restored
+// in cleanup_and_die on every exit path (success and failure) so the prim
+// is never left with the dormancy marker as a stuck description.
+string  OriginalDesc = "";
 
 
 /* -------------------- HELPERS -------------------- */
@@ -110,7 +116,38 @@ cleanup_and_die() {
     // Disarm the PIN so the installer can no longer load scripts into us
     // once the session is closed.
     llSetRemoteScriptAccessPin(0);
+    // Restore the prim's description in case activate_collar_scripts
+    // wasn't called (failure paths). Activate-then-cleanup already
+    // restored it; this is a no-op there.
+    llSetObjectDesc(OriginalDesc);
     llRemoveInventory(llGetScriptName());
+}
+
+// Unpark every collar script that was loaded into this prim while the
+// dormancy marker was set. Clears the marker FIRST so the parked scripts'
+// state_entry doesn't re-park them when llResetOtherScript fires.
+// Sequence per script: enable (parked scripts ignore llResetOtherScript),
+// then reset → state_entry runs, sees clean desc, initializes normally.
+activate_collar_scripts() {
+    llSetObjectDesc(OriginalDesc);
+
+    list names = [];
+    integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
+    integer i = 0;
+    string self = llGetScriptName();
+    while (i < count) {
+        string name = llGetInventoryName(INVENTORY_SCRIPT, i);
+        if (name != self) names += [name];
+        i += 1;
+    }
+    integer n = llGetListLength(names);
+    i = 0;
+    while (i < n) {
+        string name = llList2String(names, i);
+        llSetScriptState(name, TRUE);
+        llResetOtherScript(name);
+        i += 1;
+    }
 }
 
 
@@ -136,6 +173,16 @@ default {
 
         Pin = random_pin();
         llSetRemoteScriptAccessPin(Pin);
+
+        // Inhibit the half-installed collar: stamp the prim with the
+        // dormancy marker so every script the bundler loads via
+        // llRemoteLoadScriptPin sees it in state_entry and parks itself.
+        // The wearer can't accidentally use a partial collar (touches,
+        // attachments, timers all stop at the dormancy gate). Cleared
+        // and resets fired in activate_collar_scripts when we receive
+        // install.shim.done.
+        OriginalDesc = llGetObjectDesc();
+        llSetObjectDesc(UPDATER_MARKER);
 
         // Listen for the installer's ack and later for install.shim.done.
         // Open filter on sender; we filter by same-owner in the handler
@@ -173,8 +220,9 @@ default {
             return;
         }
 
-        // Installer signalling that the install is complete. Disarm PIN
-        // and self-delete.
+        // Installer signalling that the install is complete. Unpark the
+        // collar scripts (they were parked by the dormancy marker we set
+        // in state_entry), then disarm PIN and self-delete.
         if (mtype == "install.shim.done") {
             string done_shim = llJsonGetValue(message, ["shim"]);
             if (done_shim == JSON_INVALID) return;
@@ -183,6 +231,7 @@ default {
             // DONE from another updater in the sim shouldn't kill us.
             if (InstallerKey != NULL_KEY && id != InstallerKey) return;
 
+            activate_collar_scripts();
             cleanup_and_die();
             return;
         }
