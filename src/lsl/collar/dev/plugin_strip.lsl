@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -26,6 +26,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              here — plugin_outfits owns the .outfits/.base lock (it
              needs to be releasable via the outfits on/off toggle).
 CHANGES:
+- v1.10 rev 14: Fix "no attachments visible" — two distinct bugs. (a) Rev 10's GlobalDetachLocked filter in build_worn_attach was based on a wrong reading of the RLV spec: bare @detach=n locks ONLY the object that issued it (the collar), not all attachments, but the filter was hiding every attached item whenever plugin_lock was locked (which is the default state). Drop the GlobalDetachLocked skip; per-slot @detach:<slot>=n locks still filter via LockedAttach. (b) ATTACH_NAMES stopped at index 40, so anything attached to a Bento mesh point (LHAND_RING1=41 through HIND_RFOOT=55) failed the attach_pt < attach_names_n bounds check and never appeared. Extend to 56 entries covering all current LSL ATTACH_* constants.
 - v1.10 rev 13: Drop the @detachallthis:.outfits/.base claim from
   register_self — plugin_outfits rev 9 now owns the .base lock so it
   can be released by the on/off toggle. plugin_strip's role shrinks
@@ -157,10 +158,16 @@ list LAYER_NAMES = [
 // Indices into LAYER_NAMES that @remoutfit accepts as targets.
 list STRIPPABLE_LAYER_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 15, 16];
 
-/* -------------------- ATTACH POINT NAMES (matches @getattach response order) -------------------- */
-// Position 0 is "none" (always 0). Positions 31-38 are HUD points and
-// are excluded from the worn list — HUDs are private to the wearer and
-// this plugin is operated by non-wearer parties.
+/* -------------------- ATTACH POINT NAMES (LSL ATTACH_* constant order) -------------------- */
+// Index = LSL ATTACH_* integer (the value llGetObjectDetails returns for
+// OBJECT_ATTACHED_POINT). Position 0 is "none" (unattached). Positions
+// 31-38 are HUD points, excluded by HUD_IDX below — HUDs are private to
+// the wearer and this plugin is operated by non-wearer parties.
+//
+// Bento / mesh attachment points (41-55) added: items worn on hand
+// rings, tail, wings, jaw, alt face slots etc. used to fail the
+// `attach_pt < attach_names_n` bounds check in build_worn_attach and
+// silently disappear from the picker.
 list ATTACH_NAMES = [
     "",
     "chest", "skull", "left shoulder", "right shoulder",
@@ -174,7 +181,16 @@ list ATTACH_NAMES = [
     "stomach", "left pec", "right pec",
     "center 2", "top right", "top", "top left", "center",
     "bottom left", "bottom", "bottom right",
-    "neck", "root"
+    "neck", "root",
+    "left ring finger", "right ring finger",
+    "tail base", "tail tip",
+    "left wing", "right wing",
+    "jaw",
+    "alt left ear", "alt right ear",
+    "alt left eye", "alt right eye",
+    "tongue",
+    "groin",
+    "left hind foot", "right hind foot"
 ];
 
 // HUD positions skipped when building the worn list.
@@ -531,9 +547,20 @@ build_worn_attach() {
                 if (slot_name != "") {
                     integer skip_flag = FALSE;
                     if (GlobalAttachLocked) skip_flag = TRUE;
-                    // Bare @detach=n blocks all attachment detachment
-                    // (no per-point info available — hide everything).
-                    if (!skip_flag && GlobalDetachLocked) skip_flag = TRUE;
+                    // NB: do NOT treat GlobalDetachLocked as a global
+                    // attachment lock. Per the RLV spec, a bare
+                    // @detach=n issued by an attached object locks
+                    // ONLY that object — not all attachments. Earlier
+                    // revs misread the @getstatusall:detach response
+                    // (which surfaces a bare "detach" token whenever
+                    // *any* object has @detach=n active) as a wearer-
+                    // wide lock, which hid every attachment whenever
+                    // plugin_lock set @detach=n on the collar (i.e.
+                    // always). Per-slot locks (@detach:<slot>=n) are
+                    // merged into LockedAttach by the QState=4 handler
+                    // and filtered just below. Folder-scoped
+                    // @detachallthis still catches items via the
+                    // post-strip verify pair.
                     if (!skip_flag) {
                         if (llListFindList(LockedAttach, [slot_name]) != -1) skip_flag = TRUE;
                     }
