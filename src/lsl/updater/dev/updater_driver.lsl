@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -21,6 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 7: Rewrite all dialogs to conform to feedback_dialog_layout_convention. List pickers (scan_picker, feature picker) now slot-map content top-to-bottom left-to-right with << / >> / Back nav at slots 0/1/2 and wrap-around pagination. Feature picker action label is "Install" at slot 3 (page size = 9 - 1 = 8). Action-only menus (main_menu, install_submenu, shim_mode_picker, bespoke prompt) skip the << / >> nav since they're inherently single-page; labels per user spec ("Cancel" only at the root main_menu, "Back" elsewhere). Shim mode picker uses user-specified layout: row 0 = Full / Minimal / Back, row 1 = Bespoke. install_submenu options renamed "Existing Collar" / "New Collar". pad_buttons helper removed; each caller builds exact slot positions.
 - v1.1 rev 6: All three finish_* paths now route through restart_after_operation: 5-second "Please wait, restarting..." notice then llResetScript. Earlier llSleep(2.0) + cleanup_all left stale state visible to queued touch events, producing repeated "session already in progress" errors after completion. Hard reset wipes Phase and listeners cleanly.
 - v1.1 rev 5: Replace first-responder-wins discovery with scan-and-pick. Touch-initiated update/install paths now collect every remote.collarready for SCAN_WINDOW (5s), then auto-proceed if exactly one collar responded or show a picker dialog otherwise. Picker label is the collar object name (single-wearer case) or 'Wearer: Object name' (multi-wearer), clipped to the 24-char dialog limit. Invite-path collar handshake is untouched — it's already point-to-point and doesn't need scanning. handle_collar_ready removed; touch flow routes through record_scan_response + finalize_scan.
 - v1.1 rev 4: Make the install fork explicit. Picking 'Install Scripts' now opens a sub-menu [Existing collar / Empty object / Cancel] instead of auto-branching on discovery success/failure. Discovery-based branching pre-empted the install_shim path whenever the wearer's collar was in range, so 'Empty object' fresh-installs were silently impossible. Existing-collar timeout no longer falls back to install_shim — the wearer chose that path explicitly, so surface the timeout and let them re-touch.
@@ -71,8 +72,10 @@ float INVITE_TIMEOUT      = 60.0;
 float DIALOG_TIMEOUT      = 120.0;   // wearer has 2 min to answer a dialog
 float SHIM_OFFER_TIMEOUT  = 180.0;   // 3 min from give to install.shim.ready
 
-// Pagination.
-integer FEATURES_PER_PAGE = 9;
+// Pagination. Page size for paginated dialogs is derived from
+// `9 - action_count` per the dialog convention; feature picker has 1
+// action ("Install") so 8 features per page, scan picker has 0 so 9.
+integer FEATURES_PER_PAGE = 8;
 integer COLLARS_PER_PAGE  = 9;
 
 
@@ -182,35 +185,61 @@ notice(string s) {
     else llOwnerSay(s);
 }
 
-// Pad a button list to a multiple of 3 with single-space fillers.
-list pad_buttons(list buttons) {
-    integer n = llGetListLength(buttons);
-    while ((n % 3) != 0) {
-        buttons += " ";
-        n += 1;
-    }
-    return buttons;
-}
-
-// Open a dialog with a fresh channel and listen. Caller sets Phase next.
+// Open a dialog with a fresh channel and listen. Caller builds the
+// buttons list at the exact slot positions per the project's UI
+// convention — no automatic padding. See feedback_dialog_layout_convention.
 open_dialog(key who, string body, list buttons) {
     if (DialogListen) llListenRemove(DialogListen);
     DialogChan = random_channel();
     DialogListen = llListen(DialogChan, "", who, "");
-    llDialog(who, body, pad_buttons(buttons), DialogChan);
+    llDialog(who, body, buttons, DialogChan);
     llSetTimerEvent(DIALOG_TIMEOUT);
+}
+
+// Wrap-around page nav helpers (mandatory per the convention; clamping
+// is the wrong UX). `<<` on page 0 → last; `>>` on last → page 0.
+integer wrap_prev_page(integer page, integer max_page) {
+    page -= 1;
+    if (page < 0) page = max_page;
+    return page;
+}
+
+integer wrap_next_page(integer page, integer max_page) {
+    page += 1;
+    if (page > max_page) page = 0;
+    return page;
+}
+
+// Build target_slots for content placement: top-to-bottom, left-to-right
+// among the slots reachable given total_buttons length, skipping any
+// slots claimed by actions (3..first_content_slot-1).
+list build_target_slots(integer total_buttons, integer first_content_slot) {
+    list slots = [];
+    if (total_buttons > 9)  slots += [9];
+    if (total_buttons > 10) slots += [10];
+    if (total_buttons > 11) slots += [11];
+    if (total_buttons > 6)  slots += [6];
+    if (total_buttons > 7)  slots += [7];
+    if (total_buttons > 8)  slots += [8];
+    if (first_content_slot <= 3 && total_buttons > 3) slots += [3];
+    if (first_content_slot <= 4 && total_buttons > 4) slots += [4];
+    if (first_content_slot <= 5 && total_buttons > 5) slots += [5];
+    return slots;
 }
 
 
 /* -------------------- TOP-LEVEL MENU -------------------- */
 
+// Top-level menu. Three buttons in the bottom row (slots 0/1/2). No
+// pagination nav since the menu is inherently single-page; Cancel (slot 2)
+// rather than Back because there's no parent menu to return to.
 show_main_menu(key who) {
     Wearer = who;
     Phase = "main_menu";
     open_dialog(who,
         "D/s Collar installer.\n\n"
       + "Update Collar — refresh an existing collar.\n"
-      + "Install Scripts — install missing components, or fresh-install onto an empty object.",
+      + "Install Scripts — install missing components, or fresh-install onto a new prim.",
         ["Update Collar", "Install Scripts", "Cancel"]);
 }
 
@@ -219,13 +248,14 @@ show_main_menu(key who) {
 // branching was ambiguous because a worn collar would always be found
 // and pre-empt the install_shim path even when the wearer wanted a
 // fresh install onto a new prim.
+//   Slot 0: Existing Collar, Slot 1: New Collar, Slot 2: Back
 show_install_submenu() {
     Phase = "install_submenu";
     open_dialog(Wearer,
         "Install target:\n\n"
-      + "Existing collar — discover your worn collar and install missing components.\n"
-      + "Empty object — receive install_shim, drop it into a fresh prim, then pick a profile.",
-        ["Existing collar", "Empty object", "Cancel"]);
+      + "Existing Collar — discover your worn collar and install missing components.\n"
+      + "New Collar — receive install_shim, drop it into a fresh prim, then pick a profile.",
+        ["Existing Collar", "New Collar", "Back"]);
 }
 
 
@@ -330,10 +360,11 @@ string scan_label_for(integer idx, integer multi_wearer) {
     return clip24(wname + ": " + oname);
 }
 
-// Render the scan picker. Buttons are just (Cancel, [Prev|Next if multi-
-// page], collar labels...), padded to a multiple of 3 for layout
-// cosmetics — no fixed-width slot reservation, so a 2-collar picker
-// shows ~3 buttons total rather than 12 with a wall of " " fillers.
+// Render the scan picker per the project's dialog convention. No actions
+// (selecting a collar IS the action), so all 9 content slots are
+// available; pagination at 9/page with wrap-around.
+//   Slots 0/1/2: <<, >>, Back
+//   Slots 3-11: collar labels, top-to-bottom left-to-right
 show_scan_picker() {
     integer n = llGetListLength(ScanResults) / 4;
     integer pages = (n + COLLARS_PER_PAGE - 1) / COLLARS_PER_PAGE;
@@ -343,28 +374,37 @@ show_scan_picker() {
     integer start = ScanPage * COLLARS_PER_PAGE;
     integer stop = start + COLLARS_PER_PAGE;
     if (stop > n) stop = n;
+    integer count = stop - start;
 
-    list buttons = ["Cancel"];
-    if (pages > 1) {
-        if (ScanPage == 0) buttons += ["Next >"];
-        else buttons += ["< Prev"];
+    integer first_content_slot = 3;
+    integer total_buttons = first_content_slot + count;
+
+    list final_buttons = ["<<", ">>", "Back"];
+    integer p = 0;
+    while (p < count) {
+        final_buttons += [""];
+        p += 1;
     }
-    integer i = start;
-    while (i < stop) {
-        buttons += [scan_label_for(i, multi)];
+
+    list target_slots = build_target_slots(total_buttons, first_content_slot);
+    integer i = 0;
+    while (i < count) {
+        integer slot = llList2Integer(target_slots, i);
+        string label = scan_label_for(start + i, multi);
+        final_buttons = llListReplaceList(final_buttons, [label], slot, slot);
         i += 1;
     }
 
     string body = "Pick a collar to ";
     if (ScanNextAction == "install") body += "install into";
     else body += "update";
-    body += ":\n\n";
-    if (pages > 1) body += "Page " + (string)(ScanPage + 1) + " of " + (string)pages + "\n";
+    body += ".";
+    if (pages > 1) body += "\nPage " + (string)(ScanPage + 1) + " of " + (string)pages;
 
     if (DialogListen) llListenRemove(DialogListen);
     DialogChan = random_channel();
     DialogListen = llListen(DialogChan, "", Wearer, "");
-    llDialog(Wearer, body, pad_buttons(buttons), DialogChan);
+    llDialog(Wearer, body, final_buttons, DialogChan);
     llSetTimerEvent(DIALOG_TIMEOUT);
 }
 
@@ -580,8 +620,13 @@ string feature_scripts(integer idx) {
     return llList2String(Features, idx * 2 + 1);
 }
 
-// Render the picker for the current page. Each feature button is prefixed
-// "[X] " or "[ ] " to show toggle state. Nav row at the bottom.
+// Render the feature multi-select picker per the project's dialog
+// convention. Action: "Install" at slot 3 (finalize selection). Content:
+// features with [X]/[ ] toggle prefix, slot-mapped top-to-bottom.
+//   Slots 0/1/2: <<, >>, Back
+//   Slot 3: Install (finalize)
+//   Slots 4-11: features
+// Page size = 9 - action_count = 8.
 show_picker() {
     integer n = features_count();
     integer pages = (n + FEATURES_PER_PAGE - 1) / FEATURES_PER_PAGE;
@@ -590,39 +635,37 @@ show_picker() {
     integer start = PickerPage * FEATURES_PER_PAGE;
     integer stop = start + FEATURES_PER_PAGE;
     if (stop > n) stop = n;
+    integer count = stop - start;
 
-    list buttons = [];
-    integer i = start;
-    while (i < stop) {
+    integer first_content_slot = 4;  // slot 3 is the Install action
+    integer total_buttons = first_content_slot + count;
+
+    list final_buttons = ["<<", ">>", "Back", "Install"];
+    integer p = 0;
+    while (p < count) {
+        final_buttons += [""];
+        p += 1;
+    }
+
+    list target_slots = build_target_slots(total_buttons, first_content_slot);
+    integer i = 0;
+    while (i < count) {
+        integer slot = llList2Integer(target_slots, i);
+        integer feat_idx = start + i;
         string prefix = "[ ] ";
-        if (llList2Integer(Selected, i)) prefix = "[X] ";
-        buttons += [prefix + feature_label(i)];
+        if (llList2Integer(Selected, feat_idx)) prefix = "[X] ";
+        string label = prefix + feature_label(feat_idx);
+        final_buttons = llListReplaceList(final_buttons, [label], slot, slot);
         i += 1;
     }
-    // Pad page slots to keep nav row stable across pages.
-    integer slots_on_page = stop - start;
-    while (slots_on_page < FEATURES_PER_PAGE) {
-        buttons += [" "];
-        slots_on_page += 1;
-    }
-    // Nav row (cells 0/1/2 by dialog convention: bottom-left → bottom-right).
-    string nav3 = " ";
-    if (pages > 1) {
-        if (PickerPage == 0) nav3 = "Next >";
-        else nav3 = "< Prev";
-    }
-    buttons += ["Cancel", "Confirm", nav3];
 
-    string body = "Select components to install:\n\n";
-    if (pages > 1) {
-        body += "Page " + (string)(PickerPage + 1) + " of " + (string)pages + "\n\n";
-    }
-    body += "[X] = will install, [ ] = skip. Tap a feature to toggle.";
+    string body = "Select components to install. Tap to toggle.";
+    if (pages > 1) body += "\nPage " + (string)(PickerPage + 1) + " of " + (string)pages;
 
     if (DialogListen) llListenRemove(DialogListen);
     DialogChan = random_channel();
     DialogListen = llListen(DialogChan, "", Wearer, "");
-    llDialog(Wearer, body, buttons, DialogChan);
+    llDialog(Wearer, body, final_buttons, DialogChan);
     llSetTimerEvent(DIALOG_TIMEOUT);
 }
 
@@ -643,20 +686,17 @@ integer match_picker_button(string btn) {
 }
 
 handle_picker_button(string btn) {
-    if (btn == "Cancel") {
+    if (btn == "Back") {
         notice("Install cancelled.");
-        // Bundler is parked in scripts_await — abort by sending DONE-ish.
-        // Cleanest: send an empty LM_INSTALL_GO so bundler advances past
-        // the scripts phase with nothing to ship, then completes non-script
-        // phases (which will also be empty if collar already has the
-        // non-scripts) and emits LM_BUNDLE_DONE.
+        // Bundler is parked in scripts_await — abort by sending empty
+        // LM_INSTALL_GO so it advances past the scripts phase with
+        // nothing to ship, completes non-script phases, and emits
+        // LM_BUNDLE_DONE.
         string payload = llList2Json(JSON_OBJECT, ["scripts", ""]);
         llMessageLinked(LINK_SET, LM_INSTALL_GO, payload, NULL_KEY);
-        // Bundler will eventually emit LM_BUNDLE_DONE → finish_install.
         return;
     }
-    if (btn == "Confirm") {
-        // Collect selected scripts across all features.
+    if (btn == "Install") {
         list ship = [];
         integer i = 0;
         integer n = features_count();
@@ -675,14 +715,17 @@ handle_picker_button(string btn) {
         if (llGetListLength(ship) > 0) notice("Installing selected components...");
         return;
     }
-    if (btn == "Next >") {
-        PickerPage += 1;
+    integer n2 = features_count();
+    integer pages = (n2 + FEATURES_PER_PAGE - 1) / FEATURES_PER_PAGE;
+    integer max_page = pages - 1;
+    if (max_page < 0) max_page = 0;
+    if (btn == "<<") {
+        PickerPage = wrap_prev_page(PickerPage, max_page);
         show_picker();
         return;
     }
-    if (btn == "< Prev") {
-        PickerPage -= 1;
-        if (PickerPage < 0) PickerPage = 0;
+    if (btn == ">>") {
+        PickerPage = wrap_next_page(PickerPage, max_page);
         show_picker();
         return;
     }
@@ -734,14 +777,17 @@ handle_shim_ready(string message) {
     llSetTimerEvent(BUNDLE_TIMEOUT);
 }
 
+// Shim mode picker — user-specified layout: Full/Minimal/Back on the
+// bottom row, Bespoke alone above. Slots:
+//   0: Full, 1: Minimal, 2: Back, 3: Bespoke
 show_shim_mode_picker() {
     Phase = "shim_mode_picking";
     open_dialog(Wearer,
-        "Fresh install onto empty target.\n\n"
-      + "Minimal — core + access, blacklist, sos, animate, leash.\n"
+        "Fresh install onto new collar prim.\n\n"
+      + "Minimal — core + access, blacklist, sos, animate, maint, leash.\n"
       + "Full — every component in the installer.\n"
       + "Bespoke — core + per-component prompt.",
-        ["Minimal", "Full", "Bespoke", "Cancel"]);
+        ["Full", "Minimal", "Back", "Bespoke"]);
 }
 
 // Minimal selection in install_shim mode. These features are always
@@ -824,13 +870,14 @@ next_bespoke_prompt() {
 
     Phase = "shim_bespoke_iterating";
     string label = feature_label(BespokeIdx);
+    // Slots: 0: Yes, 1: No, 2: Back. Bottom row only.
     open_dialog(Wearer,
         "Install component: " + label + "?",
-        ["Yes", "No", "Cancel"]);
+        ["Yes", "No", "Back"]);
 }
 
 handle_bespoke_answer(string btn) {
-    if (btn == "Cancel") {
+    if (btn == "Back") {
         notice("Install cancelled.");
         finish_shim_install();
         return;
@@ -902,41 +949,44 @@ default {
             }
 
             if (Phase == "install_submenu") {
-                if (message == "Existing collar") {
+                if (message == "Existing Collar") {
                     if (DialogListen) llListenRemove(DialogListen);
                     DialogListen = 0;
                     DialogChan = 0;
                     begin_scan(Wearer, "install");
                     return;
                 }
-                if (message == "Empty object") {
+                if (message == "New Collar") {
                     if (DialogListen) llListenRemove(DialogListen);
                     DialogListen = 0;
                     DialogChan = 0;
                     offer_install_shim();
                     return;
                 }
-                if (message == "Cancel") {
-                    cleanup_all();
+                if (message == "Back") {
+                    show_main_menu(Wearer);
                     return;
                 }
                 return;
             }
 
             if (Phase == "scan_picking") {
-                if (message == "Cancel") {
+                if (message == "Back") {
                     notice("Cancelled.");
                     cleanup_all();
                     return;
                 }
-                if (message == "Next >") {
-                    ScanPage += 1;
+                integer scan_n = llGetListLength(ScanResults) / 4;
+                integer scan_pages = (scan_n + COLLARS_PER_PAGE - 1) / COLLARS_PER_PAGE;
+                integer scan_max_page = scan_pages - 1;
+                if (scan_max_page < 0) scan_max_page = 0;
+                if (message == "<<") {
+                    ScanPage = wrap_prev_page(ScanPage, scan_max_page);
                     show_scan_picker();
                     return;
                 }
-                if (message == "< Prev") {
-                    ScanPage -= 1;
-                    if (ScanPage < 0) ScanPage = 0;
+                if (message == ">>") {
+                    ScanPage = wrap_next_page(ScanPage, scan_max_page);
                     show_scan_picker();
                     return;
                 }
@@ -971,7 +1021,7 @@ default {
                     start_bespoke();
                     return;
                 }
-                if (message == "Cancel") {
+                if (message == "Back") {
                     notice("Install cancelled.");
                     finish_shim_install();
                     return;
