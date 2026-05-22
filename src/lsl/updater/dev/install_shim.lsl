@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: install_shim.lsl
 VERSION: 1.10
-REVISION: 1
+REVISION: 2
 PURPOSE: Empty-target receiver for the installer's fresh-install path. Wearer
   drops this single script into an object they want to turn into a collar;
   it sets a remote-load PIN, announces itself on EXTERNAL_ACL_REPLY_CHAN, and
@@ -14,6 +14,7 @@ ARCHITECTURE: Lives alone in the fresh target object. Uses kmod_remote's
   already present (drop into a non-empty target is a user error, not a
   reinstall path; that's what 'Update Collar' is for).
 CHANGES:
+- v1.1 rev 2: Fix ready-message instruction — installer's permanent REPLY_CHAN listener picks up the broadcast automatically, so the wearer should NOT touch the installer again (doing so triggered 'session already in progress' because Phase = shim_offer_waiting).
 - v1.1 rev 1: Initial implementation. Mirrors update_shim's PIN/secure-channel
   shape but doesn't speak the LIST/QUERY diff protocol — the target is empty
   by construction, so the bundler ships unconditionally.
@@ -147,8 +148,8 @@ default {
         llSetTimerEvent(BROADCAST_INTERVAL);
 
         llRegionSayTo(llGetOwner(), 0,
-            "install_shim: ready. Touch your installer object and pick "
-          + "'Install Scripts' to begin.");
+            "install_shim: ready. Waiting for the installer to detect "
+          + "this prim. (No further touch needed.)");
     }
 
     listen(integer channel, string name, key id, string message) {

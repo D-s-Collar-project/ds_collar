@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 5
+REVISION: 6
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -23,6 +23,7 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+- v1.1 rev 6: Add missing LM_FEATURES_QUERY handler. Constant was declared and the driver sent the message, but the bundler had no handler — install_shim flow hung at 'shim_features_querying' forever and the wearer's re-touches saw 'session already in progress'.
 - v1.1 rev 5: Add INSTALL and INSTALL_SHIM modes. Mode variable gates the diff predicate (intersect vs invert) and the dispatch shape. Feature grouping uses two hand-defined subsystem overrides (Leash, RLV — these don't decompose cleanly under the anchor heuristic) plus plugin_<name> anchor for everything else, with leftover core kmods collapsed into a single "Core Components" feature. Driver picks features via multi-select; bundler then ships the selected script set followed by all bundler-only non-scripts. The install-shim variant skips the shim handshake entirely — install_shim refused to start unless its prim was empty, so the bundler can ship via llRemoteLoadScriptPin without a per-item GIVE/SKIP roundtrip.
 - v1.1 rev 4: Update-only-installed model. Candidates is now intersected with CollarInv when each LIST/<type>-reply arrives, so the bundler only QUERYs items that are present in BOTH the bundler AND the collar — the rule is "known to the updater AND present in the collar gets refreshed; known but absent gets ignored; present but unknown stays." No SWEEP (would remove wearer customs); no auto-install of bundler-only items (wearer chose not to install them). ConditionalPairs / lookup_gate / Manifest / SWEEP / SWEPT machinery all retired — the general intersection rule subsumes the 3-script paired-kmod gate. Same model for scripts and non-scripts (animations, objects, notecards).
 - v1.1 rev 3: Extend the script-only diff to a typed phase machine that also covers animations, objects, and notecards. After SWEPT, walk LIST_ANIM / LIST_OBJ / LIST_NC and per-item QUERY_<type>; the shim wipes stale items synchronously and reports GIVE. Bundler then calls llGiveInventory(CollarKey, item) per GIVE — same-owner attached transfer is silent (the "attached = treated as agent" rule applies to cross-owner cases only) and bypasses RLV's edit-block. No SWEEP for non-scripts; items in collar not in bundler are wearer's customs and stay. Settings notecard ("settings") hard-excluded at both ends. Mirrors OpenCollar's update mechanism.
@@ -40,6 +41,7 @@ integer LM_INSTALL_BEGIN       = 91003;  // driver→bundler: discover & report 
 integer LM_INSTALL_FEATURES    = 91004;  // bundler→driver: feature list
 integer LM_INSTALL_GO          = 91005;  // driver→bundler: scripts CSV selected
 integer LM_INSTALL_SHIM_BEGIN  = 91006;  // driver→bundler: ship blind to install_shim
+integer LM_FEATURES_QUERY      = 91007;  // driver→bundler: enumerate features (empty-target case)
 
 
 /* -------------------- CONSTANTS -------------------- */
@@ -501,6 +503,23 @@ default {
     }
 
     link_message(integer sender, integer num, string msg, key id) {
+        // ----- FEATURES QUERY (empty-target install_shim path) -----
+        // Driver asks "what features would you ship?" without any collar
+        // context. Build candidates from our own inventory and group
+        // them as if the target were empty (CollarInv = []), so the
+        // bundler-MINUS-collar diff returns everything we have.
+        if (num == LM_FEATURES_QUERY) {
+            if (Mode != "") return;
+            build_candidates();
+            list features = group_into_features(Candidates);
+            string payload = llList2Json(JSON_OBJECT, [
+                "features", llList2Json(JSON_ARRAY, features)
+            ]);
+            llMessageLinked(LINK_SET, LM_INSTALL_FEATURES, payload, NULL_KEY);
+            Candidates = [];
+            return;
+        }
+
         // ----- UPDATE mode start -----
         if (num == LM_BUNDLE_BEGIN) {
             if (Mode != "") return;  // session already in progress
