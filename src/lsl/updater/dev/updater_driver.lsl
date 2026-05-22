@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -21,6 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 8: Apply numbered-list pattern to the scan picker (buttons are digits, body text carries collar names). Add LM_BUNDLE_RESET: driver state_entry signals the sibling bundler to llResetScript, fixing a hang at "Detecting missing components..." caused by a stuck Mode != "" gate in the bundler from a previously-aborted session — driver-only llResetScript didn't propagate to the child prim's bundler.
 - v1.1 rev 7: Rewrite all dialogs to conform to feedback_dialog_layout_convention. List pickers (scan_picker, feature picker) now slot-map content top-to-bottom left-to-right with << / >> / Back nav at slots 0/1/2 and wrap-around pagination. Feature picker "Install" action is at slot 5 (bottom-right of action row, conventional confirm position) — slots 3 and 4 are content; build_target_slots takes an action_slots list so non-contiguous action claims work. total_buttons = max(6, 4+count) to guarantee slot 5 is in the list. Page size still 9-1=8. Action-only menus (main_menu, install_submenu, shim_mode_picker, bespoke prompt) skip the << / >> nav since they're inherently single-page; labels per user spec ("Cancel" only at the root main_menu, "Back" elsewhere). Shim mode picker uses user-specified layout: row 0 = Full / Minimal / Back, row 1 = Bespoke. install_submenu options renamed "Existing Collar" / "New Collar". pad_buttons helper removed; each caller builds exact slot positions.
 - v1.1 rev 6: All three finish_* paths now route through restart_after_operation: 5-second "Please wait, restarting..." notice then llResetScript. Earlier llSleep(2.0) + cleanup_all left stale state visible to queued touch events, producing repeated "session already in progress" errors after completion. Hard reset wipes Phase and listeners cleanly.
 - v1.1 rev 5: Replace first-responder-wins discovery with scan-and-pick. Touch-initiated update/install paths now collect every remote.collarready for SCAN_WINDOW (5s), then auto-proceed if exactly one collar responded or show a picker dialog otherwise. Picker label is the collar object name (single-wearer case) or 'Wearer: Object name' (multi-wearer), clipped to the 24-char dialog limit. Invite-path collar handshake is untouched — it's already point-to-point and doesn't need scanning. handle_collar_ready removed; touch flow routes through record_scan_response + finalize_scan.
@@ -47,6 +48,7 @@ integer LM_INSTALL_FEATURES    = 91004;
 integer LM_INSTALL_GO          = 91005;
 integer LM_INSTALL_SHIM_BEGIN  = 91006;
 integer LM_FEATURES_QUERY      = 91007;  // driver→bundler: enumerate features
+integer LM_BUNDLE_RESET        = 91008;  // driver→bundler: hard reset to clean state
 
 
 /* -------------------- CONSTANTS -------------------- */
@@ -363,11 +365,11 @@ string scan_label_for(integer idx, integer multi_wearer) {
     return clip24(wname + ": " + oname);
 }
 
-// Render the scan picker per the project's dialog convention. No actions
-// (selecting a collar IS the action), so all 9 content slots are
-// available; pagination at 9/page with wrap-around.
+// Render the scan picker as an ordered list per the project pattern:
+// body text carries the numbered collar names, buttons are just digits.
+// Avoids 24-char button-label clipping on long object names.
 //   Slots 0/1/2: <<, >>, Back
-//   Slots 3-11: collar labels, top-to-bottom left-to-right
+//   Slots 3-11: digit buttons ("1", "2", ...), top-to-bottom left-to-right
 show_scan_picker() {
     integer n = llGetListLength(ScanResults) / 4;
     integer pages = (n + COLLARS_PER_PAGE - 1) / COLLARS_PER_PAGE;
@@ -379,7 +381,6 @@ show_scan_picker() {
     if (stop > n) stop = n;
     integer count = stop - start;
 
-    // No actions — selection IS the action. total_buttons = 3 nav + count.
     integer total_buttons = 3 + count;
 
     list final_buttons = ["<<", ">>", "Back"];
@@ -393,16 +394,21 @@ show_scan_picker() {
     integer i = 0;
     while (i < count) {
         integer slot = llList2Integer(target_slots, i);
-        string label = scan_label_for(start + i, multi);
-        final_buttons = llListReplaceList(final_buttons, [label], slot, slot);
+        final_buttons = llListReplaceList(final_buttons, [(string)(i + 1)], slot, slot);
         i += 1;
     }
 
     string body = "Pick a collar to ";
     if (ScanNextAction == "install") body += "install into";
     else body += "update";
-    body += ".";
-    if (pages > 1) body += "\nPage " + (string)(ScanPage + 1) + " of " + (string)pages;
+    body += ". Tap a number.\n";
+    if (pages > 1) body += "Page " + (string)(ScanPage + 1) + " of " + (string)pages + "\n";
+    body += "\n";
+    integer k = 0;
+    while (k < count) {
+        body += (string)(k + 1) + ". " + scan_label_for(start + k, multi) + "\n";
+        k += 1;
+    }
 
     if (DialogListen) llListenRemove(DialogListen);
     DialogChan = random_channel();
@@ -411,28 +417,29 @@ show_scan_picker() {
     llSetTimerEvent(DIALOG_TIMEOUT);
 }
 
-// Look up which scan result a label corresponds to and proceed with the
-// chosen collar. Returns TRUE on match, FALSE if label didn't match any
-// known collar (so the caller can handle nav/cancel buttons).
+// Parse a digit button back to the absolute scan-results index for the
+// current page and proceed with that collar. Returns TRUE on a valid
+// numeric pick, FALSE if the label isn't a digit in range (so the nav
+// labels and Back fall through to their own dispatchers).
 integer try_scan_pick(string label) {
-    integer multi = scan_has_multiple_wearers();
+    integer pos = (integer)label;
+    if (pos < 1) return FALSE;
+    if ((string)pos != label) return FALSE;
+    integer abs_idx = (ScanPage * COLLARS_PER_PAGE) + (pos - 1);
     integer n = llGetListLength(ScanResults) / 4;
-    integer i = 0;
-    while (i < n) {
-        if (scan_label_for(i, multi) == label) {
-            CollarKey = (key)llList2String(ScanResults, i * 4);
-            CollarPin = (integer)llList2String(ScanResults, i * 4 + 1);
-            if (DialogListen) llListenRemove(DialogListen);
-            DialogListen = 0;
-            DialogChan = 0;
-            string next = "shim_loading";
-            if (ScanNextAction == "install") next = "install_shim_loading";
-            load_shim(next);
-            return TRUE;
-        }
-        i += 1;
-    }
-    return FALSE;
+    if (abs_idx >= n) return FALSE;
+    integer page_stop = (ScanPage + 1) * COLLARS_PER_PAGE;
+    if (abs_idx >= page_stop) return FALSE;
+
+    CollarKey = (key)llList2String(ScanResults, abs_idx * 4);
+    CollarPin = (integer)llList2String(ScanResults, abs_idx * 4 + 1);
+    if (DialogListen) llListenRemove(DialogListen);
+    DialogListen = 0;
+    DialogChan = 0;
+    string next = "shim_loading";
+    if (ScanNextAction == "install") next = "install_shim_loading";
+    load_shim(next);
+    return TRUE;
 }
 
 // Called from timer when the scan window expires. 0 → fail, 1 →
@@ -913,6 +920,13 @@ default {
     state_entry() {
         llSetObjectDesc(UPDATER_MARKER);
         cleanup_all();
+
+        // Force the sibling bundler to reset alongside us so a stuck
+        // Mode != "" from a prior aborted session doesn't silently drop
+        // the next LM_*_BEGIN. Without this the driver hangs at
+        // "Detecting missing components..." because the bundler's
+        // early-return gate eats the request.
+        llMessageLinked(LINK_SET, LM_BUNDLE_RESET, "", NULL_KEY);
 
         // Permanent listener on REPLY_CHAN. In idle, catches
         // remote.updateravailable (update mode invite) and

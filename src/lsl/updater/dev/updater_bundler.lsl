@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 9
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,6 +25,8 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+- v1.1 rev 9: Defensive cleanup_bundle() at the top of every LM_*_BEGIN / LM_FEATURES_QUERY handler. Removes the Mode != "" early-return guards that silently swallowed new requests when prior state was stale (the "Detecting missing components..." hang). LM_BUNDLE_RESET still present as belt-and-braces.
+- v1.1 rev 8: Add LM_BUNDLE_RESET handler — calls llResetScript on receipt. Driver fires this from its own state_entry so the bundler stays in sync after driver llResetScript, fixing a hang at "Detecting missing components..." when a previously-aborted session left Mode != "" and the next LM_INSTALL_BEGIN got silently early-returned.
 - v1.1 rev 7: install_shim mode now ships animations / objects / notecards after the script set, including the settings notecard (which is intentionally an example template on fresh install — wearers can customise defaults from it). Update and install-against-existing-collar paths still exclude the settings notecard at all three layers (build_candidates_typed / list_inventory_typed / verdict_for_typed) so wearer customisations are never overwritten. Earlier rev was over-cautious about llGiveInventory dialog floods — same-owner prim-to-prim transfer is silent regardless of attached state.
 - v1.1 rev 6: Add missing LM_FEATURES_QUERY handler. Constant was declared and the driver sent the message, but the bundler had no handler — install_shim flow hung at 'shim_features_querying' forever and the wearer's re-touches saw 'session already in progress'.
 - v1.1 rev 5: Add INSTALL and INSTALL_SHIM modes. Mode variable gates the diff predicate (intersect vs invert) and the dispatch shape. Feature grouping uses two hand-defined subsystem overrides (Leash, RLV — these don't decompose cleanly under the anchor heuristic) plus plugin_<name> anchor for everything else, with leftover core kmods collapsed into a single "Core Components" feature. Driver picks features via multi-select; bundler then ships the selected script set followed by all bundler-only non-scripts. The install-shim variant skips the shim handshake entirely — install_shim refused to start unless its prim was empty, so the bundler can ship via llRemoteLoadScriptPin without a per-item GIVE/SKIP roundtrip.
@@ -45,6 +47,7 @@ integer LM_INSTALL_FEATURES    = 91004;  // bundler→driver: feature list
 integer LM_INSTALL_GO          = 91005;  // driver→bundler: scripts CSV selected
 integer LM_INSTALL_SHIM_BEGIN  = 91006;  // driver→bundler: ship blind to install_shim
 integer LM_FEATURES_QUERY      = 91007;  // driver→bundler: enumerate features (empty-target case)
+integer LM_BUNDLE_RESET        = 91008;  // driver→bundler: hard reset to clean state
 
 
 /* -------------------- CONSTANTS -------------------- */
@@ -531,13 +534,32 @@ default {
     }
 
     link_message(integer sender, integer num, string msg, key id) {
+        // ----- HARD RESET -----
+        // Driver sends this on its own state_entry (post-llResetScript)
+        // so the bundler stays in sync. Without it, an aborted previous
+        // session would leave Mode set, and the next LM_*_BEGIN here
+        // would silently early-return — producing a hang at the driver
+        // end (waiting for LM_INSTALL_FEATURES that never comes).
+        if (num == LM_BUNDLE_RESET) {
+            llResetScript();
+            return;
+        }
+
         // ----- FEATURES QUERY (empty-target install_shim path) -----
         // Driver asks "what features would you ship?" without any collar
         // context. Build candidates from our own inventory and group
         // them as if the target were empty (CollarInv = []), so the
         // bundler-MINUS-collar diff returns everything we have.
+        //
+        // Defensive cleanup_bundle at the top of every LM_*_BEGIN-like
+        // handler self-heals stale state from an aborted prior session.
+        // Without it, a leftover Mode != "" would silently early-return
+        // and the driver would hang waiting for a response that never
+        // comes. This is belt-and-braces with LM_BUNDLE_RESET — works
+        // even on bundlers that haven't been re-dropped since the
+        // LM_BUNDLE_RESET handler was added.
         if (num == LM_FEATURES_QUERY) {
-            if (Mode != "") return;
+            cleanup_bundle();
             build_candidates();
             list features = group_into_features(Candidates);
             string payload = llList2Json(JSON_OBJECT, [
@@ -550,7 +572,7 @@ default {
 
         // ----- UPDATE mode start -----
         if (num == LM_BUNDLE_BEGIN) {
-            if (Mode != "") return;  // session already in progress
+            cleanup_bundle();
 
             string collar_str  = llJsonGetValue(msg, ["collar"]);
             string pin_str     = llJsonGetValue(msg, ["pin"]);
@@ -578,7 +600,7 @@ default {
 
         // ----- INSTALL mode start (discovered collar) -----
         if (num == LM_INSTALL_BEGIN) {
-            if (Mode != "") return;
+            cleanup_bundle();
 
             string collar_str  = llJsonGetValue(msg, ["collar"]);
             string pin_str     = llJsonGetValue(msg, ["pin"]);
@@ -632,7 +654,7 @@ default {
 
         // ----- INSTALL_SHIM mode (empty target) -----
         if (num == LM_INSTALL_SHIM_BEGIN) {
-            if (Mode != "") return;
+            cleanup_bundle();
 
             string shim_str = llJsonGetValue(msg, ["shim"]);
             string pin2_str = llJsonGetValue(msg, ["pin"]);
