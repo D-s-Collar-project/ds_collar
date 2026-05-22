@@ -1,17 +1,19 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
-    UPDATE COLLAR — broadcasts remote.updatediscover, deposits update_shim
-      via llRemoteLoadScriptPin, signals the bundler for an intersection
-      refresh pass (existing flow).
-    INSTALL SCRIPTS — sub-menu picks between 'Existing collar' (discovery,
-      then bundler reports missing features as a multi-select picker, then
-      ships the wearer's selection via update_shim) and 'Empty object'
-      (hand over install_shim, wait for its ready broadcast from the fresh
-      target, then offer Minimal / Full / Bespoke).
+    UPDATE COLLAR — scans the region for collars (5s window), shows a
+      picker dialog of responders (auto-picks if only one), then deposits
+      update_shim into the chosen collar and signals the bundler for an
+      intersection refresh pass.
+    INSTALL SCRIPTS — sub-menu picks between 'Existing collar' (same scan
+      + picker as update, then bundler reports missing features as a
+      multi-select dialog, then ships the wearer's selection via
+      update_shim) and 'Empty object' (hand over install_shim, wait for
+      its ready broadcast from the fresh target, then offer Minimal /
+      Full / Bespoke).
 ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   runs in a child prim and holds the staged collar scripts. Chat protocol
   with collar uses kmod_remote's EXTERNAL_ACL_QUERY_CHAN / REPLY_CHAN; chat
@@ -19,6 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 5: Replace first-responder-wins discovery with scan-and-pick. Touch-initiated update/install paths now collect every remote.collarready for SCAN_WINDOW (5s), then auto-proceed if exactly one collar responded or show a picker dialog otherwise. Picker label is the collar object name (single-wearer case) or 'Wearer: Object name' (multi-wearer), clipped to the 24-char dialog limit. Invite-path collar handshake is untouched — it's already point-to-point and doesn't need scanning. handle_collar_ready removed; touch flow routes through record_scan_response + finalize_scan.
 - v1.1 rev 4: Make the install fork explicit. Picking 'Install Scripts' now opens a sub-menu [Existing collar / Empty object / Cancel] instead of auto-branching on discovery success/failure. Discovery-based branching pre-empted the install_shim path whenever the wearer's collar was in range, so 'Empty object' fresh-installs were silently impossible. Existing-collar timeout no longer falls back to install_shim — the wearer chose that path explicitly, so surface the timeout and let them re-touch.
 - v1.1 rev 3: Add Install Scripts path. Top-level touch menu forks update vs install; install discovers, then either runs a multi-select feature picker against a discovered collar or hands the wearer install_shim for fresh-install onto an empty target (Minimal / Full / Bespoke). Bespoke walks features sequentially with Yes/No prompts. Pagination at 9 features per page.
 - v1.1 rev 2: Drop multi-bundle iteration.
@@ -60,7 +63,7 @@ string SHIM_SCRIPT         = "update_shim";
 string INSTALL_SHIM_SCRIPT = "install_shim";
 
 // Timeouts.
-float DISCOVERY_TIMEOUT   = 10.0;
+float SCAN_WINDOW         = 5.0;     // collect collarready responses for 5s
 float SHIM_READY_TIMEOUT  = 15.0;
 float BUNDLE_TIMEOUT      = 240.0;
 float INVITE_TIMEOUT      = 60.0;
@@ -69,18 +72,19 @@ float SHIM_OFFER_TIMEOUT  = 180.0;   // 3 min from give to install.shim.ready
 
 // Pagination.
 integer FEATURES_PER_PAGE = 9;
+integer COLLARS_PER_PAGE  = 9;
 
 
 /* -------------------- STATE -------------------- */
 // Phase names reflect what we're currently waiting on.
 //   idle                       — no session in progress
 //   idle_invited               — answered remote.updateravailable
-//   discovering                — update mode discovery
-//   shim_loading               — update shim being deposited
+//   scanning                   — collecting collarready responses (5s window)
+//   scan_picking               — collar picker dialog open (>1 response)
+//   shim_loading               — update shim being deposited (update mode)
+//   install_shim_loading       — update shim being deposited (install mode)
 //   bundling                   — update bundler running
 //   done                       — update applied
-//   install_discovering        — install mode discovery (collar present case)
-//   install_shim_loading       — install mode, update_shim being loaded
 //   install_picking            — multi-select feature dialog open
 //   install_bundling           — install bundler shipping
 //   shim_offer_waiting         — gave install_shim, waiting for ready broadcast
@@ -121,6 +125,14 @@ integer ShimPin = 0;
 integer BespokeIdx = 0;
 list    BespokeShip = [];        // accumulating script names to ship
 
+// Scan state. ScanResults is a stride-4 list:
+//   [collar_key_str, pin_str, wearer_key_str, object_name, ...]
+// ScanNextAction encodes the post-pick flow ("update" → load_shim
+// "shim_loading"; "install" → load_shim "install_shim_loading").
+list    ScanResults = [];
+string  ScanNextAction = "";
+integer ScanPage = 0;
+
 
 /* -------------------- HELPERS -------------------- */
 
@@ -159,6 +171,9 @@ cleanup_all() {
     ShimPin = 0;
     BespokeIdx = 0;
     BespokeShip = [];
+    ScanResults = [];
+    ScanNextAction = "";
+    ScanPage = 0;
 }
 
 notice(string s) {
@@ -213,11 +228,20 @@ show_install_submenu() {
 }
 
 
-/* -------------------- UPDATE FLOW (existing) -------------------- */
+/* -------------------- SCAN + PICKER -------------------- */
 
-begin_discovery(key toucher) {
+// Touch-initiated scan replaces the old first-responder-wins discovery.
+// Broadcast on QUERY_CHAN, then collect every remote.collarready for
+// SCAN_WINDOW seconds. After the window: 0 responses → notice + cleanup,
+// 1 → auto-pick and proceed, >1 → picker dialog. The invite path
+// (collar invites updater) is unchanged — that handshake is point-to-point
+// and doesn't need scanning.
+begin_scan(key toucher, string next_action) {
     Wearer = toucher;
-    Phase = "discovering";
+    ScanNextAction = next_action;
+    ScanResults = [];
+    ScanPage = 0;
+    Phase = "scanning";
     Session = new_session();
 
     string msg = llList2Json(JSON_OBJECT, [
@@ -227,9 +251,176 @@ begin_discovery(key toucher) {
     ]);
     llRegionSay(EXTERNAL_ACL_QUERY_CHAN, msg);
 
-    llSetTimerEvent(DISCOVERY_TIMEOUT);
-    notice("Searching for collar...");
+    llSetTimerEvent(SCAN_WINDOW);
+    notice("Scanning for collars (" + (string)((integer)SCAN_WINDOW) + "s)...");
 }
+
+// Append a collar's response to ScanResults if it's valid and not already
+// recorded. Dedupe by collar key. Session match ensures we only collect
+// responses to OUR broadcast (not someone else's updater nearby).
+record_scan_response(string message) {
+    string sess = llJsonGetValue(message, ["session"]);
+    if (sess == JSON_INVALID) return;
+    if (sess != Session) return;
+
+    string collar_str = llJsonGetValue(message, ["collar"]);
+    string pin_str    = llJsonGetValue(message, ["pin"]);
+    string wearer_str = llJsonGetValue(message, ["wearer"]);
+    if (collar_str == JSON_INVALID) return;
+    if (pin_str == JSON_INVALID) return;
+    if (wearer_str == JSON_INVALID) wearer_str = collar_str;
+
+    key collar = (key)collar_str;
+    if (collar == NULL_KEY) return;
+    if (llGetOwnerKey(collar) != llGetOwner()) return;
+
+    // Dedupe — stride-4 means we check positions 0, 4, 8, ... for the key.
+    integer n = llGetListLength(ScanResults) / 4;
+    integer i = 0;
+    while (i < n) {
+        if (llList2String(ScanResults, i * 4) == collar_str) return;
+        i += 1;
+    }
+
+    // Object name (synchronous if collar is in-region, which it must be
+    // to have responded). Fallback to "Collar" if unavailable.
+    list details = llGetObjectDetails(collar, [OBJECT_NAME]);
+    string oname = "Collar";
+    if (llGetListLength(details) > 0) {
+        string got = llList2String(details, 0);
+        if (got != "") oname = got;
+    }
+
+    ScanResults += [collar_str, pin_str, wearer_str, oname];
+}
+
+// Are there at least two distinct wearer keys in ScanResults? Used to
+// decide label format — single-wearer case shows object name only,
+// multi-wearer prefixes each with the avatar display name.
+integer scan_has_multiple_wearers() {
+    integer n = llGetListLength(ScanResults) / 4;
+    if (n < 2) return FALSE;
+    string first = llList2String(ScanResults, 2);
+    integer i = 1;
+    while (i < n) {
+        if (llList2String(ScanResults, i * 4 + 2) != first) return TRUE;
+        i += 1;
+    }
+    return FALSE;
+}
+
+// Truncate to 24 chars (LSL dialog button limit).
+string clip24(string s) {
+    if (llStringLength(s) <= 24) return s;
+    return llGetSubString(s, 0, 23);
+}
+
+// Build the button label for one scan result. Multi-wearer mode prefixes
+// the wearer's display name; single-wearer mode shows just the object
+// name. llGetDisplayName is synchronous and returns the cached name; for
+// avatars not in cache it returns "" → fall back to "?".
+string scan_label_for(integer idx, integer multi_wearer) {
+    string oname = llList2String(ScanResults, idx * 4 + 3);
+    if (!multi_wearer) return clip24(oname);
+
+    key wearer = (key)llList2String(ScanResults, idx * 4 + 2);
+    string wname = llGetDisplayName(wearer);
+    if (wname == "") wname = "?";
+    return clip24(wname + ": " + oname);
+}
+
+// Render the scan picker. Pagination at 9/page; nav row Cancel / pad /
+// Prev-or-Next mirrors the install-mode picker convention. With <=9
+// collars no nav arrow is needed.
+show_scan_picker() {
+    integer n = llGetListLength(ScanResults) / 4;
+    integer pages = (n + COLLARS_PER_PAGE - 1) / COLLARS_PER_PAGE;
+    if (pages < 1) pages = 1;
+
+    integer multi = scan_has_multiple_wearers();
+    integer start = ScanPage * COLLARS_PER_PAGE;
+    integer stop = start + COLLARS_PER_PAGE;
+    if (stop > n) stop = n;
+
+    list buttons = [];
+    integer i = start;
+    while (i < stop) {
+        buttons += [scan_label_for(i, multi)];
+        i += 1;
+    }
+    integer slots_on_page = stop - start;
+    while (slots_on_page < COLLARS_PER_PAGE) {
+        buttons += [" "];
+        slots_on_page += 1;
+    }
+    string nav3 = " ";
+    if (pages > 1) {
+        if (ScanPage == 0) nav3 = "Next >";
+        else nav3 = "< Prev";
+    }
+    buttons += ["Cancel", " ", nav3];
+
+    string body = "Pick a collar to ";
+    if (ScanNextAction == "install") body += "install into";
+    else body += "update";
+    body += ":\n\n";
+    if (pages > 1) body += "Page " + (string)(ScanPage + 1) + " of " + (string)pages + "\n";
+
+    if (DialogListen) llListenRemove(DialogListen);
+    DialogChan = random_channel();
+    DialogListen = llListen(DialogChan, "", Wearer, "");
+    llDialog(Wearer, body, buttons, DialogChan);
+    llSetTimerEvent(DIALOG_TIMEOUT);
+}
+
+// Look up which scan result a label corresponds to and proceed with the
+// chosen collar. Returns TRUE on match, FALSE if label didn't match any
+// known collar (so the caller can handle nav/cancel buttons).
+integer try_scan_pick(string label) {
+    integer multi = scan_has_multiple_wearers();
+    integer n = llGetListLength(ScanResults) / 4;
+    integer i = 0;
+    while (i < n) {
+        if (scan_label_for(i, multi) == label) {
+            CollarKey = (key)llList2String(ScanResults, i * 4);
+            CollarPin = (integer)llList2String(ScanResults, i * 4 + 1);
+            if (DialogListen) llListenRemove(DialogListen);
+            DialogListen = 0;
+            DialogChan = 0;
+            string next = "shim_loading";
+            if (ScanNextAction == "install") next = "install_shim_loading";
+            load_shim(next);
+            return TRUE;
+        }
+        i += 1;
+    }
+    return FALSE;
+}
+
+// Called from timer when the scan window expires. 0 → fail, 1 →
+// auto-proceed (no point picker dialog for one option), >1 → picker.
+finalize_scan() {
+    integer n = llGetListLength(ScanResults) / 4;
+    if (n == 0) {
+        notice("No collars responded. Make sure your collar is worn and you are within 20 meters.");
+        cleanup_all();
+        return;
+    }
+    if (n == 1) {
+        CollarKey = (key)llList2String(ScanResults, 0);
+        CollarPin = (integer)llList2String(ScanResults, 1);
+        string next = "shim_loading";
+        if (ScanNextAction == "install") next = "install_shim_loading";
+        load_shim(next);
+        return;
+    }
+    Phase = "scan_picking";
+    ScanPage = 0;
+    show_scan_picker();
+}
+
+
+/* -------------------- UPDATE FLOW (invite path) -------------------- */
 
 respond_to_invite(string message) {
     if (Phase != "idle") return;
@@ -287,29 +478,11 @@ accept_invitation(string msg) {
     load_shim("shim_loading");
 }
 
-handle_collar_ready(string msg) {
-    string sess = llJsonGetValue(msg, ["session"]);
-    if (sess == JSON_INVALID) return;
-    if (sess != Session) return;
-
-    if (llJsonGetValue(msg, ["collar"]) == JSON_INVALID) return;
-    if (llJsonGetValue(msg, ["pin"]) == JSON_INVALID) return;
-
-    CollarKey = (key)llJsonGetValue(msg, ["collar"]);
-    CollarPin = (integer)llJsonGetValue(msg, ["pin"]);
-
-    if (llGetOwnerKey(CollarKey) != llGetOwner()) {
-        notice("Collar is owned by a different avatar. Aborting.");
-        cleanup_all();
-        return;
-    }
-
-    // Branch into the correct shim_loading phase based on which discovery
-    // initiated this. install_discovering → install_shim_loading; otherwise
-    // update mode.
-    if (Phase == "install_discovering") load_shim("install_shim_loading");
-    else load_shim("shim_loading");
-}
+// (handle_collar_ready removed in rev 5 — touch-driven discovery now
+// goes through begin_scan → record_scan_response → finalize_scan, which
+// either auto-picks the sole responder or shows the picker dialog. The
+// invite path uses accept_invitation directly and never needed this
+// helper.)
 
 // Deposit update_shim into the collar. next_phase says which post-load
 // path to take (update vs install).
@@ -573,8 +746,11 @@ show_shim_mode_picker() {
 
 // Minimal selection in install_shim mode. These features are always
 // shipped (if the bundler reported them). Anything else is skipped.
+// Maint is included because plugin_maint owns the updater scan/invite
+// flow (remote.updaterscan.start in kmod_remote); without it a Minimal
+// collar can never be invited to update again.
 list minimal_feature_labels() {
-    return ["Core Components", "Leash Subsystem", "Access", "Blacklist", "Sos", "Animate"];
+    return ["Core Components", "Leash Subsystem", "Access", "Blacklist", "Sos", "Animate", "Maint"];
 }
 
 ship_shim_mode(string mode) {
@@ -711,7 +887,7 @@ default {
                     if (DialogListen) llListenRemove(DialogListen);
                     DialogListen = 0;
                     DialogChan = 0;
-                    begin_discovery(Wearer);
+                    begin_scan(Wearer, "update");
                     return;
                 }
                 if (message == "Install Scripts") {
@@ -730,16 +906,7 @@ default {
                     if (DialogListen) llListenRemove(DialogListen);
                     DialogListen = 0;
                     DialogChan = 0;
-                    Phase = "install_discovering";
-                    Session = new_session();
-                    string msg = llList2Json(JSON_OBJECT, [
-                        "type",    "remote.updatediscover",
-                        "updater", (string)llGetKey(),
-                        "session", Session
-                    ]);
-                    llRegionSay(EXTERNAL_ACL_QUERY_CHAN, msg);
-                    llSetTimerEvent(DISCOVERY_TIMEOUT);
-                    notice("Searching for collar...");
+                    begin_scan(Wearer, "install");
                     return;
                 }
                 if (message == "Empty object") {
@@ -753,6 +920,27 @@ default {
                     cleanup_all();
                     return;
                 }
+                return;
+            }
+
+            if (Phase == "scan_picking") {
+                if (message == "Cancel") {
+                    notice("Cancelled.");
+                    cleanup_all();
+                    return;
+                }
+                if (message == "Next >") {
+                    ScanPage += 1;
+                    show_scan_picker();
+                    return;
+                }
+                if (message == "< Prev") {
+                    ScanPage -= 1;
+                    if (ScanPage < 0) ScanPage = 0;
+                    show_scan_picker();
+                    return;
+                }
+                try_scan_pick(message);
                 return;
             }
 
@@ -815,9 +1003,8 @@ default {
                 return;
             }
 
-            if (mtype == "remote.collarready"
-             && (Phase == "discovering" || Phase == "install_discovering")) {
-                handle_collar_ready(message);
+            if (mtype == "remote.collarready" && Phase == "scanning") {
+                record_scan_response(message);
                 return;
             }
 
@@ -916,17 +1103,13 @@ default {
             cleanup_all();
             return;
         }
-        if (Phase == "discovering") {
-            notice("No collar responded. Make sure your collar is worn and you are within 20 meters.");
-            cleanup_all();
+        if (Phase == "scanning") {
+            // Scan window closed. finalize_scan handles 0/1/N cases.
+            finalize_scan();
             return;
         }
-        if (Phase == "install_discovering") {
-            // Wearer picked 'Existing collar' but no collar responded.
-            // Don't auto-fall-back to install_shim — they explicitly chose
-            // the existing-collar path. Surface the failure and let them
-            // re-touch to pick differently.
-            notice("No collar responded. Make sure your collar is worn and you are within 20 meters, or pick 'Empty object' to install onto a fresh prim.");
+        if (Phase == "scan_picking") {
+            notice("Picker timed out. Cancelling.");
             cleanup_all();
             return;
         }
