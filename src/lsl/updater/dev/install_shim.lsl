@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: install_shim.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Empty-target receiver for the installer's fresh-install path. Wearer
   drops this single script into an object they want to turn into a collar;
   it sets a remote-load PIN, announces itself on EXTERNAL_ACL_REPLY_CHAN, and
@@ -14,6 +14,7 @@ ARCHITECTURE: Lives alone in the fresh target object. Uses kmod_remote's
   already present (drop into a non-empty target is a user error, not a
   reinstall path; that's what 'Update Collar' is for).
 CHANGES:
+- v1.1 rev 4: Stamp prim description with "D/s Collar v1.1" (BRAND_DESC) on the success path instead of restoring the OriginalDesc — a fresh prim's blank desc was a missed branding opportunity. Failure paths still restore OriginalDesc. Tracked via Activated flag so cleanup_and_die doesn't clobber the brand.
 - v1.1 rev 3: Inhibit the half-installed collar during the bundle phase. state_entry now stamps the prim with UPDATER_MARKER after the safety checks; every collar script's dormancy guard (universal across 33 scripts) sees the marker in their state_entry and parks via llSetScriptState(self, FALSE). install.shim.done now calls activate_collar_scripts before cleanup_and_die: clear the desc, then llSetScriptState(name, TRUE) + llResetOtherScript(name) per script so they re-enter state_entry and init normally. OriginalDesc preserved across the marker stamp and restored on every cleanup path (success and failure).
 - v1.1 rev 2: Fix ready-message instruction — installer's permanent REPLY_CHAN listener picks up the broadcast automatically, so the wearer should NOT touch the installer again (doing so triggered 'session already in progress' because Phase = shim_offer_waiting).
 - v1.1 rev 1: Initial implementation. Mirrors update_shim's PIN/secure-channel
@@ -34,6 +35,12 @@ integer EXTERNAL_ACL_REPLY_CHAN = -8675310;
 // the installer linkset during packaging, state_entry parks it instead of
 // trying to announce.
 string UPDATER_MARKER = "COLLAR_UPDATER";
+
+// Authoritative prim description stamped on the successfully-installed
+// collar. Replaces whatever was there before (typically "" for a fresh
+// rezzed prim) so the new collar advertises itself clearly. On failure
+// paths the original description is restored instead.
+string BRAND_DESC = "D/s Collar v1.1";
 
 // How often we re-broadcast install.shim.ready until the installer acks.
 // 5 seconds is a comfortable cadence — fast enough that the wearer's next
@@ -59,9 +66,14 @@ integer Broadcasting = TRUE;
 float   ElapsedBroadcast = 0.0;
 
 // Saved object description from before we stamped UPDATER_MARKER. Restored
-// in cleanup_and_die on every exit path (success and failure) so the prim
-// is never left with the dormancy marker as a stuck description.
+// in cleanup_and_die on the failure paths (broadcast/install timeout,
+// CHANGED_OWNER) so the prim returns to its pre-install state. Success
+// path overwrites with BRAND_DESC instead.
 string  OriginalDesc = "";
+
+// Set in activate_collar_scripts on the success path so cleanup_and_die
+// knows not to clobber the brand description it just stamped.
+integer Activated = FALSE;
 
 
 /* -------------------- HELPERS -------------------- */
@@ -116,20 +128,25 @@ cleanup_and_die() {
     // Disarm the PIN so the installer can no longer load scripts into us
     // once the session is closed.
     llSetRemoteScriptAccessPin(0);
-    // Restore the prim's description in case activate_collar_scripts
-    // wasn't called (failure paths). Activate-then-cleanup already
-    // restored it; this is a no-op there.
-    llSetObjectDesc(OriginalDesc);
+    // Restore original desc only on failure paths. Success path already
+    // stamped BRAND_DESC in activate_collar_scripts and we mustn't clobber
+    // it.
+    if (!Activated) {
+        llSetObjectDesc(OriginalDesc);
+    }
     llRemoveInventory(llGetScriptName());
 }
 
 // Unpark every collar script that was loaded into this prim while the
-// dormancy marker was set. Clears the marker FIRST so the parked scripts'
-// state_entry doesn't re-park them when llResetOtherScript fires.
+// dormancy marker was set. Stamps BRAND_DESC FIRST so the parked scripts'
+// state_entry sees the new clean description (not the marker) and doesn't
+// re-park themselves when llResetOtherScript fires. Activated flag tells
+// cleanup_and_die to keep the brand intact.
 // Sequence per script: enable (parked scripts ignore llResetOtherScript),
-// then reset → state_entry runs, sees clean desc, initializes normally.
+// then reset → state_entry runs, sees BRAND_DESC, initializes normally.
 activate_collar_scripts() {
-    llSetObjectDesc(OriginalDesc);
+    llSetObjectDesc(BRAND_DESC);
+    Activated = TRUE;
 
     list names = [];
     integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
