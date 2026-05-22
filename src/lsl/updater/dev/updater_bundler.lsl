@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -13,9 +13,11 @@ PURPOSE: Installer child-prim script. Holds the staged collar inventory in
       driver. After LM_INSTALL_GO with the wearer's selection, ships the
       chosen scripts plus every bundler-only non-script.
     INSTALL_SHIM — on LM_INSTALL_SHIM_BEGIN, ships an unconditional script
-      set to an install_shim sitting in an empty target. No LIST/QUERY
-      handshake (target is empty by construction). No non-scripts (target
-      is unattached, llGiveInventory would pop a dialog per item).
+      set followed by all bundler-side animations / objects / notecards
+      to an install_shim sitting in an empty target. No LIST/QUERY
+      handshake (target is empty by construction). Same-owner
+      llGiveInventory is silent regardless of attached state, so the
+      non-script ship is just a flat loop — no shim cooperation needed.
 ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   updater_driver runs in the root prim. Chat protocol with the shim uses
   the per-session secure channel passed in LM_BUNDLE_BEGIN / LM_INSTALL_BEGIN.
@@ -23,6 +25,7 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+- v1.1 rev 7: install_shim mode now ships animations / objects / notecards after the script set, including the settings notecard (which is intentionally an example template on fresh install — wearers can customise defaults from it). Update and install-against-existing-collar paths still exclude the settings notecard at all three layers (build_candidates_typed / list_inventory_typed / verdict_for_typed) so wearer customisations are never overwritten. Earlier rev was over-cautious about llGiveInventory dialog floods — same-owner prim-to-prim transfer is silent regardless of attached state.
 - v1.1 rev 6: Add missing LM_FEATURES_QUERY handler. Constant was declared and the driver sent the message, but the bundler had no handler — install_shim flow hung at 'shim_features_querying' forever and the wearer's re-touches saw 'session already in progress'.
 - v1.1 rev 5: Add INSTALL and INSTALL_SHIM modes. Mode variable gates the diff predicate (intersect vs invert) and the dispatch shape. Feature grouping uses two hand-defined subsystem overrides (Leash, RLV — these don't decompose cleanly under the anchor heuristic) plus plugin_<name> anchor for everything else, with leftover core kmods collapsed into a single "Core Components" feature. Driver picks features via multi-select; bundler then ships the selected script set followed by all bundler-only non-scripts. The install-shim variant skips the shim handshake entirely — install_shim refused to start unless its prim was empty, so the bundler can ship via llRemoteLoadScriptPin without a per-item GIVE/SKIP roundtrip.
 - v1.1 rev 4: Update-only-installed model. Candidates is now intersected with CollarInv when each LIST/<type>-reply arrives, so the bundler only QUERYs items that are present in BOTH the bundler AND the collar — the rule is "known to the updater AND present in the collar gets refreshed; known but absent gets ignored; present but unknown stays." No SWEEP (would remove wearer customs); no auto-install of bundler-only items (wearer chose not to install them). ConditionalPairs / lookup_gate / Manifest / SWEEP / SWEPT machinery all retired — the general intersection rule subsumes the 3-script paired-kmod gate. Same model for scripts and non-scripts (animations, objects, notecards).
@@ -127,7 +130,11 @@ build_candidates() {
 
 // Build candidates for a non-script type. No namespace filter — the
 // bundler's own inventory IS the manifest of what's managed for
-// non-script types. Settings notecard is hard-excluded.
+// non-script types. Settings notecard is excluded HERE (update + install-
+// against-existing-collar paths) so a customised notecard is never
+// overwritten. The install_shim fresh-target path uses
+// ship_nonscripts_to_install_shim instead, which intentionally includes
+// settings as a starter template.
 build_candidates_typed(integer inv_type) {
     list buf = [];
     integer count = llGetInventoryNumber(inv_type);
@@ -467,8 +474,10 @@ start_next_query() {
 /* -------------------- INSTALL-SHIM SHIPPING (fresh target) -------------------- */
 // Empty-target ship path. install_shim refused to start unless its prim
 // was empty, so we ship the entire selected set unconditionally — no
-// LIST/QUERY handshake, no per-item verdict. Non-scripts are skipped
-// (target is unattached, llGiveInventory would pop a dialog per item).
+// LIST/QUERY handshake, no per-item verdict. Same-owner prim-to-prim
+// llGiveInventory is silent regardless of attached state, so non-scripts
+// (animations, objects, notecards) ship the same way as scripts: just
+// loop and call.
 ship_to_install_shim(list scripts) {
     integer n = llGetListLength(scripts);
     integer i = 0;
@@ -480,7 +489,26 @@ ship_to_install_shim(list scripts) {
         }
         i += 1;
     }
+    ship_nonscripts_to_install_shim(INVENTORY_ANIMATION);
+    ship_nonscripts_to_install_shim(INVENTORY_OBJECT);
+    ship_nonscripts_to_install_shim(INVENTORY_NOTECARD);
     notify_driver_done();
+}
+
+// Ship every bundler-side item of one non-script type to the install_shim
+// target. The settings notecard IS included here — it's an example
+// template for wearers who want to customise defaults. On update paths
+// it stays excluded (a customised notecard must not be overwritten); the
+// install_shim path is the only place we ship it because the target is
+// empty by construction and has no notecard to preserve.
+ship_nonscripts_to_install_shim(integer inv_type) {
+    integer count = llGetInventoryNumber(inv_type);
+    integer i = 0;
+    while (i < count) {
+        string name = llGetInventoryName(inv_type, i);
+        llGiveInventory(CollarKey, name);
+        i += 1;
+    }
 }
 
 
