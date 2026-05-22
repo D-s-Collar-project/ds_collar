@@ -1,30 +1,32 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
-  its own contents. On LM_BUNDLE_BEGIN from updater_driver, asks update_shim
-  for the collar's current inventory (scripts, animations, objects,
-  notecards), diffs by UUID, deposits scripts via llRemoteLoadScriptPin,
-  and ships non-scripts via direct prim-to-prim llGiveInventory(CollarKey,
-  item) — same-owner attached transfer is silent at script level and
-  bypasses both the accept dialog and RLV's edit-block, no wearer
-  interaction required.
+  its own contents. Three modes:
+    UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
+      inventory, intersects bundler ∩ collar, ships stale items.
+    INSTALL — on LM_INSTALL_BEGIN, same LIST step but inverts the diff to
+      bundler-MINUS-collar, groups the missing items into features (Leash
+      Subsystem / RLV Subsystem overrides + plugin_<name> anchor heuristic
+      + Core Components catchall), and returns the feature list to the
+      driver. After LM_INSTALL_GO with the wearer's selection, ships the
+      chosen scripts plus every bundler-only non-script.
+    INSTALL_SHIM — on LM_INSTALL_SHIM_BEGIN, ships an unconditional script
+      set to an install_shim sitting in an empty target. No LIST/QUERY
+      handshake (target is empty by construction). No non-scripts (target
+      is unattached, llGiveInventory would pop a dialog per item).
 ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   updater_driver runs in the root prim. Chat protocol with the shim uses
-  the per-session secure channel passed in LM_BUNDLE_BEGIN. Items to be
-  transferred must exist in THIS prim's inventory — llRemoteLoadScriptPin
-  and llGiveInventory both source from the calling script's own prim.
+  the per-session secure channel passed in LM_BUNDLE_BEGIN / LM_INSTALL_BEGIN.
+  Items to be transferred must exist in THIS prim's inventory —
+  llRemoteLoadScriptPin and llGiveInventory both source from the calling
+  script's own prim.
 CHANGES:
+- v1.1 rev 5: Add INSTALL and INSTALL_SHIM modes. Mode variable gates the diff predicate (intersect vs invert) and the dispatch shape. Feature grouping uses two hand-defined subsystem overrides (Leash, RLV — these don't decompose cleanly under the anchor heuristic) plus plugin_<name> anchor for everything else, with leftover core kmods collapsed into a single "Core Components" feature. Driver picks features via multi-select; bundler then ships the selected script set followed by all bundler-only non-scripts. The install-shim variant skips the shim handshake entirely — install_shim refused to start unless its prim was empty, so the bundler can ship via llRemoteLoadScriptPin without a per-item GIVE/SKIP roundtrip.
 - v1.1 rev 4: Update-only-installed model. Candidates is now intersected with CollarInv when each LIST/<type>-reply arrives, so the bundler only QUERYs items that are present in BOTH the bundler AND the collar — the rule is "known to the updater AND present in the collar gets refreshed; known but absent gets ignored; present but unknown stays." No SWEEP (would remove wearer customs); no auto-install of bundler-only items (wearer chose not to install them). ConditionalPairs / lookup_gate / Manifest / SWEEP / SWEPT machinery all retired — the general intersection rule subsumes the 3-script paired-kmod gate. Same model for scripts and non-scripts (animations, objects, notecards).
 - v1.1 rev 3: Extend the script-only diff to a typed phase machine that also covers animations, objects, and notecards. After SWEPT, walk LIST_ANIM / LIST_OBJ / LIST_NC and per-item QUERY_<type>; the shim wipes stale items synchronously and reports GIVE. Bundler then calls llGiveInventory(CollarKey, item) per GIVE — same-owner attached transfer is silent (the "attached = treated as agent" rule applies to cross-owner cases only) and bypasses RLV's edit-block. No SWEEP for non-scripts; items in collar not in bundler are wearer's customs and stay. Settings notecard ("settings") hard-excluded at both ends. Mirrors OpenCollar's update mechanism.
-- v1.1 rev 2: Drop notecard manifest. Replaced by inventory diff: enumerate
-  this prim's collar-namespace scripts, ask shim for collar's collar-namespace
-  inventory via LIST, ship missing/stale ones, then SWEEP collar of any
-  collar-namespace script not in the keep-manifest. Conditional pairs
-  (kmod_leash, kmod_particles, leash_holder all gated on plugin_leash) are
-  hardcoded here — gated kmods only ship if the gate plugin is present in
-  collar OR being shipped this update. Removed dataserver/notecard reader.
+- v1.1 rev 2: Drop notecard manifest. Replaced by inventory diff.
 - v1.1 rev 1: Add CONDITIONAL bundle mode (superseded by rev 2).
 - v1.1 rev 0: Initial implementation.
 --------------------*/
@@ -32,8 +34,12 @@ CHANGES:
 
 /* -------------------- LINK-MESSAGE NUMBERS -------------------- */
 // Must match updater_driver.
-integer LM_BUNDLE_BEGIN = 91001;
-integer LM_BUNDLE_DONE  = 91002;
+integer LM_BUNDLE_BEGIN        = 91001;
+integer LM_BUNDLE_DONE         = 91002;
+integer LM_INSTALL_BEGIN       = 91003;  // driver→bundler: discover & report features
+integer LM_INSTALL_FEATURES    = 91004;  // bundler→driver: feature list
+integer LM_INSTALL_GO          = 91005;  // driver→bundler: scripts CSV selected
+integer LM_INSTALL_SHIM_BEGIN  = 91006;  // driver→bundler: ship blind to install_shim
 
 
 /* -------------------- CONSTANTS -------------------- */
@@ -47,16 +53,14 @@ string UPDATER_MARKER = "COLLAR_UPDATER";
 // ships and the wearer's existing settings notecard is never wiped.
 string SETTINGS_NOTECARD = "settings";
 
-// (ConditionalPairs retired in rev 4 — the general "Candidates =
-//  CollarInv ∩ BundlerInv" intersection makes the paired-kmod gate
-//  redundant: kmod_leash / kmod_particles / leash_holder are only ever
-//  queried if the collar already has them, so a wearer who doesn't have
-//  plugin_leash also doesn't have them and they get filtered out
-//  automatically. No hand-curated pairs list needed.)
-
 
 /* -------------------- STATE -------------------- */
-// Per-bundle context, populated from LM_BUNDLE_BEGIN and cleared on DONE.
+// "update" | "install" | "install_shim". Set on the LM_*_BEGIN that
+// kicked off the current session; gates the diff predicate (intersect vs
+// invert) and the post-script behaviour.
+string  Mode = "";
+
+// Per-session context.
 key     CollarKey = NULL_KEY;
 integer CollarPin = 0;
 integer SecureChannel = 0;
@@ -64,13 +68,9 @@ integer SecureChannel = 0;
 // Collar's current collar-namespace inventory, learned via LIST/INV.
 list    CollarInv = [];
 
-// Local candidates (this prim's collar-namespace scripts, in iteration order).
+// Local candidates (this prim's collar-namespace scripts for the current phase).
 list    Candidates = [];
 integer CandIdx = 0;
-
-// (Manifest list retired in rev 4 — was only used for the SWEEP keep-list,
-//  which is gone now that we no longer remove collar items the bundler
-//  doesn't carry.)
 
 // Name of the item currently awaiting a REPLY from the shim.
 string  PendingName = "";
@@ -78,12 +78,15 @@ string  PendingName = "";
 // Listen on SecureChannel for shim INV / REPLY / typed messages.
 integer SecureListen = 0;
 
-// Phase machine. Each phase iterates Candidates (this prim's inventory of
-// that type) via QUERY_<verb>; the shim wipes stale and replies with a
-// verdict. Order is fixed: scripts → animations → objects → notecards.
-// Scripts ship via llRemoteLoadScriptPin (still); non-scripts ship via
-// direct llGiveInventory(CollarKey, item) inside the typed REPLY handler.
+// Phase machine. Order is fixed: scripts → animations → objects → notecards.
+// In install mode the scripts phase pauses after diff to await the wearer's
+// feature selection (LM_INSTALL_GO); typed phases run unconditionally
+// against the bundler-only set.
 string  TypePhase = "";
+
+// Install-mode only: scripts the wearer picked from the feature menu.
+// Set by LM_INSTALL_GO; iterated in install-ship loop.
+list    InstallScripts = [];
 
 
 /* -------------------- HELPERS -------------------- */
@@ -100,11 +103,8 @@ integer is_collar_script(string name) {
 }
 
 // Build the candidates list: every collar-namespace script in this prim,
-// excluding self. update_shim is filtered out by namespace anyway, but
-// guard explicitly in case a packager dropped it here by mistake.
-// Collects into a local list with refcount 1 (O(n) amortized) and
-// assigns to the global once at the end; appending directly to the
-// global is O(n²) because the global slot holds a second reference.
+// excluding self and the shim. Local buf with refcount 1 → assigned to
+// the global once (avoids O(n²) on the global slot).
 build_candidates() {
     list buf = [];
     string self = llGetScriptName();
@@ -112,7 +112,10 @@ build_candidates() {
     integer i = 0;
     while (i < count) {
         string name = llGetInventoryName(INVENTORY_SCRIPT, i);
-        if (name != self && name != "update_shim" && is_collar_script(name)) {
+        if (name != self
+         && name != "update_shim"
+         && name != "install_shim"
+         && is_collar_script(name)) {
             buf += [name];
         }
         i += 1;
@@ -122,9 +125,7 @@ build_candidates() {
 
 // Build candidates for a non-script type. No namespace filter — the
 // bundler's own inventory IS the manifest of what's managed for
-// non-script types. Settings notecard is hard-excluded so a stray
-// template never ships and the wearer's persisted settings stay intact.
-// Same local-buf pattern as build_candidates above.
+// non-script types. Settings notecard is hard-excluded.
 build_candidates_typed(integer inv_type) {
     list buf = [];
     integer count = llGetInventoryNumber(inv_type);
@@ -160,6 +161,7 @@ string query_verb_for_phase() {
 cleanup_bundle() {
     if (SecureListen) llListenRemove(SecureListen);
     SecureListen = 0;
+    Mode = "";
     CollarKey = NULL_KEY;
     CollarPin = 0;
     SecureChannel = 0;
@@ -168,6 +170,7 @@ cleanup_bundle() {
     CandIdx = 0;
     PendingName = "";
     TypePhase = "";
+    InstallScripts = [];
 }
 
 notify_driver_done() {
@@ -175,10 +178,198 @@ notify_driver_done() {
     cleanup_bundle();
 }
 
-// Begin a new phase. Sets TypePhase, builds the type-specific candidate
-// list, and either asks the shim for the collar's current inventory of
-// that type (LIST_<verb>) or — if the bundler has nothing of that type —
-// skips directly to the next phase without burning a shim round-trip.
+// Apply the diff predicate. In update mode, Candidates ∩ CollarInv (we
+// only refresh items the collar already has). In install mode, Candidates
+// MINUS CollarInv (we only ship items the collar is missing).
+list apply_diff_predicate(list cands, list collar_inv) {
+    list out = [];
+    integer ci = 0;
+    integer cn = llGetListLength(cands);
+    while (ci < cn) {
+        string cand = llList2String(cands, ci);
+        integer present = (llListFindList(collar_inv, [cand]) != -1);
+        if (Mode == "install") {
+            if (!present) out += [cand];
+        } else {
+            if (present) out += [cand];
+        }
+        ci += 1;
+    }
+    return out;
+}
+
+
+/* -------------------- FEATURE GROUPING (install mode) -------------------- */
+// Two hand-defined subsystems for items that don't decompose under the
+// plugin_<name> anchor heuristic, plus a Core Components catchall for
+// kernel-side kmods that have no plugin_<name> peer.
+//
+// RLV subsystem: kmod_rlv + every plugin that issues rlv.* link-messages
+// or @-commands. Anchor heuristic would split these across multiple
+// per-plugin features and leave kmod_rlv orphaned in Core; group them.
+// Verified set as of v1.1 rev 5: plugin_outfits, plugin_folders,
+// plugin_relay, plugin_restrict, plugin_rlvex, plugin_strip.
+//
+// Leash subsystem: anchor heuristic would group plugin_leash with the
+// kmod_leash_* pair correctly, but leash_holder doesn't share the
+// "leash" token in the right shape (no plugin_holder), and kmod_particles
+// is only used by leash. Group all seven explicitly.
+
+list rlv_members() {
+    return [
+        "kmod_rlv",
+        "plugin_outfits",
+        "plugin_folders",
+        "plugin_relay",
+        "plugin_restrict",
+        "plugin_rlvex",
+        "plugin_strip"
+    ];
+}
+
+list leash_members() {
+    return [
+        "kmod_leash_proto",
+        "kmod_leash_engine",
+        "kmod_particles",
+        "plugin_leash",
+        "plugin_leash_avatar",
+        "plugin_leash_object",
+        "leash_holder"
+    ];
+}
+
+// Capitalize the first letter of an anchor token for menu display.
+// "blacklist" → "Blacklist", "animate" → "Animate".
+string capitalize(string s) {
+    if (s == "") return s;
+    return llToUpper(llGetSubString(s, 0, 0)) + llGetSubString(s, 1, -1);
+}
+
+// Extract the anchor token from a plugin_<name>[_<sub>] script name.
+// "plugin_blacklist" → "blacklist", "plugin_leash_avatar" → "leash".
+// Used by the anchor pass to find related kmod_<anchor>* / plugin_<anchor>*
+// scripts in the missing-items set.
+string anchor_of(string plugin_name) {
+    string tail = llGetSubString(plugin_name, 7, -1);  // strip "plugin_"
+    integer us = llSubStringIndex(tail, "_");
+    if (us >= 0) tail = llGetSubString(tail, 0, us - 1);
+    return tail;
+}
+
+// Pull every name in `pool` that matches the anchor's plugin/kmod/control
+// pattern. Removes matches from `pool` (caller reassigns).
+list pull_anchor_matches(string anchor, list pool) {
+    list matches = [];
+    string p_exact = "plugin_" + anchor;
+    string p_pref  = "plugin_" + anchor + "_";
+    string k_exact = "kmod_" + anchor;
+    string k_pref  = "kmod_" + anchor + "_";
+    string c_exact = "control_" + anchor;
+    string c_pref  = "control_" + anchor + "_";
+
+    integer i = 0;
+    integer n = llGetListLength(pool);
+    while (i < n) {
+        string name = llList2String(pool, i);
+        integer hit = FALSE;
+        if (name == p_exact || name == k_exact || name == c_exact) hit = TRUE;
+        else if (llSubStringIndex(name, p_pref) == 0) hit = TRUE;
+        else if (llSubStringIndex(name, k_pref) == 0) hit = TRUE;
+        else if (llSubStringIndex(name, c_pref) == 0) hit = TRUE;
+        if (hit) matches += [name];
+        i += 1;
+    }
+    return matches;
+}
+
+// Pull every name in `pool` that's listed in `subset`. Returns the
+// intersection; caller subtracts matches from pool afterward.
+list pull_subset(list subset, list pool) {
+    list out = [];
+    integer i = 0;
+    integer n = llGetListLength(subset);
+    while (i < n) {
+        string name = llList2String(subset, i);
+        if (llListFindList(pool, [name]) != -1) out += [name];
+        i += 1;
+    }
+    return out;
+}
+
+// Return `pool` minus every name in `removed`.
+list list_subtract(list pool, list removed) {
+    list out = [];
+    integer i = 0;
+    integer n = llGetListLength(pool);
+    while (i < n) {
+        string name = llList2String(pool, i);
+        if (llListFindList(removed, [name]) == -1) out += [name];
+        i += 1;
+    }
+    return out;
+}
+
+// Group the bundler-only script list into features. Result is a flat
+// stride-2 list: [label_0, scripts_csv_0, label_1, scripts_csv_1, ...].
+// Stride-2 because LSL has no struct type and encoding as JSON would
+// double the parse cost on the driver side.
+list group_into_features(list missing) {
+    list result = [];
+    list pool = missing;
+
+    // 1. RLV subsystem override.
+    list rlv = pull_subset(rlv_members(), pool);
+    if (llGetListLength(rlv) > 0) {
+        result += ["RLV Subsystem", llDumpList2String(rlv, ",")];
+        pool = list_subtract(pool, rlv);
+    }
+
+    // 2. Leash subsystem override.
+    list leash = pull_subset(leash_members(), pool);
+    if (llGetListLength(leash) > 0) {
+        result += ["Leash Subsystem", llDumpList2String(leash, ",")];
+        pool = list_subtract(pool, leash);
+    }
+
+    // 3. plugin_<name> anchor heuristic. Iterate every remaining
+    // plugin_* and group its anchor's related kmod/control/sub-plugin.
+    integer i = 0;
+    while (i < llGetListLength(pool)) {
+        string name = llList2String(pool, i);
+        if (llSubStringIndex(name, "plugin_") == 0) {
+            string anchor = anchor_of(name);
+            list grp = pull_anchor_matches(anchor, pool);
+            if (llGetListLength(grp) > 0) {
+                result += [capitalize(anchor), llDumpList2String(grp, ",")];
+                pool = list_subtract(pool, grp);
+                // Don't increment i — pool shrank, and the next item now
+                // occupies the current index.
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    // 4. Leftovers (collar_kernel, kmod_auth, kmod_bootstrap, etc.) →
+    // single "Core Components" feature. These are the kernel-side kmods
+    // with no plugin_<name> peer and the kernel itself.
+    if (llGetListLength(pool) > 0) {
+        result += ["Core Components", llDumpList2String(pool, ",")];
+    }
+
+    return result;
+}
+
+
+/* -------------------- PHASE PROGRESSION -------------------- */
+
+// Begin a new phase. In install mode the scripts phase pauses after the
+// diff (we send features to the driver and wait for LM_INSTALL_GO); typed
+// phases (animations/objects/notecards) ship all bundler-only items
+// straight through.
 begin_phase(string phase) {
     TypePhase = phase;
     CollarInv = [];
@@ -215,15 +406,50 @@ advance_phase() {
     else if (TypePhase == "notecards")  begin_phase("done");
 }
 
-// Send the next typed QUERY. Candidates was pre-intersected with
-// CollarInv before this function ran (in the LIST/<type>-reply handler),
-// so every entry is guaranteed to be both in this bundler AND in the
-// collar — exactly the "known to the updater AND present in the collar"
-// scope. No gate checks needed; no SWEEP needed. On exhaustion, advance
-// straight to the next phase.
+// In install mode, "ship" the candidates phase by iterating selected
+// scripts (for the scripts phase) or every candidate (for typed phases —
+// inverse intersection was already applied).
+//
+// For UPDATE mode, this is the same loop as before: QUERY each candidate
+// to check UUID staleness and ship via PIN if GIVE.
 start_next_query() {
-    string verb = query_verb_for_phase();
     integer n = llGetListLength(Candidates);
+
+    // INSTALL mode, scripts phase: candidates are already the wearer's
+    // selected scripts. No QUERY needed (we know they're missing).
+    // Ship directly via llRemoteLoadScriptPin (3s sleep per call).
+    if (Mode == "install" && TypePhase == "scripts") {
+        if (CandIdx < n) {
+            string name = llList2String(Candidates, CandIdx);
+            llRemoteLoadScriptPin(CollarKey, name, CollarPin, TRUE, 0);
+            CandIdx += 1;
+            // Tail-call into ourselves for the next ship. The 3s sleep
+            // in llRemoteLoadScriptPin keeps the event queue from
+            // flooding; no explicit pacing needed.
+            start_next_query();
+            return;
+        }
+        advance_phase();
+        return;
+    }
+
+    // INSTALL mode, typed phases: candidates are the bundler-only set
+    // for this type. llGiveInventory unconditionally (target is attached
+    // because discovery succeeded → collar is worn).
+    if (Mode == "install") {
+        if (CandIdx < n) {
+            string name = llList2String(Candidates, CandIdx);
+            llGiveInventory(CollarKey, name);
+            CandIdx += 1;
+            start_next_query();
+            return;
+        }
+        advance_phase();
+        return;
+    }
+
+    // UPDATE mode: per-item QUERY → shim verdict → ship or skip.
+    string verb = query_verb_for_phase();
     if (CandIdx < n) {
         string name = llList2String(Candidates, CandIdx);
         PendingName = name;
@@ -236,13 +462,32 @@ start_next_query() {
 }
 
 
+/* -------------------- INSTALL-SHIM SHIPPING (fresh target) -------------------- */
+// Empty-target ship path. install_shim refused to start unless its prim
+// was empty, so we ship the entire selected set unconditionally — no
+// LIST/QUERY handshake, no per-item verdict. Non-scripts are skipped
+// (target is unattached, llGiveInventory would pop a dialog per item).
+ship_to_install_shim(list scripts) {
+    integer n = llGetListLength(scripts);
+    integer i = 0;
+    while (i < n) {
+        string name = llList2String(scripts, i);
+        // Source must exist in this prim — packager error otherwise.
+        if (llGetInventoryType(name) == INVENTORY_SCRIPT) {
+            llRemoteLoadScriptPin(CollarKey, name, CollarPin, TRUE, 0);
+        }
+        i += 1;
+    }
+    notify_driver_done();
+}
+
+
 /* -------------------- EVENTS -------------------- */
 
 default {
     state_entry() {
         // Mark this child prim with the dormancy marker so dragged-in
-        // collar scripts park themselves. Safe to set even if the root
-        // also carries the marker.
+        // collar scripts park themselves.
         llSetObjectDesc(UPDATER_MARKER);
         cleanup_bundle();
     }
@@ -256,37 +501,108 @@ default {
     }
 
     link_message(integer sender, integer num, string msg, key id) {
-        if (num != LM_BUNDLE_BEGIN) return;
+        // ----- UPDATE mode start -----
+        if (num == LM_BUNDLE_BEGIN) {
+            if (Mode != "") return;  // session already in progress
 
-        // Refuse if a session is already in progress; driver should serialise.
-        if (SecureChannel != 0) return;
+            string collar_str  = llJsonGetValue(msg, ["collar"]);
+            string pin_str     = llJsonGetValue(msg, ["pin"]);
+            string channel_str = llJsonGetValue(msg, ["channel"]);
+            if (collar_str == JSON_INVALID) return;
+            if (pin_str == JSON_INVALID) return;
+            if (channel_str == JSON_INVALID) return;
 
-        // Validate payload fields up front. Missing keys return
-        // JSON_INVALID, which would (key)-cast to NULL_KEY and
-        // (integer)-cast to 0 — both are silently broken downstream.
-        string collar_str  = llJsonGetValue(msg, ["collar"]);
-        string pin_str     = llJsonGetValue(msg, ["pin"]);
-        string channel_str = llJsonGetValue(msg, ["channel"]);
-        if (collar_str == JSON_INVALID) return;
-        if (pin_str == JSON_INVALID) return;
-        if (channel_str == JSON_INVALID) return;
+            Mode = "update";
+            CollarKey     = (key)collar_str;
+            CollarPin     = (integer)pin_str;
+            SecureChannel = (integer)channel_str;
 
-        CollarKey     = (key)collar_str;
-        CollarPin     = (integer)pin_str;
-        SecureChannel = (integer)channel_str;
+            TypePhase = "scripts";
+            build_candidates();
+            SecureListen = llListen(SecureChannel, "", CollarKey, "");
 
-        TypePhase = "scripts";
-        build_candidates();
-        SecureListen = llListen(SecureChannel, "", CollarKey, "");
-
-        if (llGetListLength(Candidates) == 0) {
-            // No scripts staged in this installer. Don't bail — the
-            // packager may have included only non-scripts. Advance to
-            // the first non-script phase.
-            advance_phase();
+            if (llGetListLength(Candidates) == 0) {
+                advance_phase();
+                return;
+            }
+            llWhisper(SecureChannel, "LIST");
             return;
         }
-        llWhisper(SecureChannel, "LIST");
+
+        // ----- INSTALL mode start (discovered collar) -----
+        if (num == LM_INSTALL_BEGIN) {
+            if (Mode != "") return;
+
+            string collar_str  = llJsonGetValue(msg, ["collar"]);
+            string pin_str     = llJsonGetValue(msg, ["pin"]);
+            string channel_str = llJsonGetValue(msg, ["channel"]);
+            if (collar_str == JSON_INVALID) return;
+            if (pin_str == JSON_INVALID) return;
+            if (channel_str == JSON_INVALID) return;
+
+            Mode = "install";
+            CollarKey     = (key)collar_str;
+            CollarPin     = (integer)pin_str;
+            SecureChannel = (integer)channel_str;
+
+            TypePhase = "scripts";
+            build_candidates();
+            SecureListen = llListen(SecureChannel, "", CollarKey, "");
+
+            if (llGetListLength(Candidates) == 0) {
+                // Nothing to install — bundler has no scripts staged.
+                // Skip to typed phases anyway in case non-scripts exist.
+                advance_phase();
+                return;
+            }
+            llWhisper(SecureChannel, "LIST");
+            return;
+        }
+
+        // ----- INSTALL mode: wearer's selection from feature picker -----
+        if (num == LM_INSTALL_GO) {
+            if (Mode != "install") return;
+            if (TypePhase != "scripts_await") return;
+
+            string csv = llJsonGetValue(msg, ["scripts"]);
+            if (csv == JSON_INVALID) csv = "";
+            list selected = [];
+            if (csv != "") selected = llCSV2List(csv);
+
+            // Replace Candidates with the wearer's selection. start_next_query
+            // in install/scripts mode iterates Candidates without QUERY.
+            Candidates = selected;
+            CandIdx = 0;
+            TypePhase = "scripts";
+
+            if (llGetListLength(Candidates) == 0) {
+                advance_phase();
+                return;
+            }
+            start_next_query();
+            return;
+        }
+
+        // ----- INSTALL_SHIM mode (empty target) -----
+        if (num == LM_INSTALL_SHIM_BEGIN) {
+            if (Mode != "") return;
+
+            string shim_str = llJsonGetValue(msg, ["shim"]);
+            string pin2_str = llJsonGetValue(msg, ["pin"]);
+            string csv2     = llJsonGetValue(msg, ["scripts"]);
+            if (shim_str == JSON_INVALID) return;
+            if (pin2_str == JSON_INVALID) return;
+            if (csv2 == JSON_INVALID) csv2 = "";
+
+            Mode = "install_shim";
+            CollarKey = (key)shim_str;
+            CollarPin = (integer)pin2_str;
+
+            list scripts = [];
+            if (csv2 != "") scripts = llCSV2List(csv2);
+            ship_to_install_shim(scripts);
+            return;
+        }
     }
 
     listen(integer channel, string name, key id, string message) {
@@ -296,46 +612,42 @@ default {
         list parts = llParseString2List(message, ["|"], []);
         string verb = llList2String(parts, 0);
 
-        // CollarInv-load verbs (one per phase). The shim's CSV of what
-        // the collar currently has of the current type — replies to LIST
-        // (scripts) / LIST_ANIM / LIST_OBJ / LIST_NC. Intersect the
-        // bundler-side Candidates with this CollarInv so we only ever
-        // QUERY items that are present in BOTH ends — the "known to the
-        // updater AND present in the collar" rule. Items only in the
-        // bundler get filtered out here (wearer chose not to install
-        // them); items only in the collar are wearer customs that the
-        // updater never touches.
+        // CollarInv-load verbs. INSTALL mode inverts the diff to
+        // bundler-MINUS-collar; UPDATE keeps the existing intersection.
+        // For scripts in install mode, after the diff we group into
+        // features and pause for the driver's LM_INSTALL_GO instead of
+        // shipping straight away.
         if (verb == "INV" || verb == "ANIM" || verb == "OBJ" || verb == "NC") {
             string csv = "";
             if (llGetListLength(parts) >= 2) csv = llList2String(parts, 1);
             CollarInv = [];
             if (csv != "") CollarInv = llCSV2List(csv);
 
-            list intersected = [];
-            integer ci = 0;
-            integer cn = llGetListLength(Candidates);
-            while (ci < cn) {
-                string cand = llList2String(Candidates, ci);
-                if (llListFindList(CollarInv, [cand]) != -1) intersected += [cand];
-                ci += 1;
-            }
-            Candidates = intersected;
-
+            Candidates = apply_diff_predicate(Candidates, CollarInv);
             CandIdx = 0;
+
             if (llGetListLength(Candidates) == 0) {
                 advance_phase();
                 return;
             }
+
+            // Install scripts phase: hand off to driver for wearer's pick.
+            if (Mode == "install" && TypePhase == "scripts") {
+                list features = group_into_features(Candidates);
+                string payload = llList2Json(JSON_OBJECT, [
+                    "features", llList2Json(JSON_ARRAY, features)
+                ]);
+                llMessageLinked(LINK_SET, LM_INSTALL_FEATURES, payload, NULL_KEY);
+                TypePhase = "scripts_await";
+                return;
+            }
+
             start_next_query();
             return;
         }
 
+        // UPDATE mode: per-script verdict.
         if (verb == "REPLY") {
-            // REPLY|<name>|<verdict> for scripts. Candidates were
-            // pre-intersected with CollarInv so we know the collar has
-            // this name — GIVE here means "stale UUID, ship the new
-            // version via PIN" (3s sleep). SKIP means "matching UUID,
-            // nothing to do".
             if (llGetListLength(parts) < 3) return;
             string replied_name = llList2String(parts, 1);
             string verdict = llList2String(parts, 2);
@@ -344,19 +656,12 @@ default {
             if (verdict == "GIVE") {
                 llRemoteLoadScriptPin(CollarKey, replied_name, CollarPin, TRUE, 0);
             }
-            // SKIP / anything else: do nothing.
             CandIdx += 1;
             start_next_query();
             return;
         }
 
-        // REPLY_ANIM / REPLY_OBJ / REPLY_NC — non-script verdicts.
-        // Same pre-intersection guarantee as REPLY: collar has it,
-        // GIVE means stale, SKIP means current, EXCLUDE means settings
-        // notecard (drop). Same-owner attached prim-to-prim
-        // llGiveInventory is silent at script level — no dialog, no
-        // wearer interaction, lands in the collar's inventory and
-        // bypasses RLV's edit-block.
+        // UPDATE mode: per-non-script verdict.
         if (verb == "REPLY_ANIM" || verb == "REPLY_OBJ" || verb == "REPLY_NC") {
             if (llGetListLength(parts) < 3) return;
             string nspt_name = llList2String(parts, 1);
