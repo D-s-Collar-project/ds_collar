@@ -1,18 +1,17 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — broadcasts remote.updatediscover, deposits update_shim
       via llRemoteLoadScriptPin, signals the bundler for an intersection
       refresh pass (existing flow).
-    INSTALL SCRIPTS — discovery as above; on success the bundler reports a
-      feature list (bundler-MINUS-collar, grouped), the driver shows a
-      multi-select picker, and the bundler ships the wearer's selection.
-      On discovery failure, the driver hands the wearer an install_shim,
-      waits for its ready broadcast from the empty target, then offers
-      Minimal / Full / Bespoke install modes.
+    INSTALL SCRIPTS — sub-menu picks between 'Existing collar' (discovery,
+      then bundler reports missing features as a multi-select picker, then
+      ships the wearer's selection via update_shim) and 'Empty object'
+      (hand over install_shim, wait for its ready broadcast from the fresh
+      target, then offer Minimal / Full / Bespoke).
 ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   runs in a child prim and holds the staged collar scripts. Chat protocol
   with collar uses kmod_remote's EXTERNAL_ACL_QUERY_CHAN / REPLY_CHAN; chat
@@ -20,6 +19,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 4: Make the install fork explicit. Picking 'Install Scripts' now opens a sub-menu [Existing collar / Empty object / Cancel] instead of auto-branching on discovery success/failure. Discovery-based branching pre-empted the install_shim path whenever the wearer's collar was in range, so 'Empty object' fresh-installs were silently impossible. Existing-collar timeout no longer falls back to install_shim — the wearer chose that path explicitly, so surface the timeout and let them re-touch.
 - v1.1 rev 3: Add Install Scripts path. Top-level touch menu forks update vs install; install discovers, then either runs a multi-select feature picker against a discovered collar or hands the wearer install_shim for fresh-install onto an empty target (Minimal / Full / Bespoke). Bespoke walks features sequentially with Yes/No prompts. Pagination at 9 features per page.
 - v1.1 rev 2: Drop multi-bundle iteration.
 - v1.1 rev 1: Add collar-driven invitation entry.
@@ -196,6 +196,20 @@ show_main_menu(key who) {
       + "Update Collar — refresh an existing collar.\n"
       + "Install Scripts — install missing components, or fresh-install onto an empty object.",
         ["Update Collar", "Install Scripts", "Cancel"]);
+}
+
+// Sub-menu shown when wearer picks "Install Scripts" from the main menu.
+// Forks explicitly between the two install paths — discovery-based
+// branching was ambiguous because a worn collar would always be found
+// and pre-empt the install_shim path even when the wearer wanted a
+// fresh install onto a new prim.
+show_install_submenu() {
+    Phase = "install_submenu";
+    open_dialog(Wearer,
+        "Install target:\n\n"
+      + "Existing collar — discover your worn collar and install missing components.\n"
+      + "Empty object — receive install_shim, drop it into a fresh prim, then pick a profile.",
+        ["Existing collar", "Empty object", "Cancel"]);
 }
 
 
@@ -701,6 +715,18 @@ default {
                     return;
                 }
                 if (message == "Install Scripts") {
+                    show_install_submenu();
+                    return;
+                }
+                if (message == "Cancel") {
+                    cleanup_all();
+                    return;
+                }
+                return;
+            }
+
+            if (Phase == "install_submenu") {
+                if (message == "Existing collar") {
                     if (DialogListen) llListenRemove(DialogListen);
                     DialogListen = 0;
                     DialogChan = 0;
@@ -714,6 +740,13 @@ default {
                     llRegionSay(EXTERNAL_ACL_QUERY_CHAN, msg);
                     llSetTimerEvent(DISCOVERY_TIMEOUT);
                     notice("Searching for collar...");
+                    return;
+                }
+                if (message == "Empty object") {
+                    if (DialogListen) llListenRemove(DialogListen);
+                    DialogListen = 0;
+                    DialogChan = 0;
+                    offer_install_shim();
                     return;
                 }
                 if (message == "Cancel") {
@@ -889,8 +922,16 @@ default {
             return;
         }
         if (Phase == "install_discovering") {
-            // Discovery failed → offer install_shim for fresh-install path.
-            offer_install_shim();
+            // Wearer picked 'Existing collar' but no collar responded.
+            // Don't auto-fall-back to install_shim — they explicitly chose
+            // the existing-collar path. Surface the failure and let them
+            // re-touch to pick differently.
+            notice("No collar responded. Make sure your collar is worn and you are within 20 meters, or pick 'Empty object' to install onto a fresh prim.");
+            cleanup_all();
+            return;
+        }
+        if (Phase == "install_submenu") {
+            cleanup_all();
             return;
         }
         if (Phase == "shim_loading" || Phase == "install_shim_loading") {
