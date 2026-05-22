@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bespoke_ui.lsl
 VERSION: 1.10
-REVISION: 2
+REVISION: 4
 PURPOSE: Bespoke install UI for the install_shim (fresh-target) path.
   Driver hands off via LM_BESPOKE_START with wearer / shim / pin; this
   script presents a one-stop toggle dialog of subsystems (HUD, Animations,
@@ -22,6 +22,8 @@ ARCHITECTURE: Lives in the same prim as updater_driver (the installer
   hard-coded here per the user spec rather than derived from the
   bundler's heuristic grouping.
 CHANGES:
+- v1.10 rev 4: Add existing-collar mode. LM_BESPOKE_START now accepts an "existing":"1" flag plus a "missing" CSV (the bundler-MINUS-collar diff result). When set: skip the core-scripts pre-seed (collar already has core), build DisplayedSubs / DisplayedRlv filtered to subsystems / RLV plugins where at least one script is missing, and apply filter_missing to every selected script at commit so already-installed items don't re-load. Same fixed subsystem definitions serve both fresh-install and existing-collar paths — the only difference is the Displayed* filter and the core-seed gate. kmod_rlv inclusion stays paired with RLV plugin selection AND filtered through filter_missing (so the kmod doesn't reship if the collar already has it).
+- v1.10 rev 3: Button-label padding uses " " (single space) instead of "" (empty string). LSL rejects empty-string labels and the dialog wouldn't render cleanly; matches the project's blank-filler convention from the dialog convention memory. Also replaced the bespoke_rlv_plugins() function with SUBSYSTEM_KMOD + SUBSYSTEM_PLUGINS globals so the RLV kmod and its plugins are paired structurally — no dedupe needed.
 - v1.10 rev 2: Replace sequential Yes/No walk with a one-stop toggle
   dialog plus secondary RLV plugin picker. Numbered list pattern (body
   text carries [X]/[ ] markers + labels; buttons are just digits) per
@@ -64,10 +66,29 @@ integer DialogListen = 0;
 string  Phase = "";
 integer Page  = 0;
 
-// Toggle state. SubSelected is parallel to bespoke_subsystems() (one
-// slot per subsystem; RLV's slot is unused — its on/off mark is derived
-// from RlvSelected at render time). RlvSelected is parallel to
-// SUBSYSTEM_PLUGINS. Both are 0/1 integer lists.
+// Existing-collar mode flag. When TRUE, MissingScripts holds the names
+// of scripts the collar is missing (from the bundler's diff), DisplayedSubs
+// / DisplayedRlv filter out subsystems where nothing is missing, the
+// core-scripts pre-seed is skipped (collar already has them), and the
+// ship list is filtered against MissingScripts at commit so already-
+// installed items don't re-load.
+// When FALSE (fresh-install / install_shim path), the target is empty
+// by construction, Displayed* mirror the full lists, core ships, and
+// kmod_rlv ships whenever any RLV plugin is picked.
+integer ExistingMode    = FALSE;
+list    MissingScripts  = [];
+
+// Filtered subsystem / RLV-plugin lists used for rendering and dispatch.
+// In fresh mode these mirror bespoke_subsystems() and SUBSYSTEM_PLUGINS;
+// in existing mode they're filtered to entries with at least one
+// missing script. Built once at LM_BESPOKE_START.
+list DisplayedSubs = [];
+list DisplayedRlv  = [];
+
+// Toggle state. SubSelected is parallel to DisplayedSubs (one slot per
+// displayed subsystem; the RLV row's slot is unused — its on/off mark
+// is derived from RlvSelected at render time). RlvSelected is parallel
+// to DisplayedRlv. Both are 0/1 integer lists.
 list SubSelected = [];
 list RlvSelected = [];
 
@@ -141,6 +162,10 @@ cleanup() {
     Page   = 0;
     SubSelected = [];
     RlvSelected = [];
+    ExistingMode = FALSE;
+    MissingScripts = [];
+    DisplayedSubs = [];
+    DisplayedRlv = [];
 }
 
 // Build target_slots top-to-bottom, left-to-right, skipping action_slot
@@ -185,6 +210,93 @@ integer rlv_any_selected() {
     return FALSE;
 }
 
+// Returns `parts` with entries not in MissingScripts removed.
+// In fresh mode the filter is a pass-through (everything is "missing"
+// because the target is empty). In existing-collar mode, scripts the
+// collar already has fall out.
+list filter_missing(list parts) {
+    if (!ExistingMode) return parts;
+    list out = [];
+    integer n = llGetListLength(parts);
+    integer i = 0;
+    while (i < n) {
+        string s = llList2String(parts, i);
+        if (llListFindList(MissingScripts, [s]) != -1) {
+            out += [s];
+        }
+        i += 1;
+    }
+    return out;
+}
+
+// Build the filtered subsystem list. For fresh mode, this mirrors
+// bespoke_subsystems(); for existing mode, only subsystems with at
+// least one script in MissingScripts are kept (the "RLV Subsystem"
+// row is kept iff any RLV plugin or kmod_rlv is missing).
+list build_displayed_subs() {
+    if (!ExistingMode) return bespoke_subsystems();
+
+    list out = [];
+    list subs = bespoke_subsystems();
+    integer n = llGetListLength(subs) / 2;
+    integer i = 0;
+    while (i < n) {
+        string label = llList2String(subs, i * 2);
+        string csv   = llList2String(subs, i * 2 + 1);
+        integer keep = FALSE;
+        if (label == "RLV Subsystem") {
+            // Keep if any RLV plugin (or the shared kmod) is missing.
+            integer rn = llGetListLength(SUBSYSTEM_PLUGINS) / 2;
+            integer r = 0;
+            while (r < rn && !keep) {
+                if (llListFindList(MissingScripts,
+                        [llList2String(SUBSYSTEM_PLUGINS, r * 2 + 1)]) != -1) {
+                    keep = TRUE;
+                }
+                r += 1;
+            }
+            if (!keep && llListFindList(MissingScripts, [SUBSYSTEM_KMOD]) != -1) {
+                keep = TRUE;
+            }
+        }
+        else {
+            // Keep if any script in the subsystem CSV is missing.
+            list parts = llCSV2List(csv);
+            integer pn = llGetListLength(parts);
+            integer p = 0;
+            while (p < pn && !keep) {
+                if (llListFindList(MissingScripts, [llList2String(parts, p)]) != -1) {
+                    keep = TRUE;
+                }
+                p += 1;
+            }
+        }
+        if (keep) out += [label, csv];
+        i += 1;
+    }
+    return out;
+}
+
+// Build the filtered RLV plugin list. For fresh mode, mirrors
+// SUBSYSTEM_PLUGINS; for existing mode, only plugins whose script is
+// in MissingScripts are kept.
+list build_displayed_rlv() {
+    if (!ExistingMode) return SUBSYSTEM_PLUGINS;
+
+    list out = [];
+    integer n = llGetListLength(SUBSYSTEM_PLUGINS) / 2;
+    integer i = 0;
+    while (i < n) {
+        string label  = llList2String(SUBSYSTEM_PLUGINS, i * 2);
+        string script = llList2String(SUBSYSTEM_PLUGINS, i * 2 + 1);
+        if (llListFindList(MissingScripts, [script]) != -1) {
+            out += [label, script];
+        }
+        i += 1;
+    }
+    return out;
+}
+
 open_dialog(string body, list buttons) {
     if (DialogListen) llListenRemove(DialogListen);
     DialogChan   = random_channel();
@@ -207,22 +319,24 @@ emit_cancel() {
 }
 
 // Compose the final ship list from current SubSelected / RlvSelected and
-// emit LM_BESPOKE_DONE. Core scripts always included; subsystem scripts
-// added per SubSelected (RLV Subsystem row skipped — its scripts come
-// from the RLV walk); RLV plugins added per RlvSelected with kmod_rlv
-// appended if any are on.
+// emit LM_BESPOKE_DONE. Fresh mode pre-seeds core scripts; existing mode
+// skips core (collar already has it) and filters every selected script
+// through MissingScripts so already-installed items don't re-load.
+// kmod_rlv ships only when at least one RLV plugin is selected AND
+// (fresh mode OR kmod_rlv itself is missing) — same structural pairing
+// as before, plus the missing-list filter.
 commit() {
-    list ship = bespoke_core_scripts();
+    list ship = [];
+    if (!ExistingMode) ship = bespoke_core_scripts();
 
-    list subs = bespoke_subsystems();
-    integer sn = llGetListLength(subs) / 2;
+    integer sn = llGetListLength(DisplayedSubs) / 2;
     integer i = 0;
     while (i < sn) {
         if (llList2Integer(SubSelected, i)) {
-            string label = llList2String(subs, i * 2);
+            string label = llList2String(DisplayedSubs, i * 2);
             if (label != "RLV Subsystem") {
-                string csv = llList2String(subs, i * 2 + 1);
-                if (csv != "") ship += llCSV2List(csv);
+                string csv = llList2String(DisplayedSubs, i * 2 + 1);
+                if (csv != "") ship += filter_missing(llCSV2List(csv));
             }
         }
         i += 1;
@@ -231,20 +345,20 @@ commit() {
     // RLV subsystem: collect every selected plugin into a local list,
     // then if that list is non-empty prepend SUBSYSTEM_KMOD. The kmod
     // can never appear without at least one plugin (gated on the local
-    // list being non-empty) and can never appear twice (single + once,
-    // outside any loop). No selected plugins → no kmod, no script-slot
-    // waste in the wearer's collar.
+    // list being non-empty); in existing mode filter_missing drops the
+    // kmod if the collar already has it. No selected plugins → no kmod,
+    // no script-slot waste in the wearer's collar.
     list rlv_ship = [];
-    integer rn = llGetListLength(SUBSYSTEM_PLUGINS) / 2;
+    integer rn = llGetListLength(DisplayedRlv) / 2;
     i = 0;
     while (i < rn) {
         if (llList2Integer(RlvSelected, i)) {
-            rlv_ship += [llList2String(SUBSYSTEM_PLUGINS, i * 2 + 1)];
+            rlv_ship += [llList2String(DisplayedRlv, i * 2 + 1)];
         }
         i += 1;
     }
     if (llGetListLength(rlv_ship) > 0) {
-        ship += [SUBSYSTEM_KMOD] + rlv_ship;
+        ship += filter_missing([SUBSYSTEM_KMOD]) + rlv_ship;
     }
 
     emit_done(ship);
@@ -258,8 +372,7 @@ commit() {
 // digit buttons at the remaining content slots. Pagination wraps.
 show_main() {
     Phase = "main";
-    list subs = bespoke_subsystems();
-    integer n = llGetListLength(subs) / 2;
+    integer n = llGetListLength(DisplayedSubs) / 2;
     integer pages = (n + PAGE_SIZE - 1) / PAGE_SIZE;
     if (pages < 1) pages = 1;
 
@@ -274,7 +387,7 @@ show_main() {
     list final_buttons = ["<<", ">>", "Back"];
     integer p = 0;
     while (p < total_buttons - 3) {
-        final_buttons += [""];
+        final_buttons += [" "];
         p += 1;
     }
     final_buttons = llListReplaceList(final_buttons, ["Install"], 5, 5);
@@ -294,7 +407,7 @@ show_main() {
     integer k = 0;
     while (k < count) {
         integer abs_idx = start + k;
-        string label = llList2String(subs, abs_idx * 2);
+        string label = llList2String(DisplayedSubs, abs_idx * 2);
         string mark = "[ ]";
         if (label == "RLV Subsystem") {
             if (rlv_any_selected()) mark = "[X]";
@@ -314,13 +427,13 @@ show_main() {
 // so no wrap actually happens; << / >> remain per convention but no-op.
 show_rlv() {
     Phase = "rlv";
-    integer n = llGetListLength(SUBSYSTEM_PLUGINS) / 2;
+    integer n = llGetListLength(DisplayedRlv) / 2;
     integer total_buttons = 3 + n;
 
     list final_buttons = ["<<", ">>", "Back"];
     integer p = 0;
     while (p < n) {
-        final_buttons += [""];
+        final_buttons += [" "];
         p += 1;
     }
 
@@ -335,7 +448,7 @@ show_rlv() {
     string body = "RLV plugins. Tap a number to toggle, Back when done.\n\n";
     integer k = 0;
     while (k < n) {
-        string label = llList2String(SUBSYSTEM_PLUGINS, k * 2);
+        string label = llList2String(DisplayedRlv, k * 2);
         string mark = "[ ]";
         if (llList2Integer(RlvSelected, k)) mark = "[X]";
         body += (string)(k + 1) + ". " + mark + " " + label + "\n";
@@ -358,7 +471,7 @@ handle_main(string btn) {
         return;
     }
 
-    integer n = llGetListLength(bespoke_subsystems()) / 2;
+    integer n = llGetListLength(DisplayedSubs) / 2;
     integer pages = (n + PAGE_SIZE - 1) / PAGE_SIZE;
     integer max_page = pages - 1;
     if (max_page < 0) max_page = 0;
@@ -380,8 +493,7 @@ handle_main(string btn) {
     integer abs_idx = Page * PAGE_SIZE + (pos - 1);
     if (abs_idx >= n) return;
 
-    list subs = bespoke_subsystems();
-    string label = llList2String(subs, abs_idx * 2);
+    string label = llList2String(DisplayedSubs, abs_idx * 2);
     if (label == "RLV Subsystem") {
         show_rlv();
         return;
@@ -407,7 +519,7 @@ handle_rlv(string btn) {
     integer pos = (integer)btn;
     if (pos < 1) return;
     if ((string)pos != btn) return;
-    integer n = llGetListLength(SUBSYSTEM_PLUGINS) / 2;
+    integer n = llGetListLength(DisplayedRlv) / 2;
     if (pos - 1 >= n) return;
 
     integer cur = llList2Integer(RlvSelected, pos - 1);
@@ -443,17 +555,35 @@ default {
         // shim / pin come through here but are only needed by the driver
         // (which retains them for dispatch_shim_ship).
 
-        // Initialise toggle state. Default is all OFF — wearer opts in
-        // explicitly. List-doubling pre-allocation dodges O(n²) heap
-        // pressure from repeated += in a loop.
-        integer sn = llGetListLength(bespoke_subsystems()) / 2;
+        // Existing-collar mode: filter Displayed* to subsystems / RLV
+        // plugins where at least one script is missing in the collar,
+        // skip the core-scripts pre-seed, and apply filter_missing at
+        // commit. Fresh-install mode (no "existing" field): Displayed*
+        // mirror the full lists, core ships, no filtering.
+        string ex_str = llJsonGetValue(msg, ["existing"]);
+        ExistingMode = (ex_str == "1");
+        MissingScripts = [];
+        if (ExistingMode) {
+            string missing_csv = llJsonGetValue(msg, ["missing"]);
+            if (missing_csv != JSON_INVALID && missing_csv != "") {
+                MissingScripts = llCSV2List(missing_csv);
+            }
+        }
+        DisplayedSubs = build_displayed_subs();
+        DisplayedRlv  = build_displayed_rlv();
+
+        // Initialise toggle state, parallel to the Displayed lists.
+        // Default is all OFF — wearer opts in explicitly. List-doubling
+        // pre-allocation dodges O(n²) heap pressure from repeated += in
+        // a loop.
+        integer sn = llGetListLength(DisplayedSubs) / 2;
         SubSelected = [];
         if (sn > 0) {
             list buf = [FALSE];
             while (llGetListLength(buf) < sn) buf = buf + buf;
             SubSelected = llList2List(buf, 0, sn - 1);
         }
-        integer rn = llGetListLength(SUBSYSTEM_PLUGINS) / 2;
+        integer rn = llGetListLength(DisplayedRlv) / 2;
         RlvSelected = [];
         if (rn > 0) {
             list rbuf = [FALSE];

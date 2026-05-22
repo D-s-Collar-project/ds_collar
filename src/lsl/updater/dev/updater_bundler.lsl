@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 12
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,6 +25,8 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+- v1.1 rev 12: Install-mode INV handler now emits LM_INSTALL_MISSING (flat missing-scripts CSV) instead of LM_INSTALL_FEATURES (grouped). The driver routes that into updater_bespoke_ui under ExistingMode=TRUE for per-plugin RLV granularity. LM_FEATURES_QUERY path (install_shim Minimal/Full menu) is unchanged — still emits grouped features via LM_INSTALL_FEATURES.
+- v1.1 rev 11: Particle stream visual feedback while shipping. Starts when shipping actually begins — LM_BUNDLE_BEGIN (update mode, ships immediately after diff), LM_INSTALL_GO (install-existing mode, after wearer confirms picker, NOT at LM_INSTALL_BEGIN where the LIST/QUERY exchange is still figuring out what to offer), or inside ship_to_install_shim (install_shim mode). Stops in notify_driver_done. Defensive stop in cleanup_bundle for cancel/timeout paths, plus explicit llParticleSystem([]) in state_entry because llResetScript clears the ParticlesActive flag but may leave the prim's emitter running. Light blue → cyan stream targeting the collar / shim prim via PSYS_SRC_TARGET_KEY.
 - v1.1 rev 10: Asset gating for install_shim. LM_INSTALL_SHIM_BEGIN payload now carries optional skip_animations ("1"/"0") and skip_notecards (CSV of names) flags; ship_to_install_shim honours them so the driver can suppress animations (when Animations subsystem is off in Bespoke) and per-notecard exclusions (e.g. "D/s Collar outfits setup" when plugin_outfits isn't selected). ship_nonscripts_to_install_shim takes a skip_list parameter — settings + user manual ship by default since the driver never adds them. Backwards-compatible: missing flags default to "ship everything".
 - v1.1 rev 9: Defensive cleanup_bundle() at the top of every LM_*_BEGIN / LM_FEATURES_QUERY handler. Removes the Mode != "" early-return guards that silently swallowed new requests when prior state was stale (the "Detecting missing components..." hang). LM_BUNDLE_RESET still present as belt-and-braces.
 - v1.1 rev 8: Add LM_BUNDLE_RESET handler — calls llResetScript on receipt. Driver fires this from its own state_entry so the bundler stays in sync after driver llResetScript, fixing a hang at "Detecting missing components..." when a previously-aborted session left Mode != "" and the next LM_INSTALL_BEGIN got silently early-returned.
@@ -49,6 +51,7 @@ integer LM_INSTALL_GO          = 91005;  // driver→bundler: scripts CSV select
 integer LM_INSTALL_SHIM_BEGIN  = 91006;  // driver→bundler: ship blind to install_shim
 integer LM_FEATURES_QUERY      = 91007;  // driver→bundler: enumerate features (empty-target case)
 integer LM_BUNDLE_RESET        = 91008;  // driver→bundler: hard reset to clean state
+integer LM_INSTALL_MISSING     = 91009;  // bundler→driver: flat list of missing scripts (install-existing)
 
 
 /* -------------------- CONSTANTS -------------------- */
@@ -97,8 +100,53 @@ string  TypePhase = "";
 // Set by LM_INSTALL_GO; iterated in install-ship loop.
 list    InstallScripts = [];
 
+// Tracks whether we currently have a particle stream emitting. Prevents
+// double-start (cosmetic no-op) and lets cleanup_bundle / state_entry
+// idempotently call stop_particles.
+integer ParticlesActive = FALSE;
+
 
 /* -------------------- HELPERS -------------------- */
+
+// Visual feedback during the shipping phase. Stream from this child
+// prim to the target (collar or install_shim prim). Starts when actual
+// llRemoteLoadScriptPin / llGiveInventory loop is about to begin; stops
+// in notify_driver_done. Suppressed for the install-against-existing-
+// collar flow's diff phase (LM_INSTALL_BEGIN sets up the LIST/QUERY
+// exchange but doesn't ship until LM_INSTALL_GO arrives after the
+// wearer confirms the feature picker).
+start_particles() {
+    if (CollarKey == NULL_KEY) return;
+    if (ParticlesActive) return;
+    llParticleSystem([
+        PSYS_PART_FLAGS,
+              PSYS_PART_INTERP_COLOR_MASK
+            | PSYS_PART_INTERP_SCALE_MASK
+            | PSYS_PART_EMISSIVE_MASK
+            | PSYS_PART_TARGET_POS_MASK
+            | PSYS_PART_TARGET_LINEAR_MASK,
+        PSYS_SRC_PATTERN,          PSYS_SRC_PATTERN_DROP,
+        PSYS_SRC_TARGET_KEY,       CollarKey,
+        PSYS_PART_START_COLOR,     <0.3, 0.7, 1.0>,
+        PSYS_PART_END_COLOR,       <0.8, 1.0, 1.0>,
+        PSYS_PART_START_ALPHA,     0.9,
+        PSYS_PART_END_ALPHA,       0.0,
+        PSYS_PART_START_SCALE,     <0.06, 0.06, 0.0>,
+        PSYS_PART_END_SCALE,       <0.02, 0.02, 0.0>,
+        PSYS_PART_MAX_AGE,         1.0,
+        PSYS_SRC_BURST_RATE,       0.04,
+        PSYS_SRC_BURST_PART_COUNT, 3,
+        PSYS_SRC_BURST_RADIUS,     0.05
+    ]);
+    ParticlesActive = TRUE;
+}
+
+stop_particles() {
+    if (!ParticlesActive) return;
+    llParticleSystem([]);
+    ParticlesActive = FALSE;
+}
+
 
 // Collar-namespace test. Mirrors update_shim's filter so the two ends
 // agree on what "ours to manage" means.
@@ -172,6 +220,7 @@ string query_verb_for_phase() {
 }
 
 cleanup_bundle() {
+    stop_particles();
     if (SecureListen) llListenRemove(SecureListen);
     SecureListen = 0;
     Mode = "";
@@ -187,6 +236,7 @@ cleanup_bundle() {
 }
 
 notify_driver_done() {
+    stop_particles();
     llMessageLinked(LINK_SET, LM_BUNDLE_DONE, "", NULL_KEY);
     cleanup_bundle();
 }
@@ -490,6 +540,11 @@ start_next_query() {
 //     in this list ship; settings + user manual notecards always ship
 //     because the driver never adds them to the skip list.
 ship_to_install_shim(list scripts, integer skip_anim, list skip_nc) {
+    // Visual stream on for the duration of the shipping loop. Stops
+    // automatically when notify_driver_done runs at the bottom of this
+    // function.
+    start_particles();
+
     // Callers (Bespoke / Minimal / Full) are structured so the script
     // list is unique by construction — kmod_rlv is paired with its
     // plugins via SUBSYSTEM_KMOD + selected plugins in updater_bespoke_ui,
@@ -537,6 +592,12 @@ default {
         // Mark this child prim with the dormancy marker so dragged-in
         // collar scripts park themselves.
         llSetObjectDesc(UPDATER_MARKER);
+        // Explicit particle clear — llResetScript wipes the
+        // ParticlesActive flag but doesn't necessarily clear the prim's
+        // particle emitter, so cleanup_bundle's stop_particles would
+        // see the (now-FALSE) flag and skip. Force a single clear here
+        // so a mid-stream reset doesn't leave particles flowing.
+        llParticleSystem([]);
         cleanup_bundle();
     }
 
@@ -605,6 +666,11 @@ default {
             build_candidates();
             SecureListen = llListen(SecureChannel, "", CollarKey, "");
 
+            // Update mode ships immediately after the LIST/QUERY diff
+            // lands, so start the visual stream now and let it run
+            // through the typed phases until notify_driver_done stops it.
+            start_particles();
+
             if (llGetListLength(Candidates) == 0) {
                 advance_phase();
                 return;
@@ -658,6 +724,12 @@ default {
             Candidates = selected;
             CandIdx = 0;
             TypePhase = "scripts";
+
+            // Particles start here, not at LM_INSTALL_BEGIN, so the
+            // stream doesn't run during the picker dialog (LIST/QUERY
+            // diff phase was just figuring out what to offer — no
+            // shipping yet).
+            start_particles();
 
             if (llGetListLength(Candidates) == 0) {
                 advance_phase();
@@ -722,13 +794,18 @@ default {
                 return;
             }
 
-            // Install scripts phase: hand off to driver for wearer's pick.
+            // Install scripts phase: hand off to driver for wearer's
+            // pick. The driver routes this into updater_bespoke_ui with
+            // ExistingMode=TRUE so the toggle picker filters to only
+            // subsystems with at least one missing script. Bundler sends
+            // the flat missing list (Candidates after the diff) rather
+            // than pre-grouped features — bespoke_ui does its own
+            // grouping against the fixed subsystem definitions.
             if (Mode == "install" && TypePhase == "scripts") {
-                list features = group_into_features(Candidates);
                 string payload = llList2Json(JSON_OBJECT, [
-                    "features", llList2Json(JSON_ARRAY, features)
+                    "missing", llDumpList2String(Candidates, ",")
                 ]);
-                llMessageLinked(LINK_SET, LM_INSTALL_FEATURES, payload, NULL_KEY);
+                llMessageLinked(LINK_SET, LM_INSTALL_MISSING, payload, NULL_KEY);
                 TypePhase = "scripts_await";
                 return;
             }

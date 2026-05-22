@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 10
+REVISION: 12
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -21,6 +21,8 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 12: Existing-collar install path now uses updater_bespoke_ui instead of the inline multi-select feature picker, giving the wearer per-plugin RLV granularity (previously "RLV Subsystem" was a single bulk-install toggle). Bundler reports the flat missing list via LM_INSTALL_MISSING; driver wraps that in LM_BESPOKE_START with existing=1, bespoke_ui filters Displayed* down to subsystems where at least one script is actually missing, and on Install the driver forwards the selection to the bundler as LM_INSTALL_GO from the new install_bespoke_running phase. Removed: show_picker, match_picker_button, handle_picker_button, FEATURES_PER_PAGE, Selected, PickerPage, install_picking phase — driver shrinks by ~120 lines of bytecode. LM_INSTALL_FEATURES is now only consumed by the install_shim Minimal/Full picker path (Bespoke in install_shim mode dispatches LM_BESPOKE_START directly).
+- v1.1 rev 11: Button-label padding uses " " (single space) instead of "" (empty string) in show_picker and show_scan_picker. LSL rejects empty-string labels and the dialog wouldn't render cleanly when count < target_slots length (e.g. install picker with exactly one missing feature). Also fixed outfits-setup notecard name capitalization to "D/s Collar outfits setup".
 - v1.1 rev 10: Split Bespoke walk into sibling updater_bespoke_ui.lsl — inline version pushed lslinterpreter past the Mono 65 KB ceiling (104%). Driver now dispatches via LM_BESPOKE_START and handles LM_BESPOKE_DONE / LM_BESPOKE_CANCEL on return. Added build_shim_payload / dispatch_shim_ship helpers: payload now carries skip_animations and skip_notecards flags, derived from the script set (animations ride with plugin_animate; "D/s Collar outfits setup" notecard rides with plugin_outfits). Consolidated 8 inline close-dialog blocks into a close_dialog() helper; show_scan_picker / show_picker now reuse open_dialog instead of duplicating its setup. Selected list initialised via list-doubling instead of O(n²) +=. Post-consolidation memory estimate 94.7% (was 104%).
 - v1.1 rev 9: Cancel paths now reset immediately via cancel_and_reset (2s notice + llResetScript) instead of cleanup_all / finish_shim_install. Avoids the dialog/bundle-timeout wait for sessions the wearer explicitly abandoned. If an install_shim is active, the helper broadcasts install.shim.done to make the shim disarm and self-delete before the driver resets. Uniform notice: "Installation cancelled. Resetting the updater..." Install-submenu Back now cancels (rather than navigating to main menu); submenu labels shortened to "Existing" / "New" to avoid viewer-side truncation, body rephrased to "Is this installation adding features to an existing collar or a new installation?"
 - v1.1 rev 8: Apply numbered-list pattern to the scan picker (buttons are digits, body text carries collar names). Add LM_BUNDLE_RESET: driver state_entry signals the sibling bundler to llResetScript, fixing a hang at "Detecting missing components..." caused by a stuck Mode != "" gate in the bundler from a previously-aborted session — driver-only llResetScript didn't propagate to the child prim's bundler.
@@ -51,6 +53,7 @@ integer LM_INSTALL_GO          = 91005;
 integer LM_INSTALL_SHIM_BEGIN  = 91006;
 integer LM_FEATURES_QUERY      = 91007;  // driver→bundler: enumerate features
 integer LM_BUNDLE_RESET        = 91008;  // driver→bundler: hard reset to clean state
+integer LM_INSTALL_MISSING     = 91009;  // bundler→driver: flat list of missing scripts (install-existing)
 integer LM_BESPOKE_START       = 91010;  // driver→updater_bespoke_ui: begin walk
 integer LM_BESPOKE_DONE        = 91011;  // updater_bespoke_ui→driver: walk complete with scripts CSV
 integer LM_BESPOKE_CANCEL      = 91012;  // updater_bespoke_ui→driver: wearer cancelled
@@ -82,7 +85,6 @@ float SHIM_OFFER_TIMEOUT  = 180.0;   // 3 min from give to install.shim.ready
 // Pagination. Page size for paginated dialogs is derived from
 // `9 - action_count` per the dialog convention; feature picker has 1
 // action ("Install") so 8 features per page, scan picker has 0 so 9.
-integer FEATURES_PER_PAGE = 8;
 integer COLLARS_PER_PAGE  = 9;
 
 
@@ -96,7 +98,7 @@ integer COLLARS_PER_PAGE  = 9;
 //   install_shim_loading       — update shim being deposited (install mode)
 //   bundling                   — update bundler running
 //   done                       — update applied
-//   install_picking            — multi-select feature dialog open
+//   install_bespoke_running    — updater_bespoke_ui running existing-mode walk
 //   install_bundling           — install bundler shipping
 //   shim_offer_waiting         — gave install_shim, waiting for ready broadcast
 //   shim_features_querying     — bundler enumerating features for shim mode
@@ -122,11 +124,10 @@ key     InviteCollar = NULL_KEY;
 // Install mode: feature list from bundler (stride-2: [label, csv, ...]).
 list    Features = [];
 
-// Multi-select picker state.
+// Dialog channel state (used by every dialog the driver opens).
+// Selected/PickerPage removed in rev 12 — install_picking is gone.
 integer DialogChan = 0;
 integer DialogListen = 0;
-list    Selected = [];           // parallel-to-features booleans (integers)
-integer PickerPage = 0;
 
 // install_shim flow state.
 key     ShimTarget = NULL_KEY;   // the prim hosting install_shim
@@ -178,8 +179,6 @@ cleanup_all() {
     InviteCollar = NULL_KEY;
     Features = [];
     DialogChan = 0;
-    Selected = [];
-    PickerPage = 0;
     ShimTarget = NULL_KEY;
     ShimPin = 0;
     ScanResults = [];
@@ -398,7 +397,7 @@ show_scan_picker() {
     list final_buttons = ["<<", ">>", "Back"];
     integer p = 0;
     while (p < count) {
-        final_buttons += [""];
+        final_buttons += [" "];
         p += 1;
     }
 
@@ -618,15 +617,20 @@ cancel_and_reset() {
     llResetScript();
 }
 
+// Completion notices stay deliberately generic — we ship scripts but
+// don't verify they came up at a particular version (no version probe
+// from the bundler to the collar). Claiming "Collar is now at version X"
+// would be overconfident; "Operation completed" / "Installation of
+// requested components completed" describes what we actually did.
 finish_update() {
     llWhisper(SecureChannel, "DONE");
-    notice("Update complete. Collar is now at version " + BUILD_VERSION + ".");
+    notice("Operation completed.");
     restart_after_operation();
 }
 
 finish_install() {
     llWhisper(SecureChannel, "DONE");
-    notice("Install complete. Selected components are now in the collar.");
+    notice("Installation of requested components completed.");
     restart_after_operation();
 }
 
@@ -638,7 +642,7 @@ finish_shim_install() {
         "shim", (string)ShimTarget
     ]);
     llRegionSay(EXTERNAL_ACL_QUERY_CHAN, msg);
-    notice("Fresh install complete. Wear or rez the target to bring it online.");
+    notice("Installation of requested components completed. Your new collar is ready for use.");
     restart_after_operation();
 }
 
@@ -657,129 +661,11 @@ string feature_scripts(integer idx) {
     return llList2String(Features, idx * 2 + 1);
 }
 
-// Render the feature multi-select picker as an ordered list per the
-// project pattern (canonical in plugin_outfits / plugin_folders): body
-// text carries the numbered list with the toggle state, BUTTONS are
-// just digits ("1", "2", ...). This handles feature names that would
-// otherwise blow past the 24-char dialog-button limit.
-//
-// Layout per dialog convention:
-//   Slots 0/1/2: <<, >>, Back
-//   Slots 3, 4: content (digits, low row)
-//   Slot 5:     Install (action — bottom-right of action row)
-//   Slots 6-11: content (digits, upper rows)
-//
-// total_buttons must include slot 5 at minimum (=6); higher for larger
-// counts so the upper rows are reachable.
-show_picker() {
-    integer n = features_count();
-    integer pages = (n + FEATURES_PER_PAGE - 1) / FEATURES_PER_PAGE;
-    if (pages < 1) pages = 1;
-
-    integer start = PickerPage * FEATURES_PER_PAGE;
-    integer stop = start + FEATURES_PER_PAGE;
-    if (stop > n) stop = n;
-    integer count = stop - start;
-
-    integer total_buttons = 4 + count;
-    if (total_buttons < 6) total_buttons = 6;
-
-    list final_buttons = ["<<", ">>", "Back"];
-    integer p = 0;
-    while (p < total_buttons - 3) {
-        final_buttons += [""];
-        p += 1;
-    }
-    // Stamp Install at slot 5 (bottom-right of action row).
-    final_buttons = llListReplaceList(final_buttons, ["Install"], 5, 5);
-
-    list target_slots = build_target_slots(total_buttons, [5]);
-    integer i = 0;
-    while (i < count) {
-        integer slot = llList2Integer(target_slots, i);
-        final_buttons = llListReplaceList(final_buttons, [(string)(i + 1)], slot, slot);
-        i += 1;
-    }
-
-    string body = "Select components to install. Tap a number to toggle, then Install.\n";
-    if (pages > 1) body += "Page " + (string)(PickerPage + 1) + " of " + (string)pages + "\n";
-    body += "\n";
-    integer k = 0;
-    while (k < count) {
-        integer feat_idx = start + k;
-        string mark = "[ ]";
-        if (llList2Integer(Selected, feat_idx)) mark = "[X]";
-        body += (string)(k + 1) + ". " + mark + " " + feature_label(feat_idx) + "\n";
-        k += 1;
-    }
-
-    open_dialog(Wearer, body, final_buttons);
-}
-
-// Match a numeric button press back to the absolute feature index.
-// Buttons on the current page are labelled "1".."N" where N is the
-// in-page count; "1" corresponds to start = PickerPage * FEATURES_PER_PAGE.
-// Returns -1 if the label isn't a valid digit in range (so the nav and
-// action labels fall through to their own handlers).
-integer match_picker_button(string btn) {
-    integer pos = (integer)btn;
-    if (pos < 1) return -1;
-    if ((string)pos != btn) return -1;  // reject e.g. "1abc"
-    integer abs_idx = (PickerPage * FEATURES_PER_PAGE) + (pos - 1);
-    if (abs_idx >= features_count()) return -1;
-    integer page_stop = (PickerPage + 1) * FEATURES_PER_PAGE;
-    if (abs_idx >= page_stop) return -1;
-    return abs_idx;
-}
-
-handle_picker_button(string btn) {
-    if (btn == "Back") {
-        // Driver llResetScript wipes everything; state_entry then
-        // broadcasts LM_BUNDLE_RESET, which resets the bundler too —
-        // so the parked scripts_await state doesn't matter.
-        cancel_and_reset();
-        return;
-    }
-    if (btn == "Install") {
-        list ship = [];
-        integer i = 0;
-        integer n = features_count();
-        while (i < n) {
-            if (llList2Integer(Selected, i)) {
-                list parts = llCSV2List(feature_scripts(i));
-                ship += parts;
-            }
-            i += 1;
-        }
-        string csv = llDumpList2String(ship, ",");
-        string payload = llList2Json(JSON_OBJECT, ["scripts", csv]);
-        llMessageLinked(LINK_SET, LM_INSTALL_GO, payload, NULL_KEY);
-        Phase = "install_bundling";
-        llSetTimerEvent(BUNDLE_TIMEOUT);
-        if (llGetListLength(ship) > 0) notice("Installing selected components...");
-        return;
-    }
-    integer n2 = features_count();
-    integer pages = (n2 + FEATURES_PER_PAGE - 1) / FEATURES_PER_PAGE;
-    integer max_page = pages - 1;
-    if (max_page < 0) max_page = 0;
-    if (btn == "<<") {
-        PickerPage = wrap_prev_page(PickerPage, max_page);
-        show_picker();
-        return;
-    }
-    if (btn == ">>") {
-        PickerPage = wrap_next_page(PickerPage, max_page);
-        show_picker();
-        return;
-    }
-    integer idx = match_picker_button(btn);
-    if (idx >= 0) {
-        integer cur = llList2Integer(Selected, idx);
-        Selected = llListReplaceList(Selected, [!cur], idx, idx);
-        show_picker();
-    }
-}
+// (show_picker / match_picker_button / handle_picker_button removed in
+// rev 12 — the install-against-existing-collar path now dispatches to
+// updater_bespoke_ui via start_install_bespoke. The Features list still
+// exists for the install_shim Minimal/Full picker path; feature_label /
+// feature_scripts helpers above remain for that consumer.)
 
 
 /* -------------------- INSTALL_SHIM FLOW (empty target) -------------------- */
@@ -913,12 +799,30 @@ ship_shim_mode(string mode) {
 // updater_driver past the Mono 65 KB compiled ceiling (104% per
 // lslinterpreter). Cross-script LM cost is one round trip per dialog
 // answer plus one start/done pair, all within the linkset.
+// Fresh-install Bespoke (Empty object path). Hands off to bespoke_ui
+// with no existing-mode flag — every subsystem is offered, core ships,
+// kmod_rlv ships with any RLV plugin.
 start_bespoke() {
     Phase = "shim_bespoke_running";
     string payload = llList2Json(JSON_OBJECT, [
         "wearer", (string)Wearer,
         "shim",   (string)ShimTarget,
         "pin",    (string)ShimPin
+    ]);
+    llMessageLinked(LINK_SET, LM_BESPOKE_START, payload, NULL_KEY);
+    llSetTimerEvent(BUNDLE_TIMEOUT);
+}
+
+// Existing-collar Bespoke. Bundler has finished its bundler-MINUS-collar
+// diff and handed us the flat missing list — pass it to bespoke_ui with
+// existing=1 so the toggle picker filters Displayed* down to subsystems
+// where at least one script is actually missing.
+start_install_bespoke(string missing_csv) {
+    Phase = "install_bespoke_running";
+    string payload = llList2Json(JSON_OBJECT, [
+        "wearer",   (string)Wearer,
+        "existing", "1",
+        "missing",  missing_csv
     ]);
     llMessageLinked(LINK_SET, LM_BESPOKE_START, payload, NULL_KEY);
     llSetTimerEvent(BUNDLE_TIMEOUT);
@@ -1029,10 +933,9 @@ default {
                 return;
             }
 
-            if (Phase == "install_picking") {
-                handle_picker_button(message);
-                return;
-            }
+            // install_picking phase removed in rev 12 — its dialog is
+            // now owned by updater_bespoke_ui under the
+            // install_bespoke_running phase, dispatched on its own channel.
 
             if (Phase == "shim_mode_picking") {
                 if (message == "Minimal") {
@@ -1127,71 +1030,77 @@ default {
         }
 
         // updater_bespoke_ui completed its walk. Pull the script CSV out
-        // of the payload and dispatch to the bundler as usual.
+        // of the payload. Fresh-install path dispatches to bundler via
+        // dispatch_shim_ship; existing-collar path forwards as LM_INSTALL_GO
+        // to the bundler that's parked in scripts_await.
         if (num == LM_BESPOKE_DONE) {
-            if (Phase != "shim_bespoke_running") return;
             string csv = llJsonGetValue(msg, ["scripts"]);
             if (csv == JSON_INVALID) csv = "";
             list scripts = [];
             if (csv != "") scripts = llCSV2List(csv);
-            dispatch_shim_ship(scripts);
+            if (Phase == "shim_bespoke_running") {
+                dispatch_shim_ship(scripts);
+                return;
+            }
+            if (Phase == "install_bespoke_running") {
+                string go_payload = llList2Json(JSON_OBJECT, ["scripts", csv]);
+                llMessageLinked(LINK_SET, LM_INSTALL_GO, go_payload, NULL_KEY);
+                Phase = "install_bundling";
+                llSetTimerEvent(BUNDLE_TIMEOUT);
+                if (llGetListLength(scripts) > 0) {
+                    notice("Installing selected components...");
+                }
+                return;
+            }
             return;
         }
 
-        // Wearer hit Back during the Bespoke walk. Run the unified
-        // cancel path so the shim is told to disarm and the driver
-        // resets cleanly.
+        // Wearer hit Back during the Bespoke walk (either path). Run the
+        // unified cancel path so any active shim is told to disarm and
+        // the driver resets cleanly.
         if (num == LM_BESPOKE_CANCEL) {
-            if (Phase != "shim_bespoke_running") return;
+            if (Phase != "shim_bespoke_running"
+             && Phase != "install_bespoke_running") return;
             cancel_and_reset();
             return;
         }
 
+        // Existing-collar install: bundler finished its bundler-MINUS-collar
+        // diff. Hand the flat missing list to bespoke_ui as
+        // existing-mode input.
+        if (num == LM_INSTALL_MISSING) {
+            if (Phase != "install_bundling") return;
+            string missing_csv = llJsonGetValue(msg, ["missing"]);
+            if (missing_csv == JSON_INVALID) missing_csv = "";
+            if (missing_csv == "") {
+                // Nothing missing on the script side — bundler has
+                // already advanced to typed phases for non-scripts.
+                // Let the LM_BUNDLE_DONE arrive when those complete.
+                notice("Collar already has all available components.");
+                return;
+            }
+            start_install_bespoke(missing_csv);
+            return;
+        }
+
+        // install_shim Minimal/Full picker path: bundler enumerated all
+        // available features so ship_shim_mode can compose Minimal/Full
+        // script lists from labels. Bespoke in install_shim mode
+        // dispatches via LM_BESPOKE_START directly and never lands here.
         if (num == LM_INSTALL_FEATURES) {
+            if (Phase != "shim_features_querying") return;
+
             string features_json = llJsonGetValue(msg, ["features"]);
             if (features_json == JSON_INVALID) return;
+            Features = llJson2List(features_json);
 
-            // Parse stride-2 JSON array into our flat Features list.
-            list parsed = llJson2List(features_json);
-            Features = parsed;
-
-            integer n = features_count();
-            if (n == 0) {
-                if (Phase == "install_bundling" || Phase == "install_picking") {
-                    // Already-current — bundler will advance through non-scripts.
-                    notice("Collar already has all available components.");
-                }
-                if (Phase == "shim_features_querying") {
-                    notice("Installer has no components to install.");
-                    finish_shim_install();
-                    return;
-                }
+            if (features_count() == 0) {
+                notice("Installer has no components to install.");
+                finish_shim_install();
                 return;
             }
-
-            // Initialize Selected with all on (sensible default; wearer
-            // unticks unwanted features). List-doubling pre-allocation
-            // dodges the O(n²) heap pressure of repeated `+=` inside a
-            // loop — matches the plugin_folders idiom referenced in
-            // the dialog convention memory.
-            Selected = [];
-            if (n > 0) {
-                list buf = [TRUE];
-                while (llGetListLength(buf) < n) buf = buf + buf;
-                Selected = llList2List(buf, 0, n - 1);
-            }
-            PickerPage = 0;
-
-            if (Phase == "shim_features_querying") {
-                llSetTimerEvent(DIALOG_TIMEOUT);
-                show_shim_mode_picker();
-                return;
-            }
-
-            // Otherwise we're install_bundling (came from LM_INSTALL_BEGIN).
-            Phase = "install_picking";
             llSetTimerEvent(DIALOG_TIMEOUT);
-            show_picker();
+            show_shim_mode_picker();
             return;
         }
     }
@@ -1227,9 +1136,9 @@ default {
             cleanup_all();
             return;
         }
-        if (Phase == "install_picking"
-         || Phase == "shim_mode_picking"
-         || Phase == "shim_bespoke_running") {
+        if (Phase == "shim_mode_picking"
+         || Phase == "shim_bespoke_running"
+         || Phase == "install_bespoke_running") {
             notice("Dialog timed out. Cancelling.");
             cleanup_all();
             return;

@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: install_shim.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: Empty-target receiver for the installer's fresh-install path. Wearer
   drops this single script into an object they want to turn into a collar;
   it sets a remote-load PIN, announces itself on EXTERNAL_ACL_REPLY_CHAN, and
@@ -14,6 +14,7 @@ ARCHITECTURE: Lives alone in the fresh target object. Uses kmod_remote's
   already present (drop into a non-empty target is a user error, not a
   reinstall path; that's what 'Update Collar' is for).
 CHANGES:
+- v1.1 rev 5: INSTALL_TIMEOUT 300s → 600s. Bespoke walk + Minimal/Full picker can take longer than the previous 5-minute window; if the wearer overran it, the shim disarmed the PIN and self-deleted, then llRemoteLoadScriptPin failed on the bundler's first dispatch ("trying to illegally load script onto task"). 600s gives ~10 minutes of total margin past the wearer's decision + BUNDLE_TIMEOUT.
 - v1.1 rev 4: Stamp prim description with "D/s Collar v1.1" (BRAND_DESC) on the success path instead of restoring the OriginalDesc — a fresh prim's blank desc was a missed branding opportunity. Failure paths still restore OriginalDesc. Tracked via Activated flag so cleanup_and_die doesn't clobber the brand.
 - v1.1 rev 3: Inhibit the half-installed collar during the bundle phase. state_entry now stamps the prim with UPDATER_MARKER after the safety checks; every collar script's dormancy guard (universal across 33 scripts) sees the marker in their state_entry and parks via llSetScriptState(self, FALSE). install.shim.done now calls activate_collar_scripts before cleanup_and_die: clear the desc, then llSetScriptState(name, TRUE) + llResetOtherScript(name) per script so they re-enter state_entry and init normally. OriginalDesc preserved across the marker stamp and restored on every cleanup path (success and failure).
 - v1.1 rev 2: Fix ready-message instruction — installer's permanent REPLY_CHAN listener picks up the broadcast automatically, so the wearer should NOT touch the installer again (doing so triggered 'session already in progress' because Phase = shim_offer_waiting).
@@ -52,10 +53,15 @@ float BROADCAST_INTERVAL = 5.0;
 // shouting forever.
 float BROADCAST_TIMEOUT = 120.0;
 
-// After ack, how long we wait for the actual install to complete before
-// assuming the installer crashed and giving up. Generous because a Full
-// install ships ~35 scripts at 3s each = ~105s minimum.
-float INSTALL_TIMEOUT = 300.0;
+// After ack, how long we wait for install.shim.done before assuming the
+// installer crashed and giving up. Has to span both the wearer's
+// decision time (Bespoke toggles, Minimal/Full picker) AND the full
+// shipping loop (BUNDLE_TIMEOUT = 240s in the driver). Earlier 300s
+// value timed out mid-decision when the wearer took >5min on the
+// Bespoke walk, which zeroed the PIN and caused llRemoteLoadScriptPin
+// to fail with "trying to illegally load script" on the next dispatch.
+// 600s gives ~10 minutes of total margin.
+float INSTALL_TIMEOUT = 600.0;
 
 
 /* -------------------- STATE -------------------- */
