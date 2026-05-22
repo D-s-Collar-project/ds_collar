@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,6 +25,7 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+- v1.1 rev 10: Asset gating for install_shim. LM_INSTALL_SHIM_BEGIN payload now carries optional skip_animations ("1"/"0") and skip_notecards (CSV of names) flags; ship_to_install_shim honours them so the driver can suppress animations (when Animations subsystem is off in Bespoke) and per-notecard exclusions (e.g. "D/s Collar outfits setup" when plugin_outfits isn't selected). ship_nonscripts_to_install_shim takes a skip_list parameter — settings + user manual ship by default since the driver never adds them. Backwards-compatible: missing flags default to "ship everything".
 - v1.1 rev 9: Defensive cleanup_bundle() at the top of every LM_*_BEGIN / LM_FEATURES_QUERY handler. Removes the Mode != "" early-return guards that silently swallowed new requests when prior state was stale (the "Detecting missing components..." hang). LM_BUNDLE_RESET still present as belt-and-braces.
 - v1.1 rev 8: Add LM_BUNDLE_RESET handler — calls llResetScript on receipt. Driver fires this from its own state_entry so the bundler stays in sync after driver llResetScript, fixing a hang at "Detecting missing components..." when a previously-aborted session left Mode != "" and the next LM_INSTALL_BEGIN got silently early-returned.
 - v1.1 rev 7: install_shim mode now ships animations / objects / notecards after the script set, including the settings notecard (which is intentionally an example template on fresh install — wearers can customise defaults from it). Update and install-against-existing-collar paths still exclude the settings notecard at all three layers (build_candidates_typed / list_inventory_typed / verdict_for_typed) so wearer customisations are never overwritten. Earlier rev was over-cautious about llGiveInventory dialog floods — same-owner prim-to-prim transfer is silent regardless of attached state.
@@ -476,12 +477,25 @@ start_next_query() {
 
 /* -------------------- INSTALL-SHIM SHIPPING (fresh target) -------------------- */
 // Empty-target ship path. install_shim refused to start unless its prim
-// was empty, so we ship the entire selected set unconditionally — no
-// LIST/QUERY handshake, no per-item verdict. Same-owner prim-to-prim
-// llGiveInventory is silent regardless of attached state, so non-scripts
-// (animations, objects, notecards) ship the same way as scripts: just
-// loop and call.
-ship_to_install_shim(list scripts) {
+// was empty, so we ship unconditionally — no LIST/QUERY handshake, no
+// per-item verdict. Same-owner prim-to-prim llGiveInventory is silent
+// regardless of attached state, so non-scripts ship via plain loops.
+//
+// Asset gating (Bespoke / Minimal / Full all use the same protocol):
+//   skip_anim — if TRUE, no animations shipped (gates "Animations"
+//     subsystem on Bespoke; Minimal/Full set this based on whether
+//     plugin_animate ended up in the script set).
+//   skip_nc — list of notecard names to NOT ship (e.g. the outfits
+//     setup notecard when plugin_outfits wasn't selected). Items not
+//     in this list ship; settings + user manual notecards always ship
+//     because the driver never adds them to the skip list.
+ship_to_install_shim(list scripts, integer skip_anim, list skip_nc) {
+    // Callers (Bespoke / Minimal / Full) are structured so the script
+    // list is unique by construction — kmod_rlv is paired with its
+    // plugins via SUBSYSTEM_KMOD + selected plugins in updater_bespoke_ui,
+    // subsystem CSVs are disjoint, and Minimal/Full pull from
+    // group_into_features which removes matched items from its pool
+    // after each step. No dedupe needed here.
     integer n = llGetListLength(scripts);
     integer i = 0;
     while (i < n) {
@@ -492,24 +506,25 @@ ship_to_install_shim(list scripts) {
         }
         i += 1;
     }
-    ship_nonscripts_to_install_shim(INVENTORY_ANIMATION);
-    ship_nonscripts_to_install_shim(INVENTORY_OBJECT);
-    ship_nonscripts_to_install_shim(INVENTORY_NOTECARD);
+    if (!skip_anim) ship_nonscripts_to_install_shim(INVENTORY_ANIMATION, []);
+    ship_nonscripts_to_install_shim(INVENTORY_OBJECT, []);
+    ship_nonscripts_to_install_shim(INVENTORY_NOTECARD, skip_nc);
     notify_driver_done();
 }
 
 // Ship every bundler-side item of one non-script type to the install_shim
-// target. The settings notecard IS included here — it's an example
-// template for wearers who want to customise defaults. On update paths
-// it stays excluded (a customised notecard must not be overwritten); the
-// install_shim path is the only place we ship it because the target is
-// empty by construction and has no notecard to preserve.
-ship_nonscripts_to_install_shim(integer inv_type) {
+// target, except names in skip_list. The settings notecard ships (this is
+// fresh install — no customisation to preserve); the driver omits it from
+// skip_list. Update / install-against-existing-collar paths still exclude
+// settings at three layers elsewhere.
+ship_nonscripts_to_install_shim(integer inv_type, list skip_list) {
     integer count = llGetInventoryNumber(inv_type);
     integer i = 0;
     while (i < count) {
         string name = llGetInventoryName(inv_type, i);
-        llGiveInventory(CollarKey, name);
+        if (llListFindList(skip_list, [name]) == -1) {
+            llGiveInventory(CollarKey, name);
+        }
         i += 1;
     }
 }
@@ -656,12 +671,19 @@ default {
         if (num == LM_INSTALL_SHIM_BEGIN) {
             cleanup_bundle();
 
-            string shim_str = llJsonGetValue(msg, ["shim"]);
-            string pin2_str = llJsonGetValue(msg, ["pin"]);
-            string csv2     = llJsonGetValue(msg, ["scripts"]);
+            string shim_str       = llJsonGetValue(msg, ["shim"]);
+            string pin2_str       = llJsonGetValue(msg, ["pin"]);
+            string csv2           = llJsonGetValue(msg, ["scripts"]);
+            string skip_anim_str  = llJsonGetValue(msg, ["skip_animations"]);
+            string skip_nc_str    = llJsonGetValue(msg, ["skip_notecards"]);
             if (shim_str == JSON_INVALID) return;
             if (pin2_str == JSON_INVALID) return;
             if (csv2 == JSON_INVALID) csv2 = "";
+            integer skip_anim = (skip_anim_str == "1");
+            list skip_nc = [];
+            if (skip_nc_str != JSON_INVALID && skip_nc_str != "") {
+                skip_nc = llCSV2List(skip_nc_str);
+            }
 
             Mode = "install_shim";
             CollarKey = (key)shim_str;
@@ -669,7 +691,7 @@ default {
 
             list scripts = [];
             if (csv2 != "") scripts = llCSV2List(csv2);
-            ship_to_install_shim(scripts);
+            ship_to_install_shim(scripts, skip_anim, skip_nc);
             return;
         }
     }

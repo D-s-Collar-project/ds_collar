@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -21,6 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 10: Split Bespoke walk into sibling updater_bespoke_ui.lsl — inline version pushed lslinterpreter past the Mono 65 KB ceiling (104%). Driver now dispatches via LM_BESPOKE_START and handles LM_BESPOKE_DONE / LM_BESPOKE_CANCEL on return. Added build_shim_payload / dispatch_shim_ship helpers: payload now carries skip_animations and skip_notecards flags, derived from the script set (animations ride with plugin_animate; "D/s Collar outfits setup" notecard rides with plugin_outfits). Consolidated 8 inline close-dialog blocks into a close_dialog() helper; show_scan_picker / show_picker now reuse open_dialog instead of duplicating its setup. Selected list initialised via list-doubling instead of O(n²) +=. Post-consolidation memory estimate 94.7% (was 104%).
 - v1.1 rev 9: Cancel paths now reset immediately via cancel_and_reset (2s notice + llResetScript) instead of cleanup_all / finish_shim_install. Avoids the dialog/bundle-timeout wait for sessions the wearer explicitly abandoned. If an install_shim is active, the helper broadcasts install.shim.done to make the shim disarm and self-delete before the driver resets. Uniform notice: "Installation cancelled. Resetting the updater..." Install-submenu Back now cancels (rather than navigating to main menu); submenu labels shortened to "Existing" / "New" to avoid viewer-side truncation, body rephrased to "Is this installation adding features to an existing collar or a new installation?"
 - v1.1 rev 8: Apply numbered-list pattern to the scan picker (buttons are digits, body text carries collar names). Add LM_BUNDLE_RESET: driver state_entry signals the sibling bundler to llResetScript, fixing a hang at "Detecting missing components..." caused by a stuck Mode != "" gate in the bundler from a previously-aborted session — driver-only llResetScript didn't propagate to the child prim's bundler.
 - v1.1 rev 7: Rewrite all dialogs to conform to feedback_dialog_layout_convention. List pickers (scan_picker, feature picker) now slot-map content top-to-bottom left-to-right with << / >> / Back nav at slots 0/1/2 and wrap-around pagination. Feature picker "Install" action is at slot 5 (bottom-right of action row, conventional confirm position) — slots 3 and 4 are content; build_target_slots takes an action_slots list so non-contiguous action claims work. total_buttons = max(6, 4+count) to guarantee slot 5 is in the list. Page size still 9-1=8. Action-only menus (main_menu, install_submenu, shim_mode_picker, bespoke prompt) skip the << / >> nav since they're inherently single-page; labels per user spec ("Cancel" only at the root main_menu, "Back" elsewhere). Shim mode picker uses user-specified layout: row 0 = Full / Minimal / Back, row 1 = Bespoke. install_submenu options renamed "Existing Collar" / "New Collar". pad_buttons helper removed; each caller builds exact slot positions.
@@ -50,6 +51,9 @@ integer LM_INSTALL_GO          = 91005;
 integer LM_INSTALL_SHIM_BEGIN  = 91006;
 integer LM_FEATURES_QUERY      = 91007;  // driver→bundler: enumerate features
 integer LM_BUNDLE_RESET        = 91008;  // driver→bundler: hard reset to clean state
+integer LM_BESPOKE_START       = 91010;  // driver→updater_bespoke_ui: begin walk
+integer LM_BESPOKE_DONE        = 91011;  // updater_bespoke_ui→driver: walk complete with scripts CSV
+integer LM_BESPOKE_CANCEL      = 91012;  // updater_bespoke_ui→driver: wearer cancelled
 
 
 /* -------------------- CONSTANTS -------------------- */
@@ -97,7 +101,7 @@ integer COLLARS_PER_PAGE  = 9;
 //   shim_offer_waiting         — gave install_shim, waiting for ready broadcast
 //   shim_features_querying     — bundler enumerating features for shim mode
 //   shim_mode_picking          — Minimal/Full/Bespoke dialog open
-//   shim_bespoke_iterating     — sequential per-feature Yes/No dialog
+//   shim_bespoke_running       — updater_bespoke_ui is running its walk
 //   shim_bundling              — bundler shipping to install_shim
 string Phase = "idle";
 
@@ -128,9 +132,11 @@ integer PickerPage = 0;
 key     ShimTarget = NULL_KEY;   // the prim hosting install_shim
 integer ShimPin = 0;
 
-// Bespoke iteration state.
-integer BespokeIdx = 0;
-list    BespokeShip = [];        // accumulating script names to ship
+// Bespoke walk lives in the sibling updater_bespoke_ui script (split out
+// in rev 10 because the inline walk pushed updater_driver past the Mono
+// 65 KB compiled ceiling). Driver kicks it off with LM_BESPOKE_START and
+// receives LM_BESPOKE_DONE (with the selected script CSV) or
+// LM_BESPOKE_CANCEL when the wearer abandons the walk.
 
 // Scan state. ScanResults is a stride-4 list:
 //   [collar_key_str, pin_str, wearer_key_str, object_name, ...]
@@ -176,8 +182,6 @@ cleanup_all() {
     PickerPage = 0;
     ShimTarget = NULL_KEY;
     ShimPin = 0;
-    BespokeIdx = 0;
-    BespokeShip = [];
     ScanResults = [];
     ScanNextAction = "";
     ScanPage = 0;
@@ -186,6 +190,15 @@ cleanup_all() {
 notice(string s) {
     if (Wearer != NULL_KEY) llRegionSayTo(Wearer, 0, s);
     else llOwnerSay(s);
+}
+
+// Tear down the current dialog channel and listen. Called whenever a
+// dialog answer routes to a path that won't re-open the same dialog —
+// keeps slot 0/1/2 from receiving stray responses on the next render.
+close_dialog() {
+    if (DialogListen) llListenRemove(DialogListen);
+    DialogListen = 0;
+    DialogChan   = 0;
 }
 
 // Open a dialog with a fresh channel and listen. Caller builds the
@@ -409,11 +422,7 @@ show_scan_picker() {
         k += 1;
     }
 
-    if (DialogListen) llListenRemove(DialogListen);
-    DialogChan = random_channel();
-    DialogListen = llListen(DialogChan, "", Wearer, "");
-    llDialog(Wearer, body, final_buttons, DialogChan);
-    llSetTimerEvent(DIALOG_TIMEOUT);
+    open_dialog(Wearer, body, final_buttons);
 }
 
 // Parse a digit button back to the absolute scan-results index for the
@@ -432,9 +441,7 @@ integer try_scan_pick(string label) {
 
     CollarKey = (key)llList2String(ScanResults, abs_idx * 4);
     CollarPin = (integer)llList2String(ScanResults, abs_idx * 4 + 1);
-    if (DialogListen) llListenRemove(DialogListen);
-    DialogListen = 0;
-    DialogChan = 0;
+    close_dialog();
     string next = "shim_loading";
     if (ScanNextAction == "install") next = "install_shim_loading";
     load_shim(next);
@@ -706,11 +713,7 @@ show_picker() {
         k += 1;
     }
 
-    if (DialogListen) llListenRemove(DialogListen);
-    DialogChan = random_channel();
-    DialogListen = llListen(DialogChan, "", Wearer, "");
-    llDialog(Wearer, body, final_buttons, DialogChan);
-    llSetTimerEvent(DIALOG_TIMEOUT);
+    open_dialog(Wearer, body, final_buttons);
 }
 
 // Match a numeric button press back to the absolute feature index.
@@ -818,6 +821,40 @@ handle_shim_ready(string message) {
     llSetTimerEvent(BUNDLE_TIMEOUT);
 }
 
+/* -------------------- INSTALL-SHIM PAYLOAD BUILDER -------------------- */
+
+// Compose the LM_INSTALL_SHIM_BEGIN payload from a chosen scripts list.
+// Asset-gating flags are derived from the scripts themselves so the rule
+// is uniform across Minimal / Full / Bespoke: animations ride with
+// plugin_animate, and the "D/s Collar outfits setup" notecard rides
+// with plugin_outfits. Add new asset/script linkages here as a single
+// source of truth.
+string build_shim_payload(list scripts) {
+    integer skip_anim = (llListFindList(scripts, ["plugin_animate"]) == -1);
+
+    list skip_nc = [];
+    if (llListFindList(scripts, ["plugin_outfits"]) == -1) {
+        skip_nc += ["D/s Collar outfits setup"];
+    }
+
+    return llList2Json(JSON_OBJECT, [
+        "shim",            (string)ShimTarget,
+        "pin",             (string)ShimPin,
+        "scripts",         llDumpList2String(scripts, ","),
+        "skip_animations", (string)skip_anim,
+        "skip_notecards",  llDumpList2String(skip_nc, ",")
+    ]);
+}
+
+dispatch_shim_ship(list scripts) {
+    Phase = "shim_bundling";
+    llSetTimerEvent(BUNDLE_TIMEOUT);
+    notice("Installing " + (string)llGetListLength(scripts) + " scripts...");
+    llMessageLinked(LINK_SET, LM_INSTALL_SHIM_BEGIN, build_shim_payload(scripts), NULL_KEY);
+}
+
+/* -------------------- SHIM MODE PICKER -------------------- */
+
 // Shim mode picker — user-specified layout: Full/Minimal/Back on the
 // bottom row, Bespoke alone above. Slots:
 //   0: Full, 1: Minimal, 2: Back, 3: Bespoke
@@ -827,17 +864,17 @@ show_shim_mode_picker() {
         "Fresh install onto new collar prim.\n\n"
       + "Minimal — core + access, blacklist, sos, animate, maint, leash.\n"
       + "Full — every component in the installer.\n"
-      + "Bespoke — core + per-component prompt.",
+      + "Bespoke — core + per-subsystem prompt.",
         ["Full", "Minimal", "Back", "Bespoke"]);
 }
 
-// Minimal selection in install_shim mode. These features are always
-// shipped (if the bundler reported them). Anything else is skipped.
-// Maint is included because plugin_maint owns the updater scan/invite
-// flow (remote.updaterscan.start in kmod_remote); without it a Minimal
-// collar can never be invited to update again.
+// Minimal selection — feature labels from the bundler's grouping that
+// always ship. Maint is included because plugin_maint owns the updater
+// scan/invite flow (remote.updaterscan.start in kmod_remote); without
+// it a Minimal collar can never be invited to update again. Status is
+// included because plugin_status owns the wearer-facing status UI.
 list minimal_feature_labels() {
-    return ["Core Components", "Leash Subsystem", "Access", "Blacklist", "Sos", "Animate", "Maint"];
+    return ["Core Components", "Leash Subsystem", "Access", "Blacklist", "Sos", "Animate", "Maint", "Status"];
 }
 
 ship_shim_mode(string mode) {
@@ -863,70 +900,28 @@ ship_shim_mode(string mode) {
         }
     }
 
-    string payload = llList2Json(JSON_OBJECT, [
-        "shim",    (string)ShimTarget,
-        "pin",     (string)ShimPin,
-        "scripts", llDumpList2String(scripts, ",")
-    ]);
-    Phase = "shim_bundling";
-    llSetTimerEvent(BUNDLE_TIMEOUT);
-    notice("Installing " + (string)llGetListLength(scripts) + " scripts...");
-    llMessageLinked(LINK_SET, LM_INSTALL_SHIM_BEGIN, payload, NULL_KEY);
+    dispatch_shim_ship(scripts);
 }
 
+/* -------------------- BESPOKE WALK (delegated) -------------------- */
+
+// The Bespoke walk lives in the sibling updater_bespoke_ui script. We
+// kick it off here with LM_BESPOKE_START and wait for either
+// LM_BESPOKE_DONE (with the accumulated script CSV) or LM_BESPOKE_CANCEL.
+//
+// Split out in rev 10 because keeping the walk inline pushed
+// updater_driver past the Mono 65 KB compiled ceiling (104% per
+// lslinterpreter). Cross-script LM cost is one round trip per dialog
+// answer plus one start/done pair, all within the linkset.
 start_bespoke() {
-    // Pre-seed with Core Components (always shipped in Bespoke mode).
-    BespokeShip = [];
-    integer n = features_count();
-    integer i = 0;
-    while (i < n) {
-        if (feature_label(i) == "Core Components") {
-            BespokeShip += llCSV2List(feature_scripts(i));
-        }
-        i += 1;
-    }
-    BespokeIdx = 0;
-    next_bespoke_prompt();
-}
-
-next_bespoke_prompt() {
-    integer n = features_count();
-    // Skip Core Components (already added) and advance to next askable feature.
-    while (BespokeIdx < n && feature_label(BespokeIdx) == "Core Components") {
-        BespokeIdx += 1;
-    }
-    if (BespokeIdx >= n) {
-        // Done iterating — ship.
-        string payload = llList2Json(JSON_OBJECT, [
-            "shim",    (string)ShimTarget,
-            "pin",     (string)ShimPin,
-            "scripts", llDumpList2String(BespokeShip, ",")
-        ]);
-        Phase = "shim_bundling";
-        llSetTimerEvent(BUNDLE_TIMEOUT);
-        notice("Installing " + (string)llGetListLength(BespokeShip) + " scripts...");
-        llMessageLinked(LINK_SET, LM_INSTALL_SHIM_BEGIN, payload, NULL_KEY);
-        return;
-    }
-
-    Phase = "shim_bespoke_iterating";
-    string label = feature_label(BespokeIdx);
-    // Slots: 0: Yes, 1: No, 2: Back. Bottom row only.
-    open_dialog(Wearer,
-        "Install component: " + label + "?",
-        ["Yes", "No", "Back"]);
-}
-
-handle_bespoke_answer(string btn) {
-    if (btn == "Back") {
-        cancel_and_reset();
-        return;
-    }
-    if (btn == "Yes") {
-        BespokeShip += llCSV2List(feature_scripts(BespokeIdx));
-    }
-    BespokeIdx += 1;
-    next_bespoke_prompt();
+    Phase = "shim_bespoke_running";
+    string payload = llList2Json(JSON_OBJECT, [
+        "wearer", (string)Wearer,
+        "shim",   (string)ShimTarget,
+        "pin",    (string)ShimPin
+    ]);
+    llMessageLinked(LINK_SET, LM_BESPOKE_START, payload, NULL_KEY);
+    llSetTimerEvent(BUNDLE_TIMEOUT);
 }
 
 
@@ -978,9 +973,7 @@ default {
 
             if (Phase == "main_menu") {
                 if (message == "Update Collar") {
-                    if (DialogListen) llListenRemove(DialogListen);
-                    DialogListen = 0;
-                    DialogChan = 0;
+                    close_dialog();
                     begin_scan(Wearer, "update");
                     return;
                 }
@@ -997,16 +990,12 @@ default {
 
             if (Phase == "install_submenu") {
                 if (message == "Existing") {
-                    if (DialogListen) llListenRemove(DialogListen);
-                    DialogListen = 0;
-                    DialogChan = 0;
+                    close_dialog();
                     begin_scan(Wearer, "install");
                     return;
                 }
                 if (message == "New") {
-                    if (DialogListen) llListenRemove(DialogListen);
-                    DialogListen = 0;
-                    DialogChan = 0;
+                    close_dialog();
                     offer_install_shim();
                     return;
                 }
@@ -1047,23 +1036,17 @@ default {
 
             if (Phase == "shim_mode_picking") {
                 if (message == "Minimal") {
-                    if (DialogListen) llListenRemove(DialogListen);
-                    DialogListen = 0;
-                    DialogChan = 0;
+                    close_dialog();
                     ship_shim_mode("minimal");
                     return;
                 }
                 if (message == "Full") {
-                    if (DialogListen) llListenRemove(DialogListen);
-                    DialogListen = 0;
-                    DialogChan = 0;
+                    close_dialog();
                     ship_shim_mode("full");
                     return;
                 }
                 if (message == "Bespoke") {
-                    if (DialogListen) llListenRemove(DialogListen);
-                    DialogListen = 0;
-                    DialogChan = 0;
+                    close_dialog();
                     start_bespoke();
                     return;
                 }
@@ -1074,10 +1057,8 @@ default {
                 return;
             }
 
-            if (Phase == "shim_bespoke_iterating") {
-                handle_bespoke_answer(message);
-                return;
-            }
+            // shim_bespoke_iterating dialogs are owned by updater_bespoke_ui;
+            // its own listen handles those responses on its own channel.
 
             return;
         }
@@ -1145,6 +1126,27 @@ default {
             return;
         }
 
+        // updater_bespoke_ui completed its walk. Pull the script CSV out
+        // of the payload and dispatch to the bundler as usual.
+        if (num == LM_BESPOKE_DONE) {
+            if (Phase != "shim_bespoke_running") return;
+            string csv = llJsonGetValue(msg, ["scripts"]);
+            if (csv == JSON_INVALID) csv = "";
+            list scripts = [];
+            if (csv != "") scripts = llCSV2List(csv);
+            dispatch_shim_ship(scripts);
+            return;
+        }
+
+        // Wearer hit Back during the Bespoke walk. Run the unified
+        // cancel path so the shim is told to disarm and the driver
+        // resets cleanly.
+        if (num == LM_BESPOKE_CANCEL) {
+            if (Phase != "shim_bespoke_running") return;
+            cancel_and_reset();
+            return;
+        }
+
         if (num == LM_INSTALL_FEATURES) {
             string features_json = llJsonGetValue(msg, ["features"]);
             if (features_json == JSON_INVALID) return;
@@ -1168,12 +1170,15 @@ default {
             }
 
             // Initialize Selected with all on (sensible default; wearer
-            // unticks unwanted features).
+            // unticks unwanted features). List-doubling pre-allocation
+            // dodges the O(n²) heap pressure of repeated `+=` inside a
+            // loop — matches the plugin_folders idiom referenced in
+            // the dialog convention memory.
             Selected = [];
-            integer i = 0;
-            while (i < n) {
-                Selected += [TRUE];
-                i += 1;
+            if (n > 0) {
+                list buf = [TRUE];
+                while (llGetListLength(buf) < n) buf = buf + buf;
+                Selected = llList2List(buf, 0, n - 1);
             }
             PickerPage = 0;
 
@@ -1224,7 +1229,7 @@ default {
         }
         if (Phase == "install_picking"
          || Phase == "shim_mode_picking"
-         || Phase == "shim_bespoke_iterating") {
+         || Phase == "shim_bespoke_running") {
             notice("Dialog timed out. Cancelling.");
             cleanup_all();
             return;
