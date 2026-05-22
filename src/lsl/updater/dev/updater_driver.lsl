@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -21,6 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 9: Cancel paths now reset immediately via cancel_and_reset (2s notice + llResetScript) instead of cleanup_all / finish_shim_install. Avoids the dialog/bundle-timeout wait for sessions the wearer explicitly abandoned. If an install_shim is active, the helper broadcasts install.shim.done to make the shim disarm and self-delete before the driver resets. Uniform notice: "Installation cancelled. Resetting the updater..." Install-submenu Back now cancels (rather than navigating to main menu); submenu labels shortened to "Existing" / "New" to avoid viewer-side truncation, body rephrased to "Is this installation adding features to an existing collar or a new installation?"
 - v1.1 rev 8: Apply numbered-list pattern to the scan picker (buttons are digits, body text carries collar names). Add LM_BUNDLE_RESET: driver state_entry signals the sibling bundler to llResetScript, fixing a hang at "Detecting missing components..." caused by a stuck Mode != "" gate in the bundler from a previously-aborted session — driver-only llResetScript didn't propagate to the child prim's bundler.
 - v1.1 rev 7: Rewrite all dialogs to conform to feedback_dialog_layout_convention. List pickers (scan_picker, feature picker) now slot-map content top-to-bottom left-to-right with << / >> / Back nav at slots 0/1/2 and wrap-around pagination. Feature picker "Install" action is at slot 5 (bottom-right of action row, conventional confirm position) — slots 3 and 4 are content; build_target_slots takes an action_slots list so non-contiguous action claims work. total_buttons = max(6, 4+count) to guarantee slot 5 is in the list. Page size still 9-1=8. Action-only menus (main_menu, install_submenu, shim_mode_picker, bespoke prompt) skip the << / >> nav since they're inherently single-page; labels per user spec ("Cancel" only at the root main_menu, "Back" elsewhere). Shim mode picker uses user-specified layout: row 0 = Full / Minimal / Back, row 1 = Bespoke. install_submenu options renamed "Existing Collar" / "New Collar". pad_buttons helper removed; each caller builds exact slot positions.
 - v1.1 rev 6: All three finish_* paths now route through restart_after_operation: 5-second "Please wait, restarting..." notice then llResetScript. Earlier llSleep(2.0) + cleanup_all left stale state visible to queued touch events, producing repeated "session already in progress" errors after completion. Hard reset wipes Phase and listeners cleanly.
@@ -252,15 +253,13 @@ show_main_menu(key who) {
 // Forks explicitly between the two install paths — discovery-based
 // branching was ambiguous because a worn collar would always be found
 // and pre-empt the install_shim path even when the wearer wanted a
-// fresh install onto a new prim.
-//   Slot 0: Existing Collar, Slot 1: New Collar, Slot 2: Back
+// fresh install onto a new prim. Slot 2 Back cancels the whole flow.
+//   Slot 0: Existing, Slot 1: New, Slot 2: Back
 show_install_submenu() {
     Phase = "install_submenu";
     open_dialog(Wearer,
-        "Install target:\n\n"
-      + "Existing Collar — discover your worn collar and install missing components.\n"
-      + "New Collar — receive install_shim, drop it into a fresh prim, then pick a profile.",
-        ["Existing Collar", "New Collar", "Back"]);
+        "Is this installation adding features to an existing collar or a new installation?",
+        ["Existing", "New", "Back"]);
 }
 
 
@@ -591,6 +590,27 @@ restart_after_operation() {
     llResetScript();
 }
 
+// User-initiated cancel path. Tells any active install_shim to disarm
+// and self-delete (matches the success path's done-broadcast — the shim
+// doesn't distinguish, it just removes itself when told), then resets
+// the driver immediately rather than waiting for the dialog/bundle
+// timer to expire. Shorter delay than restart_after_operation because
+// the wearer just pressed Cancel — they want it gone, not a 5s wait.
+cancel_and_reset() {
+    if (ShimTarget != NULL_KEY) {
+        string m = llList2Json(JSON_OBJECT, [
+            "type", "install.shim.done",
+            "shim", (string)ShimTarget
+        ]);
+        llRegionSay(EXTERNAL_ACL_QUERY_CHAN, m);
+    }
+    Phase = "resetting";
+    llSetTimerEvent(0.0);
+    notice("Installation cancelled. Resetting the updater...");
+    llSleep(2.0);
+    llResetScript();
+}
+
 finish_update() {
     llWhisper(SecureChannel, "DONE");
     notice("Update complete. Collar is now at version " + BUILD_VERSION + ".");
@@ -711,13 +731,10 @@ integer match_picker_button(string btn) {
 
 handle_picker_button(string btn) {
     if (btn == "Back") {
-        notice("Install cancelled.");
-        // Bundler is parked in scripts_await — abort by sending empty
-        // LM_INSTALL_GO so it advances past the scripts phase with
-        // nothing to ship, completes non-script phases, and emits
-        // LM_BUNDLE_DONE.
-        string payload = llList2Json(JSON_OBJECT, ["scripts", ""]);
-        llMessageLinked(LINK_SET, LM_INSTALL_GO, payload, NULL_KEY);
+        // Driver llResetScript wipes everything; state_entry then
+        // broadcasts LM_BUNDLE_RESET, which resets the bundler too —
+        // so the parked scripts_await state doesn't matter.
+        cancel_and_reset();
         return;
     }
     if (btn == "Install") {
@@ -902,8 +919,7 @@ next_bespoke_prompt() {
 
 handle_bespoke_answer(string btn) {
     if (btn == "Back") {
-        notice("Install cancelled.");
-        finish_shim_install();
+        cancel_and_reset();
         return;
     }
     if (btn == "Yes") {
@@ -973,21 +989,21 @@ default {
                     return;
                 }
                 if (message == "Cancel") {
-                    cleanup_all();
+                    cancel_and_reset();
                     return;
                 }
                 return;
             }
 
             if (Phase == "install_submenu") {
-                if (message == "Existing Collar") {
+                if (message == "Existing") {
                     if (DialogListen) llListenRemove(DialogListen);
                     DialogListen = 0;
                     DialogChan = 0;
                     begin_scan(Wearer, "install");
                     return;
                 }
-                if (message == "New Collar") {
+                if (message == "New") {
                     if (DialogListen) llListenRemove(DialogListen);
                     DialogListen = 0;
                     DialogChan = 0;
@@ -995,7 +1011,7 @@ default {
                     return;
                 }
                 if (message == "Back") {
-                    show_main_menu(Wearer);
+                    cancel_and_reset();
                     return;
                 }
                 return;
@@ -1003,8 +1019,7 @@ default {
 
             if (Phase == "scan_picking") {
                 if (message == "Back") {
-                    notice("Cancelled.");
-                    cleanup_all();
+                    cancel_and_reset();
                     return;
                 }
                 integer scan_n = llGetListLength(ScanResults) / 4;
@@ -1053,8 +1068,7 @@ default {
                     return;
                 }
                 if (message == "Back") {
-                    notice("Install cancelled.");
-                    finish_shim_install();
+                    cancel_and_reset();
                     return;
                 }
                 return;
