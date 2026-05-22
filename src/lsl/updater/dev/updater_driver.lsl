@@ -21,7 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
-- v1.1 rev 7: Rewrite all dialogs to conform to feedback_dialog_layout_convention. List pickers (scan_picker, feature picker) now slot-map content top-to-bottom left-to-right with << / >> / Back nav at slots 0/1/2 and wrap-around pagination. Feature picker action label is "Install" at slot 3 (page size = 9 - 1 = 8). Action-only menus (main_menu, install_submenu, shim_mode_picker, bespoke prompt) skip the << / >> nav since they're inherently single-page; labels per user spec ("Cancel" only at the root main_menu, "Back" elsewhere). Shim mode picker uses user-specified layout: row 0 = Full / Minimal / Back, row 1 = Bespoke. install_submenu options renamed "Existing Collar" / "New Collar". pad_buttons helper removed; each caller builds exact slot positions.
+- v1.1 rev 7: Rewrite all dialogs to conform to feedback_dialog_layout_convention. List pickers (scan_picker, feature picker) now slot-map content top-to-bottom left-to-right with << / >> / Back nav at slots 0/1/2 and wrap-around pagination. Feature picker "Install" action is at slot 5 (bottom-right of action row, conventional confirm position) — slots 3 and 4 are content; build_target_slots takes an action_slots list so non-contiguous action claims work. total_buttons = max(6, 4+count) to guarantee slot 5 is in the list. Page size still 9-1=8. Action-only menus (main_menu, install_submenu, shim_mode_picker, bespoke prompt) skip the << / >> nav since they're inherently single-page; labels per user spec ("Cancel" only at the root main_menu, "Back" elsewhere). Shim mode picker uses user-specified layout: row 0 = Full / Minimal / Back, row 1 = Bespoke. install_submenu options renamed "Existing Collar" / "New Collar". pad_buttons helper removed; each caller builds exact slot positions.
 - v1.1 rev 6: All three finish_* paths now route through restart_after_operation: 5-second "Please wait, restarting..." notice then llResetScript. Earlier llSleep(2.0) + cleanup_all left stale state visible to queued touch events, producing repeated "session already in progress" errors after completion. Hard reset wipes Phase and listeners cleanly.
 - v1.1 rev 5: Replace first-responder-wins discovery with scan-and-pick. Touch-initiated update/install paths now collect every remote.collarready for SCAN_WINDOW (5s), then auto-proceed if exactly one collar responded or show a picker dialog otherwise. Picker label is the collar object name (single-wearer case) or 'Wearer: Object name' (multi-wearer), clipped to the 24-char dialog limit. Invite-path collar handshake is untouched — it's already point-to-point and doesn't need scanning. handle_collar_ready removed; touch flow routes through record_scan_response + finalize_scan.
 - v1.1 rev 4: Make the install fork explicit. Picking 'Install Scripts' now opens a sub-menu [Existing collar / Empty object / Cancel] instead of auto-branching on discovery success/failure. Discovery-based branching pre-empted the install_shim path whenever the wearer's collar was in range, so 'Empty object' fresh-installs were silently impossible. Existing-collar timeout no longer falls back to install_shim — the wearer chose that path explicitly, so surface the timeout and let them re-touch.
@@ -211,9 +211,12 @@ integer wrap_next_page(integer page, integer max_page) {
 }
 
 // Build target_slots for content placement: top-to-bottom, left-to-right
-// among the slots reachable given total_buttons length, skipping any
-// slots claimed by actions (3..first_content_slot-1).
-list build_target_slots(integer total_buttons, integer first_content_slot) {
+// among the slots reachable given total_buttons length. action_slots is
+// the list of action-row slots (3/4/5) claimed by buttons that aren't
+// content — skipped here so content doesn't overwrite them. Non-
+// contiguous claims are supported (e.g. action at slot 5 only, with
+// slots 3 and 4 available as content).
+list build_target_slots(integer total_buttons, list action_slots) {
     list slots = [];
     if (total_buttons > 9)  slots += [9];
     if (total_buttons > 10) slots += [10];
@@ -221,9 +224,9 @@ list build_target_slots(integer total_buttons, integer first_content_slot) {
     if (total_buttons > 6)  slots += [6];
     if (total_buttons > 7)  slots += [7];
     if (total_buttons > 8)  slots += [8];
-    if (first_content_slot <= 3 && total_buttons > 3) slots += [3];
-    if (first_content_slot <= 4 && total_buttons > 4) slots += [4];
-    if (first_content_slot <= 5 && total_buttons > 5) slots += [5];
+    if (total_buttons > 3 && llListFindList(action_slots, [3]) == -1) slots += [3];
+    if (total_buttons > 4 && llListFindList(action_slots, [4]) == -1) slots += [4];
+    if (total_buttons > 5 && llListFindList(action_slots, [5]) == -1) slots += [5];
     return slots;
 }
 
@@ -376,8 +379,8 @@ show_scan_picker() {
     if (stop > n) stop = n;
     integer count = stop - start;
 
-    integer first_content_slot = 3;
-    integer total_buttons = first_content_slot + count;
+    // No actions — selection IS the action. total_buttons = 3 nav + count.
+    integer total_buttons = 3 + count;
 
     list final_buttons = ["<<", ">>", "Back"];
     integer p = 0;
@@ -386,7 +389,7 @@ show_scan_picker() {
         p += 1;
     }
 
-    list target_slots = build_target_slots(total_buttons, first_content_slot);
+    list target_slots = build_target_slots(total_buttons, []);
     integer i = 0;
     while (i < count) {
         integer slot = llList2Integer(target_slots, i);
@@ -620,13 +623,20 @@ string feature_scripts(integer idx) {
     return llList2String(Features, idx * 2 + 1);
 }
 
-// Render the feature multi-select picker per the project's dialog
-// convention. Action: "Install" at slot 3 (finalize selection). Content:
-// features with [X]/[ ] toggle prefix, slot-mapped top-to-bottom.
+// Render the feature multi-select picker as an ordered list per the
+// project pattern (canonical in plugin_outfits / plugin_folders): body
+// text carries the numbered list with the toggle state, BUTTONS are
+// just digits ("1", "2", ...). This handles feature names that would
+// otherwise blow past the 24-char dialog-button limit.
+//
+// Layout per dialog convention:
 //   Slots 0/1/2: <<, >>, Back
-//   Slot 3: Install (finalize)
-//   Slots 4-11: features
-// Page size = 9 - action_count = 8.
+//   Slots 3, 4: content (digits, low row)
+//   Slot 5:     Install (action — bottom-right of action row)
+//   Slots 6-11: content (digits, upper rows)
+//
+// total_buttons must include slot 5 at minimum (=6); higher for larger
+// counts so the upper rows are reachable.
 show_picker() {
     integer n = features_count();
     integer pages = (n + FEATURES_PER_PAGE - 1) / FEATURES_PER_PAGE;
@@ -637,30 +647,37 @@ show_picker() {
     if (stop > n) stop = n;
     integer count = stop - start;
 
-    integer first_content_slot = 4;  // slot 3 is the Install action
-    integer total_buttons = first_content_slot + count;
+    integer total_buttons = 4 + count;
+    if (total_buttons < 6) total_buttons = 6;
 
-    list final_buttons = ["<<", ">>", "Back", "Install"];
+    list final_buttons = ["<<", ">>", "Back"];
     integer p = 0;
-    while (p < count) {
+    while (p < total_buttons - 3) {
         final_buttons += [""];
         p += 1;
     }
+    // Stamp Install at slot 5 (bottom-right of action row).
+    final_buttons = llListReplaceList(final_buttons, ["Install"], 5, 5);
 
-    list target_slots = build_target_slots(total_buttons, first_content_slot);
+    list target_slots = build_target_slots(total_buttons, [5]);
     integer i = 0;
     while (i < count) {
         integer slot = llList2Integer(target_slots, i);
-        integer feat_idx = start + i;
-        string prefix = "[ ] ";
-        if (llList2Integer(Selected, feat_idx)) prefix = "[X] ";
-        string label = prefix + feature_label(feat_idx);
-        final_buttons = llListReplaceList(final_buttons, [label], slot, slot);
+        final_buttons = llListReplaceList(final_buttons, [(string)(i + 1)], slot, slot);
         i += 1;
     }
 
-    string body = "Select components to install. Tap to toggle.";
-    if (pages > 1) body += "\nPage " + (string)(PickerPage + 1) + " of " + (string)pages;
+    string body = "Select components to install. Tap a number to toggle, then Install.\n";
+    if (pages > 1) body += "Page " + (string)(PickerPage + 1) + " of " + (string)pages + "\n";
+    body += "\n";
+    integer k = 0;
+    while (k < count) {
+        integer feat_idx = start + k;
+        string mark = "[ ]";
+        if (llList2Integer(Selected, feat_idx)) mark = "[X]";
+        body += (string)(k + 1) + ". " + mark + " " + feature_label(feat_idx) + "\n";
+        k += 1;
+    }
 
     if (DialogListen) llListenRemove(DialogListen);
     DialogChan = random_channel();
@@ -669,20 +686,20 @@ show_picker() {
     llSetTimerEvent(DIALOG_TIMEOUT);
 }
 
-// Match a button press back to a feature index for the current page.
-// Returns -1 if no match.
+// Match a numeric button press back to the absolute feature index.
+// Buttons on the current page are labelled "1".."N" where N is the
+// in-page count; "1" corresponds to start = PickerPage * FEATURES_PER_PAGE.
+// Returns -1 if the label isn't a valid digit in range (so the nav and
+// action labels fall through to their own handlers).
 integer match_picker_button(string btn) {
-    integer n = features_count();
-    integer start = PickerPage * FEATURES_PER_PAGE;
-    integer stop = start + FEATURES_PER_PAGE;
-    if (stop > n) stop = n;
-    integer i = start;
-    while (i < stop) {
-        if (btn == "[ ] " + feature_label(i)) return i;
-        if (btn == "[X] " + feature_label(i)) return i;
-        i += 1;
-    }
-    return -1;
+    integer pos = (integer)btn;
+    if (pos < 1) return -1;
+    if ((string)pos != btn) return -1;  // reject e.g. "1abc"
+    integer abs_idx = (PickerPage * FEATURES_PER_PAGE) + (pos - 1);
+    if (abs_idx >= features_count()) return -1;
+    integer page_stop = (PickerPage + 1) * FEATURES_PER_PAGE;
+    if (abs_idx >= page_stop) return -1;
+    return abs_idx;
 }
 
 handle_picker_button(string btn) {
