@@ -545,7 +545,7 @@ show_disabled_menu() {
 
     string body = "Outfits is currently DISABLED.\n";
     body += ".outfits/.base is unlocked — the wearer can change\n";
-    body += "appearance freely. Re-enable to restore protection and";
+    body += "appearance freely. Re-enable to restore protection and ";
     body += "resume outfit browsing.";
 
     list button_data = [];
