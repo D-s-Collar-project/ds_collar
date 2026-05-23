@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -43,6 +43,12 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
              Lock/Unlock.
 CHANGES:
+- v1.10 rev 10: Default plugin.outfit.active to OFF when KEY_ACTIVE is
+  absent in LSD (fresh installs, pre-rev-9 collars). Booting with .base
+  locked before the wearer has set up outfits was a UX trap. Empty
+  scan_outfits result now routes to a new no-outfits menu
+  (Help/Disable/Back) instead of return_to_root, closing the dead-end
+  where post-Enable empty scan locked .base with no path back.
 - v1.10 rev 9: Runtime on/off toggle. plugin.outfit.active LSD key
   (managed by kmod_settings rev 18, default ON) controls whether the
   outfit system is active. Disable button on the picker for ACL
@@ -145,6 +151,8 @@ string  SessionId      = "";
 //   "pick"         = paginated outfit picker
 //   "action"       = per-outfit Wear/Replace submenu
 //   "disabled"     = plugin is OFF; root menu shows Enable/Help/Back
+//   "empty"        = plugin is ON but #RLV/.outfits has no outfit
+//                    subfolders; menu shows Help/Disable/Back
 string  MenuContext      = "";
 string  SelectedOutfit   = "";
 
@@ -157,7 +165,9 @@ integer PageSize         = 7;  // 12 dialog slots − 3 nav − 2 action (Help+D
 // LastActive is the sentinel apply_settings_sync uses to detect
 // transitions and emit the corresponding @detachallthis:.outfits/.base
 // apply / release through kmod_rlv. -1 forces the first sync to emit.
-integer OutfitsActive    = 1;
+// Default OFF so fresh wearers can set up #RLV/.outfits/.base without
+// fighting a pre-emptive .base lock; the wearer opts in via Enable.
+integer OutfitsActive    = 0;
 integer LastActive       = -1;
 
 // Persistent outfit lock state. Holds outfit names (not full paths)
@@ -338,12 +348,14 @@ apply_settings_sync() {
         i += 1;
     }
 
-    // Active toggle. KEY_ACTIVE is 0 or 1; default 1 (on) when absent.
-    // LastActive's -1 sentinel forces an emit on the first sync after
-    // state_entry so the .base claim state is in sync with LSD even
-    // when the LSD value matches OutfitsActive's in-script default.
+    // Active toggle. KEY_ACTIVE is 0 or 1; default 0 (off) when absent
+    // so fresh installs do not lock .base before the wearer has built
+    // out #RLV/.outfits. LastActive's -1 sentinel forces an emit on the
+    // first sync after state_entry so the .base claim state is in sync
+    // with LSD even when the LSD value matches OutfitsActive's
+    // in-script default.
     string active_str = llLinksetDataRead(KEY_ACTIVE);
-    integer new_active = 1;
+    integer new_active = 0;
     if (active_str != "") new_active = (integer)active_str;
     OutfitsActive = new_active;
     if (new_active != LastActive) {
@@ -552,6 +564,35 @@ show_disabled_menu() {
     ]), NULL_KEY);
 }
 
+// Shown when scan_outfits returns an empty list (no non-dot subfolders
+// under #RLV/.outfits). Replaces an earlier return_to_root path that
+// left the wearer stuck with .base locked after a premature Enable
+// and no Disable button reachable. Help delivers the setup notecard;
+// Disable (ACL 2-5 only) flips KEY_ACTIVE back off so .base unlocks.
+show_empty_menu() {
+    SessionId   = generate_session_id();
+    MenuContext = "empty";
+
+    string body = "No outfits found in #RLV/" + OUTFITS_ROOT + ".\n\n";
+    body += "Create a subfolder under #RLV/" + OUTFITS_ROOT + " for\n";
+    body += "each outfit, then return here. Tap Help for the setup\n";
+    body += "notecard.";
+
+    list button_data = [btn("Help", "help")];
+    if (btn_allowed("Disable")) button_data += [btn("Disable", "disable")];
+    button_data += [btn("Back", "back")];
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type",        "ui.dialog.open",
+        "session_id",  SessionId,
+        "user",        (string)CurrentUser,
+        "title",       PLUGIN_LABEL,
+        "body",        body,
+        "button_data", llList2Json(JSON_ARRAY, button_data),
+        "timeout",     60
+    ]), NULL_KEY);
+}
+
 show_action(string outfit_name) {
     SessionId      = generate_session_id();
     MenuContext    = "action";
@@ -705,6 +746,28 @@ handle_dialog_response(string msg) {
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
 
+    if (MenuContext == "empty") {
+        if (ctx == "help") {
+            give_setup_notecard();
+            show_empty_menu();
+            return;
+        }
+        if (ctx == "disable") {
+            if (!btn_allowed("Disable")) {
+                llRegionSayTo(CurrentUser, 0, "Access denied.");
+                show_empty_menu();
+                return;
+            }
+            toggle_active(0);
+            show_disabled_menu();
+            return;
+        }
+        if (ctx == "back") {
+            return_to_root();
+        }
+        return;
+    }
+
     if (MenuContext == "disabled") {
         if (ctx == "enable") {
             if (!btn_allowed("Disable")) {
@@ -857,9 +920,7 @@ handle_rlv_response(string message) {
     }
 
     if (llGetListLength(Outfits) == 0) {
-        llRegionSayTo(CurrentUser, 0,
-            "No outfits found in #RLV/" + OUTFITS_ROOT + ".");
-        return_to_root();
+        show_empty_menu();
         return;
     }
 
