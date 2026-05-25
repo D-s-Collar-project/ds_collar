@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: update_shim.lsl
 VERSION: 1.10
-REVISION: 5
+REVISION: 6
 PURPOSE: Transient payload deposited into the collar by updater_driver via
   llRemoteLoadScriptPin. Runs inside the collar, answers inventory and
   ship-decision queries from updater_bundler over the start_param channel,
@@ -13,6 +13,7 @@ ARCHITECTURE: No link_message interaction with the rest of the collar.
   its next inventory tick — the shim does not touch LSD itself.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
+- v1.1 rev 6: INACTIVITY_TIMEOUT 120s → 600s. The install-against-existing-collar flow parks the bundler in scripts_await while the driver shows the feature picker; if the wearer took longer than 120s reading, the shim disarmed the PIN before they confirmed, then llRemoteLoadScriptPin failed with "trying to illegally load script onto task" on the next dispatch. 600s covers any plausible decision time + BUNDLE_TIMEOUT.
 - v1.1 rev 5: Broadcast `remote.update.complete` on REMOTE_BUS in the DONE handler before self-deletion. kmod_bootstrap listens for it and llResetScripts so the startup orchestration (RLV probe, register.refresh, status announcement) re-runs with the new script set live. Only the success path emits — inactivity timeout / CHANGED_OWNER cleanups don't, since those leave the collar half-updated and a "we're done" signal would be misleading.
 - v1.1 rev 4: Extend protocol with animations, objects, notecards. LIST_ANIM / LIST_OBJ / LIST_NC + QUERY_ANIM / QUERY_OBJ / QUERY_NC mirror the script flow per-type. Settings notecard ("settings") is hard-excluded — never reported in LIST_NC, never wiped via QUERY_NC (returns EXCLUDE). Non-script types have no SWEEP — items not in bundler are wearer's customs and stay untouched. Shim wipes stale items synchronously inside verdict_for_typed before reporting GIVE; bundler then calls llGiveInventory(collar_uuid, item) per item — same-owner attached prim transfer is silent at script level and bypasses RLV's edit-block, no wearer interaction required (mirrors OpenCollar's mechanism).
 - v1.1 rev 3: Drop notecard-mode protocol. Replace with inventory-driven
@@ -35,10 +36,20 @@ CHANGES:
 string UPDATER_MARKER = "COLLAR_UPDATER";
 
 // Inactivity window. If no message arrives from the bundler for this many
-// seconds, assume the update died and clean up. 120s comfortably covers
-// the 3s per-script throttle of llRemoteLoadScriptPin across a ~30 script
-// package, with slack.
-float INACTIVITY_TIMEOUT = 120.0;
+// seconds, assume the session died and clean up — which disarms the PIN
+// (`llSetRemoteScriptAccessPin(0)`) and removes the shim.
+//
+// Has to be longer than the longest expected gap between bundler messages:
+//   - Update mode: bundler sends QUERY/REPLY continuously; gaps are seconds.
+//   - Install-against-existing-collar mode: bundler PARKS in scripts_await
+//     while the driver shows the feature picker to the wearer, no
+//     traffic for the full picker-decision time + BUNDLE_TIMEOUT.
+// Earlier 120s value zeroed the PIN while the wearer was still deciding,
+// then llRemoteLoadScriptPin failed with "trying to illegally load
+// script" after the wearer confirmed. 600s covers any plausible
+// decision time without losing the safety-net behaviour for a truly
+// stalled session.
+float INACTIVITY_TIMEOUT = 600.0;
 
 // Wearer-specific config; never managed by the updater. Excluded from
 // LIST_NC reporting and from QUERY_NC wipe (returns EXCLUDE verdict so

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 5
+REVISION: 10
 PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -13,14 +13,18 @@ PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
            Lock   — claim @detachallthis on the outfit (locks it
                     against removal by Strip, Remove, or relays)
            Unlock — release the lock
-         Requires #RLV/.outfits/.base to exist as the wearer's
-         protected non-strippable kit folder.
+         The picker also exposes a Help button that delivers the
+         "D/s Collar outfits setup" notecard describing the expected
+         #RLV/.outfits/.base layout.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Subfolder enumeration via @getinv:.outfits on
-             every menu entry — no persisted manifest. The same
-             @getinv response is also the .base presence check; if
-             .base is missing, the menu opens a one-button dialog and
-             on OK delivers the setup notecard. Lock state is
+             every menu entry — no persisted manifest. The
+             .outfits/.base subfolder is intentionally invisible to
+             every RLV enumeration command (dot-prefixed names are
+             systematically hidden by the API), so the plugin cannot
+             programmatically verify it exists; instead the picker
+             offers a Help button that delivers the setup notecard
+             on demand. Lock state is
              persistent via kmod_settings (KEY_LOCKED CSV in LSD),
              mirroring the plugin_lock / plugin_folders pattern:
              locks survive detach/reattach and script reset, and only
@@ -39,6 +43,36 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
              Lock/Unlock.
 CHANGES:
+- v1.10 rev 10: Default plugin.outfit.active to OFF when KEY_ACTIVE is
+  absent in LSD (fresh installs, pre-rev-9 collars). Booting with .base
+  locked before the wearer has set up outfits was a UX trap. Empty
+  scan_outfits result now routes to a new no-outfits menu
+  (Help/Disable/Back) instead of return_to_root, closing the dead-end
+  where post-Enable empty scan locked .base with no path back.
+- v1.10 rev 9: Runtime on/off toggle. plugin.outfit.active LSD key
+  (managed by kmod_settings rev 18, default ON) controls whether the
+  outfit system is active. Disable button on the picker for ACL
+  2/3/4/5 (wearer-grade QoL — owned wearers can change appearance
+  too); Enable button on the disabled menu. When OFF, the
+  .outfits/.base @detachallthis claim is released so the wearer can
+  freely change appearance — that lock now belongs to plugin_outfits
+  instead of plugin_strip (which dropped its claim in rev 13).
+  Per-outfit Lock/Unlock state (KEY_LOCKED) is unaffected by the
+  toggle. PageSize drops 8 → 7 to make room for the Disable button
+  (cell 4); ACL 1 (public) sees a blank filler in that cell.
+- v1.10 rev 8: Strip DEBUG_OUTFITS scaffolding and logd() calls now
+  that the dropped .base precheck (rev 7) is confirmed working.
+- v1.10 rev 7: Drop the .base precheck — RLV systematically hides
+  dot-prefixed folders from every enumeration command, so the
+  @getinv:.outfits response can never report .base regardless of
+  whether the wearer has set it up. The precheck was rejecting
+  fully-configured wearers. Replaced with a Help button on the
+  picker that delivers the setup notecard on demand; picker
+  PageSize drops from 9 to 8 to reserve a slot for Help.
+- v1.10 rev 6: Rename the setup notecard from
+  "D/s Collar - Outfits Setup" to "D/s Collar outfits setup".
+  llGetInventoryType lookup is case-sensitive, so the in-prim
+  notecard must match exactly.
 - v1.10 rev 5: Migrate locks from session-only to persistent. Rev 4's
   premise (locks die on script reset, so session-only is fine with an
   rlv.clear cleanup) was wrong: RLV restrictions on the viewer survive
@@ -72,7 +106,7 @@ CHANGES:
 - v1.10 rev 2: Pre-flight check for #RLV/.outfits/.base. The picker
   no longer opens if .base is not configured under .outfits;
   a "base folder not configured" dialog opens instead, and OK
-  delivers the "D/s Collar - Outfits Setup" notecard. The check
+  delivers the "D/s Collar outfits setup" notecard. The check
   piggybacks on the existing @getinv:.outfits roundtrip — no
   additional RLV query needed.
 - v1.10 rev 1: handle_rlv_response pre-allocates Outfits via list
@@ -95,15 +129,16 @@ string PLUGIN_LABEL   = "Outfits";
 /* -------------------- RLV -------------------- */
 integer RLV_CHAN    = 1888772;
 float   RLV_TIMEOUT = 10.0;
-string  OUTFITS_ROOT  = ".outfits";   // #RLV-relative root for outfit subfolders.
-string  BASE_SUBNAME  = ".base";      // Required subfolder inside .outfits (precheck target).
-string  RLV_CONSUMER  = "outfits";    // kmod_rlv consumer id for lock claims.
+string  OUTFITS_ROOT  = ".outfits";          // #RLV-relative root for outfit subfolders.
+string  BASE_FOLDER   = ".outfits/.base";    // protected non-strippable subfolder.
+string  RLV_CONSUMER  = "outfits";           // kmod_rlv consumer id for lock claims.
 
 /* -------------------- SETTINGS KEYS -------------------- */
-string  KEY_LOCKED = "outfits.locked";  // CSV of locked outfit names (managed by kmod_settings).
+string  KEY_LOCKED = "outfits.locked";        // CSV of locked outfit names.
+string  KEY_ACTIVE = "plugin.outfit.active";  // 0=off (.base unlocked), 1=on.
 
 /* -------------------- INVENTORY -------------------- */
-string  SETUP_NOTECARD = "D/s Collar - Outfits Setup";
+string  SETUP_NOTECARD = "D/s Collar outfits setup";
 
 /* -------------------- STATE -------------------- */
 key     CurrentUser    = NULL_KEY;
@@ -112,19 +147,28 @@ list    gPolicyButtons = [];
 string  SessionId      = "";
 
 // Menu-state machine values used by show_*/handle_dialog_response:
-//   "scanning"     = awaiting @getinv:.outfits response (also doubles as
-//                    the .base presence check — no extra roundtrip)
-//   "base_missing" = one-button dialog shown when .base is absent;
-//                    OK delivers the setup notecard
+//   "scanning"     = awaiting @getinv:.outfits response
 //   "pick"         = paginated outfit picker
 //   "action"       = per-outfit Wear/Replace submenu
+//   "disabled"     = plugin is OFF; root menu shows Enable/Help/Back
+//   "empty"        = plugin is ON but #RLV/.outfits has no outfit
+//                    subfolders; menu shows Help/Disable/Back
 string  MenuContext      = "";
 string  SelectedOutfit   = "";
 
 list    Outfits          = [];
 integer PickPage         = 0;
 integer LastMaxPage      = 0;
-integer PageSize         = 9;
+integer PageSize         = 7;  // 12 dialog slots − 3 nav − 2 action (Help+Disable) = 7 content items
+
+// Runtime on/off toggle. OutfitsActive mirrors KEY_ACTIVE in LSD;
+// LastActive is the sentinel apply_settings_sync uses to detect
+// transitions and emit the corresponding @detachallthis:.outfits/.base
+// apply / release through kmod_rlv. -1 forces the first sync to emit.
+// Default OFF so fresh wearers can set up #RLV/.outfits/.base without
+// fighting a pre-emptive .base lock; the wearer opts in via Enable.
+integer OutfitsActive    = 0;
+integer LastActive       = -1;
 
 // Persistent outfit lock state. Holds outfit names (not full paths)
 // that have an active @detachallthis claim under our consumer id.
@@ -182,10 +226,10 @@ register_self() {
     // get the full set including Lock/Unlock.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
         "1", "Add,Wear,Remove",
-        "2", "Add,Wear,Remove",
-        "3", "Add,Wear,Remove,Lock,Unlock",
-        "4", "Add,Wear,Remove,Lock,Unlock",
-        "5", "Add,Wear,Remove,Lock,Unlock"
+        "2", "Add,Wear,Remove,Disable",
+        "3", "Add,Wear,Remove,Lock,Unlock,Disable",
+        "4", "Add,Wear,Remove,Lock,Unlock,Disable",
+        "5", "Add,Wear,Remove,Lock,Unlock,Disable"
     ]));
 
     write_plugin_reg(PLUGIN_LABEL);
@@ -303,6 +347,49 @@ apply_settings_sync() {
         ]), NULL_KEY);
         i += 1;
     }
+
+    // Active toggle. KEY_ACTIVE is 0 or 1; default 0 (off) when absent
+    // so fresh installs do not lock .base before the wearer has built
+    // out #RLV/.outfits. LastActive's -1 sentinel forces an emit on the
+    // first sync after state_entry so the .base claim state is in sync
+    // with LSD even when the LSD value matches OutfitsActive's
+    // in-script default.
+    string active_str = llLinksetDataRead(KEY_ACTIVE);
+    integer new_active = 0;
+    if (active_str != "") new_active = (integer)active_str;
+    OutfitsActive = new_active;
+    if (new_active != LastActive) {
+        string op = "rlv.release";
+        if (new_active) op = "rlv.apply";
+        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+            "type",     op,
+            "consumer", RLV_CONSUMER,
+            "behav",    "detachallthis:" + BASE_FOLDER
+        ]), NULL_KEY);
+        LastActive = new_active;
+    }
+}
+
+// Toggle handler. Flips OutfitsActive, emits the matching rlv.apply or
+// rlv.release for the .base claim immediately (so the wearer sees the
+// effect without waiting for the settings.sync round-trip), and
+// persists via settings.delta. LastActive is updated so apply_settings_sync
+// recognises the subsequent sync as a no-op. llMessageLinked is inlined
+// because rlv_op is defined later in the file (LSL forward-declaration).
+toggle_active(integer new_state) {
+    OutfitsActive = new_state;
+    LastActive    = new_state;
+
+    string op = "rlv.release";
+    if (new_state) op = "rlv.apply";
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",     op,
+        "consumer", RLV_CONSUMER,
+        "behav",    "detachallthis:" + BASE_FOLDER
+    ]), NULL_KEY);
+
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_ACTIVE + ":" + (string)new_state, NULL_KEY);
 }
 
 // Called from the kernel.reset.factory handler BEFORE llResetScript.
@@ -312,18 +399,26 @@ apply_settings_sync() {
 // state is wiped. Safe because we are about to reset anyway —
 // kmod_rlv's refcount tracking is moot.
 release_persisted_locks() {
+    // Per-outfit locks.
     string csv = llLinksetDataRead(KEY_LOCKED);
-    if (csv == "") return;
-    list locks = llParseString2List(csv, [","], []);
-    integer n = llGetListLength(locks);
-    integer i = 0;
-    while (i < n) {
-        string name = llList2String(locks, i);
-        if (name != "") {
-            llOwnerSay("@detachallthis:" + OUTFITS_ROOT + "/" + name + "=y");
+    if (csv != "") {
+        list locks = llParseString2List(csv, [","], []);
+        integer n = llGetListLength(locks);
+        integer i = 0;
+        while (i < n) {
+            string name = llList2String(locks, i);
+            if (name != "") {
+                llOwnerSay("@detachallthis:" + OUTFITS_ROOT + "/" + name + "=y");
+            }
+            i += 1;
         }
-        i += 1;
     }
+    // .base claim (only if it was active — release is a no-op otherwise
+    // but the viewer logs it; skip if KEY_ACTIVE is explicitly 0).
+    string active_str = llLinksetDataRead(KEY_ACTIVE);
+    integer was_active = 1;
+    if (active_str != "") was_active = (integer)active_str;
+    if (was_active) llOwnerSay("@detachallthis:" + BASE_FOLDER + "=y");
 }
 
 /* -------------------- RLV -------------------- */
@@ -385,18 +480,29 @@ show_picker(integer page) {
         }
     }
 
-    // Layout per project convention: slots 0-2 = nav (<<, >>, Back),
-    // slots 3-11 = content, fills top-down so item 1 is always top-left.
+    // Layout: slots 0-2 = nav (<<, >>, Back), slot 3 = Help action,
+    // slot 4 = Disable toggle (or blank filler when caller lacks
+    // permission), slots 5-11 = content (PageSize=7). Content fills
+    // top-down so item 1 is always top-left of the content area
+    // (slot 9 = top-left when the page is full).
+    string toggle_label = " ";
+    string toggle_ctx   = " ";
+    if (btn_allowed("Disable")) {
+        toggle_label = "Disable";
+        toggle_ctx   = "disable";
+    }
     list button_data = [
-        btn("<<",   "prev"),
-        btn(">>",   "next"),
-        btn("Back", "back")
+        btn("<<",         "prev"),
+        btn(">>",         "next"),
+        btn("Back",       "back"),
+        btn("Help",       "help"),
+        btn(toggle_label, toggle_ctx)
     ];
 
     integer pad_i;
     for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
 
-    integer total_buttons = 3 + count;
+    integer total_buttons = 5 + count;
     list target_slots = [];
     if (total_buttons > 9)  target_slots += [9];
     if (total_buttons > 10) target_slots += [10];
@@ -404,8 +510,6 @@ show_picker(integer page) {
     if (total_buttons > 6)  target_slots += [6];
     if (total_buttons > 7)  target_slots += [7];
     if (total_buttons > 8)  target_slots += [8];
-    if (total_buttons > 3)  target_slots += [3];
-    if (total_buttons > 4)  target_slots += [4];
     if (total_buttons > 5)  target_slots += [5];
 
     integer ci = 0;
@@ -419,6 +523,64 @@ show_picker(integer page) {
         );
         ci += 1;
     }
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type",        "ui.dialog.open",
+        "session_id",  SessionId,
+        "user",        (string)CurrentUser,
+        "title",       PLUGIN_LABEL,
+        "body",        body,
+        "button_data", llList2Json(JSON_ARRAY, button_data),
+        "timeout",     60
+    ]), NULL_KEY);
+}
+
+// Root menu shown when KEY_ACTIVE is 0. The picker is bypassed
+// entirely — no @getinv:.outfits roundtrip, no outfit list — and the
+// user sees a short status with Enable / Help / Back. Enable is gated
+// by the same Disable policy (ACL 2-5); ACL 1 sees only Help and Back.
+show_disabled_menu() {
+    SessionId   = generate_session_id();
+    MenuContext = "disabled";
+
+    string body = "Outfits is currently DISABLED.\n";
+    body += ".outfits/.base is unlocked — the wearer can change\n";
+    body += "appearance freely. Re-enable to restore protection and ";
+    body += "resume outfit browsing.";
+
+    list button_data = [];
+    if (btn_allowed("Disable")) button_data += [btn("Enable", "enable")];
+    button_data += [btn("Help", "help")];
+    button_data += [btn("Back", "back")];
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type",        "ui.dialog.open",
+        "session_id",  SessionId,
+        "user",        (string)CurrentUser,
+        "title",       PLUGIN_LABEL,
+        "body",        body,
+        "button_data", llList2Json(JSON_ARRAY, button_data),
+        "timeout",     60
+    ]), NULL_KEY);
+}
+
+// Shown when scan_outfits returns an empty list (no non-dot subfolders
+// under #RLV/.outfits). Replaces an earlier return_to_root path that
+// left the wearer stuck with .base locked after a premature Enable
+// and no Disable button reachable. Help delivers the setup notecard;
+// Disable (ACL 2-5 only) flips KEY_ACTIVE back off so .base unlocks.
+show_empty_menu() {
+    SessionId   = generate_session_id();
+    MenuContext = "empty";
+
+    string body = "No outfits found in #RLV/" + OUTFITS_ROOT + ".\n\n";
+    body += "Create a subfolder under #RLV/" + OUTFITS_ROOT + " for\n";
+    body += "each outfit, then return here. Tap Help for the setup\n";
+    body += "notecard.";
+
+    list button_data = [btn("Help", "help")];
+    if (btn_allowed("Disable")) button_data += [btn("Disable", "disable")];
+    button_data += [btn("Back", "back")];
 
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type",        "ui.dialog.open",
@@ -477,32 +639,16 @@ show_action(string outfit_name) {
     ]), NULL_KEY);
 }
 
-// Shown when #RLV/.outfits exists but its .base subfolder is missing.
-// The picker is suppressed until the wearer creates .base — Replace
-// could otherwise pull off items the wearer expects to stay attached
-// (the lock from plugin_strip is the protection mechanism, and it
-// only protects what's inside .base).
-show_base_missing() {
-    SessionId   = generate_session_id();
-    MenuContext = "base_missing";
-
-    string body = "Outfits base folder not configured.\n\n";
-    body += "#RLV/" + OUTFITS_ROOT + "/" + BASE_SUBNAME + " does not exist.\n";
-    body += "Tap OK to receive setup instructions.";
-
-    list button_data = [btn("OK", "ok")];
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
-    ]), NULL_KEY);
-}
-
+// Delivers the setup notecard to the action user. Wired to the Help
+// button on the outfit picker; the picker's body footer mentions it.
+// Previously also auto-fired from a `.base`-not-found precheck — that
+// precheck was dropped because RLV systematically hides dot-prefixed
+// folders from every enumeration command (@getinv, @getinvworn, …),
+// making it fundamentally impossible for the plugin to verify a
+// dot-prefixed protected subfolder exists. The .outfits/.base lock
+// applied by plugin_strip still works (locks act on the path
+// regardless of hidden status); we just can't validate the wearer's
+// setup, so we expose the notecard as opt-in help instead.
 give_setup_notecard() {
     if (llGetInventoryType(SETUP_NOTECARD) != INVENTORY_NOTECARD) {
         llRegionSayTo(CurrentUser, 0,
@@ -600,12 +746,47 @@ handle_dialog_response(string msg) {
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
 
-    if (MenuContext == "base_missing") {
-        // Single OK button — any response delivers the notecard and
-        // returns to the main menu. The dialog timeout falls through
-        // to handle_dialog_timeout, which closes silently.
-        give_setup_notecard();
-        return_to_root();
+    if (MenuContext == "empty") {
+        if (ctx == "help") {
+            give_setup_notecard();
+            show_empty_menu();
+            return;
+        }
+        if (ctx == "disable") {
+            if (!btn_allowed("Disable")) {
+                llRegionSayTo(CurrentUser, 0, "Access denied.");
+                show_empty_menu();
+                return;
+            }
+            toggle_active(0);
+            show_disabled_menu();
+            return;
+        }
+        if (ctx == "back") {
+            return_to_root();
+        }
+        return;
+    }
+
+    if (MenuContext == "disabled") {
+        if (ctx == "enable") {
+            if (!btn_allowed("Disable")) {
+                llRegionSayTo(CurrentUser, 0, "Access denied.");
+                show_disabled_menu();
+                return;
+            }
+            toggle_active(1);
+            scan_outfits();
+            return;
+        }
+        if (ctx == "help") {
+            give_setup_notecard();
+            show_disabled_menu();
+            return;
+        }
+        if (ctx == "back") {
+            return_to_root();
+        }
         return;
     }
 
@@ -622,6 +803,24 @@ handle_dialog_response(string msg) {
         if (ctx == "next") {
             if (PickPage >= LastMaxPage) show_picker(0);
             else                         show_picker(PickPage + 1);
+            return;
+        }
+        if (ctx == "help") {
+            // Help button on the picker — delivers the setup notecard
+            // to the action user and stays in the picker so they can
+            // continue browsing.
+            give_setup_notecard();
+            show_picker(PickPage);
+            return;
+        }
+        if (ctx == "disable") {
+            if (!btn_allowed("Disable")) {
+                llRegionSayTo(CurrentUser, 0, "Access denied.");
+                show_picker(PickPage);
+                return;
+            }
+            toggle_active(0);
+            show_disabled_menu();
             return;
         }
         if (llSubStringIndex(ctx, "pick:") == 0) {
@@ -678,11 +877,12 @@ handle_rlv_response(string message) {
     if (CurrentUser == NULL_KEY) return;
     if (MenuContext != "scanning") return;
 
-    // Parse the raw @getinv CSV once. Two pieces of information come out
-    // of this single roundtrip: (1) does the protected `.base` subfolder
-    // exist, and (2) the list of user-facing outfit names (with hidden
-    // dot-prefixed and tilde-prefixed entries filtered).
-    integer base_present = FALSE;
+    // Parse the raw @getinv CSV. Dot-prefixed and tilde-prefixed entries
+    // are filtered out — the protected .base folder is hidden by RLV's
+    // @getinv rule (every enumeration command suppresses dot-prefixed
+    // names per the RLV API spec), so there is no programmatic way to
+    // verify .base exists. The wearer can request setup instructions via
+    // the picker's Help button if needed.
     Outfits = [];
 
     if (message != "") {
@@ -704,9 +904,6 @@ handle_rlv_response(string message) {
         while (i < n) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
             if (entry != "") {
-                if (entry == BASE_SUBNAME) {
-                    base_present = TRUE;
-                }
                 string first = llGetSubString(entry, 0, 0);
                 if (first != "." && first != "~") {
                     Outfits = llListReplaceList(Outfits, [entry], filled, filled);
@@ -722,15 +919,8 @@ handle_rlv_response(string message) {
         if (filled > 0) Outfits = llListSort(Outfits, 1, TRUE);
     }
 
-    if (!base_present) {
-        show_base_missing();
-        return;
-    }
-
     if (llGetListLength(Outfits) == 0) {
-        llRegionSayTo(CurrentUser, 0,
-            "No outfits found in #RLV/" + OUTFITS_ROOT + ".");
-        return_to_root();
+        show_empty_menu();
         return;
     }
 
@@ -779,8 +969,10 @@ default {
     }
 
     listen(integer channel, string name, key id, string message) {
-        if (channel == RLV_CHAN && id == llGetOwner()) {
-            handle_rlv_response(message);
+        if (channel == RLV_CHAN) {
+            if (id == llGetOwner()) {
+                handle_rlv_response(message);
+            }
         }
     }
 
@@ -833,7 +1025,8 @@ default {
 
                 CurrentUser = id;
                 UserAcl     = start_acl;
-                scan_outfits();
+                if (OutfitsActive) scan_outfits();
+                else               show_disabled_menu();
             }
         }
         else if (num == DIALOG_BUS) {

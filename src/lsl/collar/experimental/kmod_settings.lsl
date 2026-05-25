@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 17
+REVISION: 18
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -17,6 +17,11 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               notecard reload; consumers fall back to in-script defaults
               via lsd_int(key, fallback) when the notecard omits a key.
 CHANGES:
+- v1.1 rev 18: Register plugin.outfit.active in MANAGED_SETTINGS_KEYS
+  for plugin_outfits's runtime on/off toggle (0 = disabled +
+  .outfits/.base unlocked, 1 = enabled). Settings key follows the
+  user-specified name verbatim (deviates from the existing
+  <short>.<key> convention).
 - v1.1 rev 17: Register outfits.locked in MANAGED_SETTINGS_KEYS for
   plugin_outfits rev 5 (persistent per-outfit @detachallthis locks,
   same pattern as folders.locked / lock.locked).
@@ -223,6 +228,7 @@ list MANAGED_SETTINGS_KEYS = [
     "tpe.mode",               // plugin_tpe
     "folders.locked",         // plugin_folders
     "outfits.locked",         // plugin_outfits
+    "plugin.outfit.active",   // plugin_outfits on/off toggle
     "relay.mode",             // plugin_relay
     "relay.hardcoremode",     // plugin_relay
     "chat.prefix",            // plugin_chat

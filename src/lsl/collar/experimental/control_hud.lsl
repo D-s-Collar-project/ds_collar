@@ -355,6 +355,8 @@ default {
         if (duration >= LONG_TOUCH_THRESHOLD) {
             context = SOS_CONTEXT;
         }
+        else {
+        }
 
         broadcast_collar_scan(context);
     }
