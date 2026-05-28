@@ -165,7 +165,10 @@ string  SelectedOutfit = "";
 list    Outfits     = [];
 integer PickPage    = 0;
 integer LastMaxPage = 0;
-integer PageSize    = 7;       // 12 - 3 nav - 2 action = 7 content slots
+// page_size is derived per-render in show_picker as `9 - action_count`,
+// because action_buttons varies with policy: Help is always shown, Disable
+// is ACL-gated. ACL 1 (no Disable): action_count=1 → page_size=8. ACL 2+:
+// action_count=2 → page_size=7. LastMaxPage stashed for prev/next wrap.
 
 // Default OFF so fresh wearers can build #RLV/~outfits/~base without
 // fighting a ~base lock. LastActive = -1 forces first sync to emit.
@@ -374,24 +377,30 @@ scan_outfits() {
 
 /* -------------------- UI -------------------- */
 
-// Slot order for content fill: top row 9/10/11, mid row 6/7/8, bottom-left 5.
-// llDialog lays out bottom-left → top-right; this puts item 1 top-left.
-list PICKER_SLOTS = [9, 10, 11, 6, 7, 8, 5];
-
 show_picker(integer page) {
-    integer total = llGetListLength(Outfits);
     SessionId   = sid();
     MenuContext = "pick";
 
+    // Action buttons computed up-front because page_size depends on
+    // action_count (slot 4 is content for users without Disable policy).
+    // Help is always shown (UX, not policy-gated). Disable is ACL-gated.
+    list action_buttons = [btn("Help", "help")];
+    if (btn_allowed("Disable")) action_buttons += [btn("Disable", "disable")];
+    integer action_count = llGetListLength(action_buttons);
+
+    // 12 dialog slots minus 3 nav minus action buttons = content capacity.
+    integer page_size = 9 - action_count;
+    integer total = llGetListLength(Outfits);
+
     integer max_page = 0;
-    if (total > 0) max_page = (total - 1) / PageSize;
+    if (total > 0) max_page = (total - 1) / page_size;
     if (page < 0)        page = 0;
     if (page > max_page) page = max_page;
     PickPage    = page;
     LastMaxPage = max_page;
 
-    integer start_idx = page * PageSize;
-    integer end_idx   = start_idx + PageSize;
+    integer start_idx = page * page_size;
+    integer end_idx   = start_idx + page_size;
     if (end_idx > total) end_idx = total;
     integer count = end_idx - start_idx;
 
@@ -410,31 +419,33 @@ show_picker(integer page) {
         }
     }
 
-    string toggle_label = " ";
-    string toggle_ctx   = " ";
-    if (btn_allowed("Disable")) {
-        toggle_label = "Disable";
-        toggle_ctx   = "disable";
-    }
-    // 12 slots fixed: 0-2 nav, 3 Help, 4 toggle, 5-11 content/pad. Pad
-    // BEFORE slot-replace so llListReplaceList at slot 9 etc. never falls
-    // off the end and creates "" entries that llDialog rejects.
-    list button_data = [
-        btn("<<",   "prev"),
-        btn(">>",   "next"),
-        btn("Back", "back"),
-        btn("Help", "help"),
-        btn(toggle_label, toggle_ctx)
-    ];
-    integer pad_i = 5;
-    while (pad_i < 12) {
-        button_data += [btn(" ", " ")];
-        pad_i += 1;
-    }
+    // Layout per project dialog convention (canonical: plugin_animate):
+    //   slots 0-2: nav (<<, >>, Back)
+    //   slot 3-N : action buttons (Help, optionally Disable)
+    //   remaining: outfit content, slot-mapped top→bottom, left→right.
+    //              ACL 1 (no Disable): slot 4 becomes content.
+    list button_data = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
+    button_data += action_buttons;
+    integer pad_i;
+    for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
+
+    integer first_content_slot = 3 + action_count;
+    integer total_buttons      = first_content_slot + count;
+
+    list target_slots = [];
+    if (total_buttons > 9)  target_slots += [9];
+    if (total_buttons > 10) target_slots += [10];
+    if (total_buttons > 11) target_slots += [11];
+    if (total_buttons > 6)  target_slots += [6];
+    if (total_buttons > 7)  target_slots += [7];
+    if (total_buttons > 8)  target_slots += [8];
+    if (first_content_slot <= 3 && total_buttons > 3) target_slots += [3];
+    if (first_content_slot <= 4 && total_buttons > 4) target_slots += [4];
+    if (first_content_slot <= 5 && total_buttons > 5) target_slots += [5];
 
     integer ci = 0;
     while (ci < count) {
-        integer slot = llList2Integer(PICKER_SLOTS, ci);
+        integer slot = llList2Integer(target_slots, ci);
         button_data = llListReplaceList(
             button_data,
             [btn((string)(ci + 1), "pick:" + (string)(start_idx + ci))],

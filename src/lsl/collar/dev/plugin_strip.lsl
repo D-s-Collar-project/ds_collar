@@ -218,7 +218,10 @@ integer PathCheckIdx = 0;
 string  CurrentCategory = "";        // "" = chooser, "L" = layers, "A" = attach
 integer PickPage    = 0;
 integer LastMaxPage = 0;
-integer PageSize    = 9;
+// page_size is derived per-render in show_picker as `9 - action_count`.
+// Strip picker has no action buttons today (action_count=0 → page_size=9);
+// pattern preserved for spec compliance and future-proofing.
+// LastMaxPage stashed for prev/next wrap.
 
 // Items whose strip silently no-op'd — hidden from subsequent renders.
 // Catches lock paths @getpath can't see (dot-prefixed folders).
@@ -603,9 +606,6 @@ show_category_menu() {
     ]), NULL_KEY);
 }
 
-// Slot order for content fill: top row 9/10/11, mid row 6/7/8, bottom row 3/4/5.
-list PICKER_SLOTS = [9, 10, 11, 6, 7, 8, 3, 4, 5];
-
 show_picker(string category, integer page) {
     integer total;
     string  header;
@@ -620,15 +620,21 @@ show_picker(string category, integer page) {
     SessionId       = sid();
     CurrentCategory = category;
 
+    // Action buttons (none today; pattern preserved for spec compliance and
+    // future-proofing). page_size = 9 - action_count.
+    list action_buttons = [];
+    integer action_count = llGetListLength(action_buttons);
+    integer page_size = 9 - action_count;
+
     integer max_page = 0;
-    if (total > 0) max_page = (total - 1) / PageSize;
+    if (total > 0) max_page = (total - 1) / page_size;
     if (page < 0)        page = 0;
     if (page > max_page) page = max_page;
     PickPage    = page;
     LastMaxPage = max_page;
 
-    integer start_idx = page * PageSize;
-    integer end_idx   = start_idx + PageSize;
+    integer start_idx = page * page_size;
+    integer end_idx   = start_idx + page_size;
     if (end_idx > total) end_idx = total;
     integer count = end_idx - start_idx;
 
@@ -651,23 +657,32 @@ show_picker(string category, integer page) {
         }
     }
 
-    // 12 slots fixed: 0-2 nav, 3-11 content/pad. Pad BEFORE slot-replace
-    // so llListReplaceList at slot 9 etc. never falls off the end and
-    // creates "" entries that llDialog rejects.
-    list button_data = [
-        btn("<<",   "prev"),
-        btn(">>",   "next"),
-        btn("Back", "back")
-    ];
-    integer pad_i = 3;
-    while (pad_i < 12) {
-        button_data += [btn(" ", " ")];
-        pad_i += 1;
-    }
+    // Layout per project dialog convention (canonical: plugin_animate):
+    //   slots 0-2: nav (<<, >>, Back)
+    //   slot 3-N : action buttons (none today)
+    //   remaining: worn-item content, slot-mapped top→bottom, left→right.
+    list button_data = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
+    button_data += action_buttons;
+    integer pad_i;
+    for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
+
+    integer first_content_slot = 3 + action_count;
+    integer total_buttons      = first_content_slot + count;
+
+    list target_slots = [];
+    if (total_buttons > 9)  target_slots += [9];
+    if (total_buttons > 10) target_slots += [10];
+    if (total_buttons > 11) target_slots += [11];
+    if (total_buttons > 6)  target_slots += [6];
+    if (total_buttons > 7)  target_slots += [7];
+    if (total_buttons > 8)  target_slots += [8];
+    if (first_content_slot <= 3 && total_buttons > 3) target_slots += [3];
+    if (first_content_slot <= 4 && total_buttons > 4) target_slots += [4];
+    if (first_content_slot <= 5 && total_buttons > 5) target_slots += [5];
 
     integer ci = 0;
     while (ci < count) {
-        integer slot = llList2Integer(PICKER_SLOTS, ci);
+        integer slot = llList2Integer(target_slots, ci);
         button_data = llListReplaceList(
             button_data,
             [btn((string)(ci + 1), "pick:" + (string)(start_idx + ci))],
