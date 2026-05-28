@@ -419,13 +419,13 @@ list lsd_locked_folders() {
         integer i = 0;
         integer n = llGetListLength(names);
         while (i < n) {
-            out += ["~outfits/" + llList2String(names, i)];
+            out += ["outfits/" + llList2String(names, i)];
             i += 1;
         }
     }
 
     string active = llLinksetDataRead("plugin.outfit.active");
-    if ((integer)active) out += ["~outfits/~base"];
+    if ((integer)active) out += ["outfits/base"];
 
     return out;
 }

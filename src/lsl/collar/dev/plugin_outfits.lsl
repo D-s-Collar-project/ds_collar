@@ -145,8 +145,8 @@ string PLUGIN_LABEL   = "Outfits";
 
 integer RLV_CHAN    = 1888772;
 float   RLV_TIMEOUT = 10.0;
-string  OUTFITS_ROOT = "~outfits";
-string  BASE_FOLDER  = "~outfits/~base";
+string  OUTFITS_ROOT = "outfits";
+string  BASE_FOLDER  = "outfits/base";
 string  RLV_CONSUMER = "outfits";
 
 string  KEY_LOCKED = "outfits.locked";
@@ -470,7 +470,7 @@ show_disabled_menu() {
     MenuContext = "disabled";
 
     string body = "Outfits is currently DISABLED.\n";
-    body += "~outfits/~base is unlocked — the wearer can change\n";
+    body += "outfits/base is unlocked — the wearer can change\n";
     body += "appearance freely. Re-enable to restore protection and ";
     body += "resume outfit browsing.";
 
@@ -721,7 +721,9 @@ handle_rlv_response(string message) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
             if (entry != "") {
                 string first = llGetSubString(entry, 0, 0);
-                if (first != "." && first != "~") {
+                // Skip dot/tilde-prefixed entries (RLV system convention)
+                // and the protected "base" subfolder by exact name.
+                if (first != "." && first != "~" && entry != "base") {
                     Outfits = llListReplaceList(Outfits, [entry], filled, filled);
                     filled += 1;
                 }
