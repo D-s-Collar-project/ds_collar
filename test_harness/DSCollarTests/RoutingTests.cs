@@ -148,7 +148,7 @@ public class RoutingTests
         var harness2 = new LSLTestHarness.LSLTestHarness();
 
         string script1 = LoadScript("plugin_animate.lsl");
-        string script2 = LoadScript("ds_collar_plugin_blacklist.lsl");
+        string script2 = LoadScript("plugin_blacklist.lsl");
 
         harness1.LoadScript(script1);
         harness2.LoadScript(script2);

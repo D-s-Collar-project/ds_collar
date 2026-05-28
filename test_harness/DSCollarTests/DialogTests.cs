@@ -222,7 +222,7 @@ public class DialogTests
     public void TestDialog_PaginatedMenu()
     {
         // Test plugins with multi-page menus (e.g., blacklist)
-        string script = LoadScript("ds_collar_plugin_blacklist.lsl");
+        string script = LoadScript("plugin_blacklist.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_blacklist";
@@ -252,7 +252,7 @@ public class DialogTests
     public void TestDialog_ConfirmationFlow()
     {
         // Test confirmation dialogs (e.g., maintenance actions)
-        string script = LoadScript("ds_collar_plugin_maintenance.lsl");
+        string script = LoadScript("plugin_maint.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_maintenance";

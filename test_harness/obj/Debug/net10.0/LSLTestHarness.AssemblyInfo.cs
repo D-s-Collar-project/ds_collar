@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("LSLTestHarness")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9a29345c1dc8f14678f8c6482f247f9840a7e17e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a54067d60f2389fe4e6a204f5ac846fb76667d47")]
 [assembly: System.Reflection.AssemblyProductAttribute("LSLTestHarness")]
 [assembly: System.Reflection.AssemblyTitleAttribute("LSLTestHarness")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
