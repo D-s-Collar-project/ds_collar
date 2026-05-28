@@ -143,6 +143,34 @@ public class LSLTestHarness
         _eventInjector.InjectChanged(_scriptCode!, change);
     }
 
+    /// <summary>
+    /// Directly invoke a user-defined LSL function with string arguments.
+    /// Useful for unit-testing internal helpers without driving the full
+    /// event-handler dispatch path.
+    /// </summary>
+    public void InvokeFunction(string functionName, params string[] args)
+    {
+        ThrowIfNotLoaded();
+        _eventInjector.InvokeFunction(functionName, args);
+    }
+
+    /// <summary>
+    /// Set a script global to a specific value before invoking a function.
+    /// Lets tests establish preconditions (e.g. EnhancedMode=TRUE,
+    /// LeasherAcl=5) without driving the full state machine.
+    /// </summary>
+    public void SetGlobal(string name, string value)
+    {
+        ThrowIfNotLoaded();
+        _eventInjector.SetGlobal(name, value);
+    }
+
+    public string GetGlobal(string name)
+    {
+        ThrowIfNotLoaded();
+        return _eventInjector.GetGlobal(name);
+    }
+
     // ========================================================================
     // Output Capture Methods
     // ========================================================================

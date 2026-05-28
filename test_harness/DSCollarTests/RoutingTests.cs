@@ -37,7 +37,7 @@ public class RoutingTests
         // Send routed message with exact match
         string msg = CreateRoutedMessage(
             scriptId,
-            "type", "start",
+            "type", "ui.menu.start",
             "avatar", TEST_AVATAR
         );
 
@@ -58,7 +58,7 @@ public class RoutingTests
         // Send broadcast message (to: "*")
         string msg = CreateRoutedMessage(
             "*",
-            "type", "start",
+            "type", "ui.menu.start",
             "avatar", TEST_AVATAR
         );
 
@@ -79,7 +79,7 @@ public class RoutingTests
         // Send message routed to different plugin
         string msg = CreateRoutedMessage(
             "plugin_blacklist", // Wrong target
-            "type", "start",
+            "type", "ui.menu.start",
             "avatar", TEST_AVATAR
         );
 
@@ -99,7 +99,7 @@ public class RoutingTests
 
         // Send message WITHOUT "to" field (unrouted)
         string msg = CreateMessage(
-            "type", "start",
+            "type", "ui.menu.start",
             "avatar", TEST_AVATAR
         );
 
@@ -117,12 +117,15 @@ public class RoutingTests
         string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
-        string msg = CreateMessage("type", "register_now");
+        string msg = CreateMessage("type", "kernel.register.refresh");
         _harness.InjectLinkMessage(0, KERNEL_LIFECYCLE, msg, NULL_KEY);
 
-        // Should send registration
+        // Should re-send registration (post-rev-5 wire: kernel.register.declare).
+        // plugin_animate has an idempotence guard at register_self — if the
+        // LSD-stored value already matches what it would write, it skips,
+        // so this test depends on the harness's LSD starting empty.
         var linkMessages = _harness.GetLinkMessages();
-        AssertMessageSentOn(linkMessages, KERNEL_LIFECYCLE, "register");
+        AssertMessageSentOn(linkMessages, KERNEL_LIFECYCLE, "kernel.register.declare");
     }
 
     [Test]
@@ -132,12 +135,12 @@ public class RoutingTests
         string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
-        string pingMsg = CreateMessage("type", "ping");
+        string pingMsg = CreateMessage("type", "kernel.ping");
         _harness.InjectLinkMessage(0, KERNEL_LIFECYCLE, pingMsg, NULL_KEY);
 
         // Should respond with pong
         var linkMessages = _harness.GetLinkMessages();
-        AssertMessageSentOn(linkMessages, KERNEL_LIFECYCLE, "pong");
+        AssertMessageSentOn(linkMessages, KERNEL_LIFECYCLE, "kernel.pong");
     }
 
     [Test]
@@ -157,7 +160,7 @@ public class RoutingTests
         string context2 = harness2.GetScriptContext() ?? "plugin_blacklist";
 
         // Send message to plugin 1
-        string msg1 = CreateRoutedMessage(context1, "type", "start", "avatar", TEST_AVATAR);
+        string msg1 = CreateRoutedMessage(context1, "type", "ui.menu.start", "avatar", TEST_AVATAR);
         harness1.InjectLinkMessage(0, UI_BUS, msg1, NULL_KEY);
         harness2.InjectLinkMessage(0, UI_BUS, msg1, NULL_KEY);
 
@@ -172,7 +175,7 @@ public class RoutingTests
         harness1.ClearOutputs();
         harness2.ClearOutputs();
 
-        string msg2 = CreateRoutedMessage(context2, "type", "start", "avatar", TEST_AVATAR);
+        string msg2 = CreateRoutedMessage(context2, "type", "ui.menu.start", "avatar", TEST_AVATAR);
         harness1.InjectLinkMessage(0, UI_BUS, msg2, NULL_KEY);
         harness2.InjectLinkMessage(0, UI_BUS, msg2, NULL_KEY);
 

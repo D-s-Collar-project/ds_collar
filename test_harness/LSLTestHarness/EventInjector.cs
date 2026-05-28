@@ -168,6 +168,36 @@ public class EventInjector
         ExecuteEventHandler(scriptCode, "changed", new object[] { change });
     }
 
+    /// <summary>
+    /// Directly invoke a user-defined function on the loaded script's adapter.
+    /// Bypasses the event-handler dispatch path so unit tests can target
+    /// internal helpers (e.g. apply_wear, applyEnhancedRestrictions) without
+    /// driving the full link-message / dialog state machine.
+    /// </summary>
+    public void InvokeFunction(string functionName, params string[] args)
+    {
+        if (_adapter == null) return;
+        _adapter.ExecuteFunction(functionName, args);
+    }
+
+    /// <summary>
+    /// Set a script global to a specific value so tests can establish
+    /// preconditions before invoking a function. Bypasses normal state
+    /// machinery — use only when driving via link_message would be more
+    /// complex than the test itself.
+    /// </summary>
+    public void SetGlobal(string name, string value)
+    {
+        if (_adapter == null) return;
+        _adapter.SetRuntimeGlobal(name, value);
+    }
+
+    public string GetGlobal(string name)
+    {
+        if (_adapter == null) return string.Empty;
+        return _adapter.GetRuntimeGlobal(name);
+    }
+
     // ========================================================================
     // Simulation Logic
     // ========================================================================

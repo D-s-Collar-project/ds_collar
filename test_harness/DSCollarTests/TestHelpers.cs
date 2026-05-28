@@ -56,28 +56,34 @@ public static class TestHelpers
     }
 
     /// <summary>
-    /// Create ACL result message
+    /// Create ACL result message. NOTE: plugin_animate's ACL model migrated
+    /// from query/result link messages to LSD-policy lookups in rev 4; the
+    /// auth.acl.result type still exists in the wire spec (used by other
+    /// modules) but plugin_animate no longer consumes it.
     /// </summary>
     public static string CreateACLResult(string avatar, int level)
     {
-        return CreateMessage("type", "acl_result", "avatar", avatar, "level", level);
+        return CreateMessage("type", "auth.acl.result", "avatar", avatar, "level", level);
     }
 
     /// <summary>
-    /// Create UI start message
+    /// Create UI start message (post-rev-5 wire name: ui.menu.start, with
+    /// routing via context field). The "to" routing field is the script's
+    /// PLUGIN_CONTEXT, e.g. "ui.core.animate".
     /// </summary>
-    public static string CreateUIStart(string scriptId, string avatar)
+    public static string CreateUIStart(string scriptId, string avatar, int acl = 5)
     {
-        return CreateRoutedMessage(scriptId, "type", "start", "avatar", avatar);
+        return CreateRoutedMessage(scriptId, "type", "ui.menu.start",
+            "context", scriptId, "acl", acl, "avatar", avatar);
     }
 
     /// <summary>
-    /// Create dialog response message
+    /// Create dialog response message (post-rev-5 wire name: ui.dialog.response).
     /// </summary>
     public static string CreateDialogResponse(string sessionId, string button, string avatar)
     {
         return CreateMessage(
-            "type", "dialog_response",
+            "type", "ui.dialog.response",
             "session_id", sessionId,
             "button", button,
             "avatar", avatar

@@ -1,8 +1,8 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 13
-PURPOSE: Browse #RLV/~outfits subfolders and act on them. Five actions
+REVISION: 14
+PURPOSE: Browse #RLV/~outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
            Wear   — replace: detach worn unlocked items then attach
@@ -10,9 +10,10 @@ PURPOSE: Browse #RLV/~outfits subfolders and act on them. Five actions
                     protected by this plugin's @detachallthis claim
                     and silently survive.
            Remove — detach this outfit's items
-           Lock   — claim @detachallthis on the outfit (locks it
-                    against removal by Strip, Remove, or relays)
-           Unlock — release the lock
+           Lock   — state-labelled toggle ('Lock: On' / 'Lock: Off');
+                    claims @detachallthis on the outfit when off,
+                    releases the claim when on. (One button replaces
+                    the prior Lock + Unlock pair.)
          The picker also exposes a Help button that delivers the
          "D/s Collar outfits setup" notecard describing the expected
          #RLV/~outfits/~base layout.
@@ -45,6 +46,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
              Lock/Unlock.
 CHANGES:
+- v1.10 rev 14: Collapse Lock + Unlock buttons in the per-outfit action submenu into a single state-labelled toggle ('Lock: On' / 'Lock: Off'), matching the 'Turn: On/Off' / 'Enhanced: On/Off' convention used elsewhere. New `toggle_lock` button context dispatches to apply_lock or apply_unlock based on current LockedOutfits membership. ACL gating still keys off btn_allowed("Lock"); the policy CSV is unchanged (Lock and Unlock are always co-granted in current policy). Body text shortened — the old two-line Lock/Unlock description collapses to one line. Picker `*` prefix on locked outfits is unchanged.
 - v1.10 rev 13: Migrate the outfit-system folder names from dot-prefixed (.outfits / .outfits/.base) to tilde-prefixed (~outfits / ~outfits/~base). Tilde-prefixed folders are visible to every RLV enumeration command (@getinv, @getpath, @getinvworn …), which unblocks plugin_strip's path-based pre-filter for picker contents — see plugin_strip rev 15. ~base is kept out of the outfit picker by the existing dot-or-tilde skip in handle_rlv_response. Constants OUTFITS_ROOT / BASE_FOLDER repointed; all live comments and user-facing strings updated. Wearers must rename their inventory folders to match (.outfits → ~outfits, .base → ~base inside it); the setup notecard is rewritten to describe the new layout.
 - v1.10 rev 12: Wear's strip is now three-phase and symmetric across attachments and clothing layers: @detachallthis:.outfits=force (subtree-as-unit clear of unlocked .outfits items), then @remattach=force (attachments worn from outside .outfits), then @remoutfit=force (system clothing layers worn from outside .outfits). .base and any locked outfit folder, attachment point, or layer survive via the standard RLV lock-respect path. Attach stays on @attachall:.outfits/<name>=force — the *this family is locks / self-referential detach only, not attaches.
 - v1.10 rev 11: Wear now uses @detachallthis / @attachallthis (subtree-as-unit variants) instead of @detachall / @attachall. Lock semantics unchanged — locked subfolders still skipped — but the verbs match the intent (operate on .outfits as one subtree) and stay symmetric on both sides of the replace.
@@ -612,23 +614,23 @@ show_action(string outfit_name) {
     body += "Wear   - replace: detach worn unlocked items, attach this\n";
     body += "Remove - detach this outfit's items\n";
     if (btn_allowed("Lock") || btn_allowed("Unlock")) {
-        body += "Lock   - protect this outfit from removal\n";
-        body += "Unlock - release the protection";
+        body += "Lock   - toggle protection against removal";
     }
 
     // Variable-width action dialog. Per CLAUDE.md small confirmation
     // dialogs skip the multiples-of-3 cosmetic pad. Buttons are emitted
     // in policy-aware order; llDialog lays them out bottom-left → top-
-    // right (3 per row).
+    // right (3 per row). Lock/Unlock collapsed into one state-labelled
+    // toggle button — matches the "Turn: On/Off" / "Enhanced: On/Off"
+    // convention used elsewhere; one fewer button to chase across the
+    // grid as the picker grows.
     list button_data = [];
     if (btn_allowed("Add"))    button_data += [btn("Add",    "add")];
     if (btn_allowed("Wear"))   button_data += [btn("Wear",   "wear")];
     if (btn_allowed("Remove")) button_data += [btn("Remove", "remove")];
-    if (is_locked) {
-        if (btn_allowed("Unlock")) button_data += [btn("Unlock", "unlock")];
-    }
-    else {
-        if (btn_allowed("Lock")) button_data += [btn("Lock", "lock")];
+    if (btn_allowed("Lock")) {
+        if (is_locked) button_data += [btn("Lock: On",  "toggle_lock")];
+        else           button_data += [btn("Lock: Off", "toggle_lock")];
     }
     button_data += [btn("Back", "back")];
 
@@ -860,13 +862,12 @@ handle_dialog_response(string msg) {
             show_picker(PickPage);
             return;
         }
-        if (ctx == "lock") {
-            apply_lock(SelectedOutfit);
-            show_picker(PickPage);
-            return;
-        }
-        if (ctx == "unlock") {
-            apply_unlock(SelectedOutfit);
+        if (ctx == "toggle_lock") {
+            if (llListFindList(LockedOutfits, [SelectedOutfit]) != -1) {
+                apply_unlock(SelectedOutfit);
+            } else {
+                apply_lock(SelectedOutfit);
+            }
             show_picker(PickPage);
         }
     }

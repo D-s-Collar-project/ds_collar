@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              plugin_outfits owns the ~outfits/~base lock (it needs to
              be releasable via the outfits on/off toggle).
 CHANGES:
+- v1.10 rev 16: Fix rev 15's pre-filter not catching @detachallthis:~outfits/~base. The three @getstatusall calls (remoutfit / remattach / detach) now request `;|` separator instead of the default `/`. Folder paths in @detachallthis:<path> entries embed `/` and were being shredded by the response parser — e.g. `/detachallthis:~outfits/~base/` parsed as `["", "detachallthis:~outfits", "~base", ""]`, so LockedFolders captured a truncated `~outfits` instead of `~outfits/~base`. Switching to `|` keeps paths intact. parse_status and parse_detachallthis both updated to split on `|`.
 - v1.10 rev 15: Re-introduce the @getpath pre-filter for folder-locked attachments. parse_detachallthis pulls @detachallthis:<path> entries out of the @getstatusall:detach response into LockedFolders; QState=5 then runs a sequential @getpath per worn attachment slot, and filter_worn_attach_by_folder drops any slot whose returned inventory path falls under a locked subtree. Triggered only when LockedFolders is non-empty AND WornAttach has entries, so wearers with no folder locks active see no added latency. Works now because plugin_outfits rev 13 moved the protected subtree from dot-prefixed (.outfits/.base) to tilde-prefixed (~outfits/~base) — @getpath returns real paths for tilde-prefixed folders. Foreign dot-prefixed folder locks still slip through here (RLV hides them from @getpath); the existing verify_attempted_strip → DiscoveredLocked safety net catches them on first click.
 - v1.10 rev 14: Fix "no attachments visible" — two distinct bugs. (a) Rev 10's GlobalDetachLocked filter in build_worn_attach was based on a wrong reading of the RLV spec: bare @detach=n locks ONLY the object that issued it (the collar), not all attachments, but the filter was hiding every attached item whenever plugin_lock was locked (which is the default state). Drop the GlobalDetachLocked skip; per-slot @detach:<slot>=n locks still filter via LockedAttach. (b) ATTACH_NAMES stopped at index 40, so anything attached to a Bento mesh point (LHAND_RING1=41 through HIND_RFOOT=55) failed the attach_pt < attach_names_n bounds check and never appeared. Extend to 56 entries covering all current LSL ATTACH_* constants.
 - v1.10 rev 13: Drop the @detachallthis:.outfits/.base claim from
@@ -449,16 +450,21 @@ begin_query() {
 
 advance_query() {
     llSetTimerEvent(RLV_TIMEOUT);
+    // Use `|` as the @getstatusall separator instead of the default `/`.
+    // Required because @detachallthis:<path> entries embed `/` in their
+    // path argument (e.g. ~outfits/~base) — with the default separator
+    // the response parser splits the path mid-string and loses it. `|`
+    // doesn't appear in folder names so the parse stays unambiguous.
     if (QState == 2) {
-        rlv_force("@getstatusall:remoutfit=" + (string)RLV_CHAN);
+        rlv_force("@getstatusall:remoutfit;|=" + (string)RLV_CHAN);
         return;
     }
     if (QState == 3) {
-        rlv_force("@getstatusall:remattach=" + (string)RLV_CHAN);
+        rlv_force("@getstatusall:remattach;|=" + (string)RLV_CHAN);
         return;
     }
     if (QState == 4) {
-        rlv_force("@getstatusall:detach=" + (string)RLV_CHAN);
+        rlv_force("@getstatusall:detach;|=" + (string)RLV_CHAN);
     }
 }
 
@@ -466,10 +472,12 @@ advance_query() {
 // response. parse_status with key_name="detach" deliberately drops these
 // (the prefix doesn't match "detach:"); we recover the folder paths here
 // so the QState=5 path-probe pass can filter the attachments picker.
+// Splits on `|` because advance_query requests the `;|` separator —
+// folder paths embed `/` so the default separator would shred them.
 list parse_detachallthis(string raw) {
     list out = [];
     if (raw == "") return out;
-    list parts = llParseString2List(raw, ["/"], []);
+    list parts = llParseString2List(raw, ["|"], []);
     integer n = llGetListLength(parts);
     string prefix = "detachallthis:";
     integer prefix_n = llStringLength(prefix);
@@ -526,13 +534,15 @@ filter_worn_attach_by_folder() {
     WornAttach = new_worn;
 }
 
-// Parse "/remoutfit:shirt/remoutfit" style responses. A bare "remoutfit"
+// Parse "|remoutfit:shirt|remoutfit" style responses. A bare "remoutfit"
 // (no ":part") means everything is locked at the category level; the
 // caller signals this by inspecting the returned head-marker "".
+// Splits on `|` because advance_query requests the `;|` separator —
+// see parse_detachallthis above for the path-collision rationale.
 list parse_status(string raw, string key_name) {
     list out = [];
     if (raw == "") return out;
-    list parts = llParseString2List(raw, ["/"], []);
+    list parts = llParseString2List(raw, ["|"], []);
     integer n = llGetListLength(parts);
     integer i = 0;
     string prefix = key_name + ":";

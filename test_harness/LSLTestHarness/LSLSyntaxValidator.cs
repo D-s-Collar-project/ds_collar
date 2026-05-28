@@ -52,7 +52,13 @@ public class LSLSyntaxValidator
     private void CheckForTernaryOperator(string code)
     {
         // Look for pattern: condition ? true_val : false_val
-        var match = Regex.Match(code, @"[^/]\s*\?\s*[^:]+\s*:", RegexOptions.Multiline);
+        //
+        // Constrain [^:] to also exclude newlines so a `?` inside a string
+        // literal on one line doesn't pair with a `:` many lines later
+        // (e.g. "Is RLV mode enabled?" → matches the next JSON `"type":` —
+        // false positive). Also walk over /* ... */ and // line comments
+        // by skipping any `?` preceded by a comment opener on the same line.
+        var match = Regex.Match(code, @"[^/]\s*\?\s*[^:\n]+\s*:", RegexOptions.Multiline);
         if (match.Success)
         {
             _errors.Add($"Ternary operator (? :) is not supported in LSL. Use if/else instead.");

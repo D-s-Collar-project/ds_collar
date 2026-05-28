@@ -111,10 +111,54 @@ namespace LSLTestHarness
                     TestLogger.D("[YEngineAdapter] handle_acl_result body:\n" + body);
                 }
                 var locals = new Dictionary<string, string>(StringComparer.Ordinal);
-                for (int i = 0; i < args.Length; i++) locals[$"arg{i}"] = args[i];
+                // Bind args to the function's actual parameter names so the
+                // body's references to `outfit_name`, `user`, etc. resolve
+                // correctly. Keep the arg0/arg1 aliases for any handler that
+                // happens to use them (legacy harness convention).
+                var paramNames = ExtractFunctionParameterNames(functionName);
+                for (int i = 0; i < args.Length; i++)
+                {
+                    locals[$"arg{i}"] = args[i];
+                    if (i < paramNames.Count)
+                    {
+                        var pname = paramNames[i];
+                        if (!string.IsNullOrEmpty(pname)) locals[pname] = args[i];
+                    }
+                }
                 ExecuteFunctionBody(body, locals);
             }
             finally { _recursionDepth--; }
+        }
+
+        // Pull the parameter NAMES (not types) out of a function declaration.
+        // Reuses the same regex shape as EnsureFunctionParsed; tokenizes the
+        // captured param string and drops type prefixes so `string outfit_name`
+        // yields ["outfit_name"]. Returns empty list if the function isn't
+        // found in the source — caller falls back to arg0/arg1 binding.
+        private List<string> ExtractFunctionParameterNames(string functionName)
+        {
+            var names = new List<string>();
+            if (string.IsNullOrEmpty(functionName) || string.IsNullOrEmpty(_scriptCode)) return names;
+            try
+            {
+                var pattern = new Regex($@"(?:integer|float|string|key|list|vector|rotation\s+)?{Regex.Escape(functionName)}\s*\(([^)]*)\)\s*\{{", RegexOptions.Multiline);
+                var m = pattern.Match(_scriptCode);
+                if (!m.Success) return names;
+                var paramRaw = m.Groups[1].Value.Trim();
+                if (paramRaw.Length == 0) return names;
+                var parts = paramRaw.Split(',');
+                foreach (var p in parts)
+                {
+                    var trimmed = p.Trim();
+                    if (trimmed.Length == 0) continue;
+                    // "string outfit_name" → take last whitespace-delimited token
+                    var pieces = Regex.Split(trimmed, @"\s+");
+                    if (pieces.Length == 0) continue;
+                    names.Add(pieces[pieces.Length - 1]);
+                }
+            }
+            catch { }
+            return names;
         }
 
         private void EnsureFunctionParsed(string functionName)
@@ -394,6 +438,12 @@ namespace LSLTestHarness
                         return;
                     }
                 default:
+                    // Trigger lazy parse so functions defined AFTER `default {`
+                    // — or AFTER the first stray "default" token in a comment,
+                    // which is what IndexOf picks up — can still be invoked.
+                    // Without this, calls like rlv_force(...) inside apply_wear
+                    // are silently no-oped because rlv_force never got parsed.
+                    EnsureFunctionParsed(fname);
                     if (_functionBodies.ContainsKey(fname))
                     {
                         TestLogger.D($"[YEngineAdapter] Calling function '{fname}'");
@@ -405,16 +455,43 @@ namespace LSLTestHarness
 
         private List<string> ParseArguments(string raw, Dictionary<string, string> locals)
         {
+            // Track quote state AND nesting depth across (), [], <> so that a
+            // comma inside a nested call/list/vector doesn't split the parent
+            // argument. Without depth tracking, an expression like
+            //   llMessageLinked(LINK_SET, 500, llList2Json(JSON_OBJECT, ["type", "x"]), NULL_KEY)
+            // splits at every comma and passes garbage to llMessageLinked's
+            // msg argument. ResolveString then can't evaluate the partial
+            // text and the captured link message is unusable for assertions.
             var list = new List<string>(); if (string.IsNullOrWhiteSpace(raw)) return list;
-            var cur = new System.Text.StringBuilder(); bool inQuote = false;
+            var cur = new System.Text.StringBuilder();
+            bool inQuote = false;
+            int parenDepth  = 0;  // ( )
+            int squareDepth = 0;  // [ ]
+            int angleDepth  = 0;  // < > (LSL vectors / rotations)
             for (int i = 0; i < raw.Length; i++)
             {
                 char c = raw[i];
                 if (c == '"') { inQuote = !inQuote; cur.Append(c); continue; }
-                if (c == ',' && !inQuote) { var part = cur.ToString().Trim(); if (part.Length > 0) list.Add(ResolveString(part, locals)); cur.Clear(); continue; }
+                if (!inQuote)
+                {
+                    if      (c == '(') parenDepth++;
+                    else if (c == ')') parenDepth--;
+                    else if (c == '[') squareDepth++;
+                    else if (c == ']') squareDepth--;
+                    else if (c == '<') angleDepth++;
+                    else if (c == '>') angleDepth--;
+                    else if (c == ',' && parenDepth == 0 && squareDepth == 0 && angleDepth == 0)
+                    {
+                        var part = cur.ToString().Trim();
+                        if (part.Length > 0) list.Add(ResolveString(part, locals));
+                        cur.Clear();
+                        continue;
+                    }
+                }
                 cur.Append(c);
             }
-            if (cur.Length > 0) list.Add(ResolveString(cur.ToString().Trim(), locals)); return list;
+            if (cur.Length > 0) list.Add(ResolveString(cur.ToString().Trim(), locals));
+            return list;
         }
 
         private string ResolveString(string expr, Dictionary<string, string> localVars)
@@ -428,7 +505,23 @@ namespace LSLTestHarness
                 int idx = t.IndexOf(')');
                 if (idx > 0) { t = t.Substring(idx + 1).Trim(); }
             }
-            if ((t.StartsWith("\"") && t.EndsWith("\"")) || (t.StartsWith("'") && t.EndsWith("'"))) return t.Substring(1, t.Length - 2);
+            // Strip surrounding quotes ONLY for true single-string literals.
+            // A concatenation like `"@detachallthis:" + OUTFITS_ROOT + "=force"`
+            // also starts and ends with `"` but isn't a single literal —
+            // detect that by counting unescaped quote chars (a single literal
+            // has exactly 2 at positions 0 and length-1).
+            if ((t.StartsWith("\"") && t.EndsWith("\"")) || (t.StartsWith("'") && t.EndsWith("'")))
+            {
+                char qc = t[0];
+                int unescapedQuoteCount = 0;
+                for (int qi = 0; qi < t.Length; qi++)
+                {
+                    if (t[qi] == qc && (qi == 0 || t[qi - 1] != '\\')) unescapedQuoteCount++;
+                }
+                if (unescapedQuoteCount == 2) return t.Substring(1, t.Length - 2);
+                // Otherwise fall through — it's a multi-segment expression
+                // (concat / mixed literals + identifiers).
+            }
             if (int.TryParse(t, out _)) return t;
             if (localVars != null && localVars.TryGetValue(t, out var lv)) return lv;
             if (_runtimeGlobals.TryGetValue(t, out var gv)) return gv;
