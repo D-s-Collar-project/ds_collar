@@ -149,6 +149,17 @@ string PLUGIN_LABEL   = "Strip";
 integer RLV_CHAN    = 1888771;
 float   RLV_TIMEOUT = 10.0;
 
+// TEMPORARY: diagnostic logging for the rev 16 pre-filter regression.
+// Dumps raw @getstatusall:detach response, parsed LockedFolders, per-slot
+// @getpath responses, and WornAttach before/after the folder filter, all
+// prefixed with [strip:debug] so the wearer can grep them in chat. Strip
+// this block + the logd calls once the root cause is identified — same
+// pattern as DEBUG_STRIP in rev 7 before this file's previous cleanup.
+integer DEBUG_STRIP = TRUE;
+logd(string s) {
+    if (DEBUG_STRIP) llOwnerSay("[strip:debug] " + s);
+}
+
 /* -------------------- LAYER NAMES (matches @getoutfit response order) -------------------- */
 // RLV @getoutfit returns a 0/1 string with characters in this canonical
 // order. Body-part layers (skull, eyes, hair, shape) are not strippable
@@ -1029,6 +1040,7 @@ handle_rlv_response(string message) {
         // probe to pre-filter the attachments picker. Dot-prefixed locks
         // can't be pre-filtered (@getpath skips them) but are still
         // caught on first strip attempt by verify_attempted_strip.
+        logd("QState=4 raw response: '" + message + "'");
         list parsed_detach = parse_status(message, "detach");
         if (llGetListLength(parsed_detach) > 0) {
             if (llList2String(parsed_detach, 0) == "") {
@@ -1046,10 +1058,12 @@ handle_rlv_response(string message) {
             di += 1;
         }
         LockedFolders = parse_detachallthis(message);
+        logd("LockedFolders parsed: [" + llDumpList2String(LockedFolders, " | ") + "] (" + (string)llGetListLength(LockedFolders) + " entries)");
 
         verify_attempted_strip();
         build_worn_layers();
         build_worn_attach();
+        logd("build_worn_attach: " + (string)(llGetListLength(WornAttach) / 2) + " attachments before folder filter");
 
         // If any folder locks are active AND we have attachments to probe,
         // kick off QState=5 (per-slot @getpath). Otherwise render now.
@@ -1057,11 +1071,13 @@ handle_rlv_response(string message) {
             QState = 5;
             PathCheckIdx = 0;
             string first_slot = llList2String(WornAttach, 0);
+            logd("QState=5 starting @getpath probe for slot '" + first_slot + "'");
             llSetTimerEvent(RLV_TIMEOUT);
             rlv_force("@getpath:" + first_slot + "=" + (string)RLV_CHAN);
             return;
         }
 
+        logd("Skipping QState=5 (LockedFolders=" + (string)llGetListLength(LockedFolders) + ", WornAttach pairs=" + (string)(llGetListLength(WornAttach) / 2) + ")");
         QState = 0;
         stop_rlv_listen();
         show_current_picker(PickPage);
@@ -1076,6 +1092,7 @@ handle_rlv_response(string message) {
         integer pair_idx = PathCheckIdx * 2;
         if (pair_idx < llGetListLength(WornAttach)) {
             string slot = llList2String(WornAttach, pair_idx);
+            logd("@getpath slot='" + slot + "' → '" + message + "'");
             AttachPaths += [slot, message];
         }
         PathCheckIdx += 1;
@@ -1086,7 +1103,10 @@ handle_rlv_response(string message) {
             rlv_force("@getpath:" + next_slot + "=" + (string)RLV_CHAN);
             return;
         }
+        integer before_pairs = llGetListLength(WornAttach) / 2;
         filter_worn_attach_by_folder();
+        integer after_pairs = llGetListLength(WornAttach) / 2;
+        logd("filter_worn_attach_by_folder: " + (string)before_pairs + " → " + (string)after_pairs + " attachments");
         QState = 0;
         stop_rlv_listen();
         show_current_picker(PickPage);
