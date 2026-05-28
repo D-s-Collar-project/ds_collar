@@ -576,12 +576,11 @@ list parse_status(string raw, string key_name) {
 build_worn_layers() {
     integer max_layers = llGetListLength(STRIPPABLE_LAYER_IDX);
 
-    WornLayers = [];
-    if (max_layers > 0) {
-        list buf = [""];
-        while (llGetListLength(buf) < max_layers) buf = buf + buf;
-        WornLayers = llList2List(buf, 0, max_layers - 1);
-    }
+    // STRIPPABLE_LAYER_IDX is a compile-time constant (13 entries), so
+    // max_layers is always > 0 here — no defensive guard needed.
+    list buf = [""];
+    while (llGetListLength(buf) < max_layers) buf = buf + buf;
+    WornLayers = llList2List(buf, 0, max_layers - 1);
 
     integer filled = 0;
     string  layer_name;
