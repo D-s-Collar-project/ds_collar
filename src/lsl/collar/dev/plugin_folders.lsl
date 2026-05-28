@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 33
+REVISION: 34
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -9,9 +9,17 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              Folder locks (@detachallthis:<folder>=n/y) and force-actions are
              routed through kmod_rlv on UI_BUS so refcount coordinates with
              any relay-source that asks for the same folder lock.
+             plugin_strip detects locked items live via @getstatusall:detach +
+             @getpath at picker render; this plugin does NOT maintain any
+             shadow lock vector.
 CHANGES:
-- v1.1 rev 33: Close the rev 32 gap for Lock/Unlock acting on already-worn items. New begin_path_sweep + handle_path_response state machine fires a sequential @getpath:<pt>=<chan> probe over every currently-attached slot at lock_folder / unlock_folder time and updates the worn.registry.locked bit vector accordingly: lock → set bits where the returned path falls under the locked subtree, unlock → clear bits where the returned path was under the unlocked subtree AND no other lock still covers it. Multiplexed timer / listen (ProbeActive flag) routes responses between the probe and the existing @getinvworn picker scan on the shared RLV_CHAN. is_path_locked refactored to read in-memory LockedNames instead of LSD so the unlock probe doesn't race against the in-flight settings.delta write.
-- v1.1 rev 32: Maintain the shared worn.registry.locked bit vector (kmod_settings rev 19) on attach/detach. attach_folder / detach_folder now queue a 2-second post-action snapshot diff: pre-snapshot taken at click time, post-snapshot at timer fire; new slots (attach) inherit the lock state of the source folder (resolved against folders.locked + outfits.locked + plugin.outfit.active), gone slots (detach) get cleared. Bit position = ATTACH_* integer. Multiplexed timer handles both the registry-update deadline and the existing RLV-scan timeout. Lock/Unlock actions don't write bits here — they only affect future attachments; items at slots locked before the lock fired keep their previous bit value until re-attached. Documented limitation.
+- v1.1 rev 34: Revert revs 32+33 (worn.registry.locked bit-vector writer
+  and @getpath probe sweep). The shadow lock vector caused a Mono stack-heap
+  collision in plugin_outfits and was unnecessary: plugin_strip can ask the
+  viewer directly via @getstatusall:detach + @getpath at picker time. Drops
+  snapshot_attached / queue_registry_update / apply_registry_update,
+  begin_path_sweep / handle_path_response, the ProbeActive / Registry
+  globals, and the bit-vector writes on attach / detach / lock / unlock.
 - v1.1 rev 31: persist_locked switches to `settings.delete:folders.locked` when LockedNames becomes empty (last unlock), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix: previously the empty-CSV `settings.delta` was silently dropped, folders.locked stayed populated with the last-removed entry, and the next settings.sync re-emitted @detachallthis:<folder>=n — visible as the "folder reactivates whenever any RLV restriction is toggled" bug.
 - v1.1 rev 30: Sort the parsed folder list alphabetically (case-sensitive) before render. Viewer returns @getinvworn in inventory-internal order; pick dialog was unbrowsable on large outfit trees.
 - v1.1 rev 29: Wrap-around paging on `<<` / `>>` matching plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. LastMaxPage global stashed by show_folder_pick so the dispatcher avoids recomputing action_count for the wrap branches.
@@ -119,13 +127,6 @@ string PLUGIN_LABEL   = "Folders";
 /* -------------------- SETTINGS KEYS & CONSTANTS -------------------- */
 string  KEY_LOCKED  = "folders.locked";  // CSV of folder names locked via @detachallthis
 
-// Shared worn.registry.locked bit vector (see kmod_settings rev 19): we
-// maintain bits at attach/detach time so plugin_strip can filter without
-// running its own @getinvworn scan. Position i = ATTACH_* integer i.
-string  WORN_REGISTRY_LOCKED_KEY = "worn.registry.locked";
-string  LOCKED_BITS_INIT         = "00000000000000000000000000000000000000000000000000000000";  // 56 zeros
-float   REGISTRY_DELAY           = 2.0;  // post-action wait before snapshotting attached list
-
 integer RLV_CHAN          = 1888753;  // Private positive channel for @getinv responses
 float   RLV_TIMEOUT       = 10.0;     // Seconds to wait for viewer RLV reply
 // Page size is derived per-render in show_folder_pick as `9 - action_count`,
@@ -155,262 +156,7 @@ integer PickPage          = 0;
 integer LastMaxPage       = 0;
 integer RlvListenHandle   = 0;
 
-// Registry-update state. Set when an attach/detach action queues a
-// post-action snapshot for the bit-vector write. The timer multiplexes
-// between this and the existing RLV-scan timeout — if a registry update
-// is pending, the timer fires REGISTRY_DELAY seconds out and runs the
-// diff; otherwise it falls through to the scan-timeout path.
-integer RegistryUpdatePending = FALSE;
-string  RegistryUpdatePath    = "";
-string  RegistryUpdateOp      = "";   // "attach" | "detach"
-list    RegistryPreSnapshot   = [];   // stride-2: [attach_pt, item_key]
-
-// @getpath probe state machine — runs at lock_folder / unlock_folder time.
-// Iterates currently-attached slots, fires @getpath:<pt>=<chan>, and on
-// each response updates the registry bit if the returned path matches
-// the (un)locked subtree. The probe accumulates changes in ProbeLockedBits
-// and writes a single settings.delta when complete.
-integer ProbeActive      = FALSE;
-list    ProbeSlots       = [];        // attach-point integers queued for @getpath
-integer ProbeIdx         = 0;
-string  ProbePath        = "";        // subtree being (un)locked
-string  ProbeOp          = "";        // "lock" | "unlock"
-string  ProbeLockedBits  = "";        // working copy of worn.registry.locked
-
 /* -------------------- HELPERS -------------------- */
-
-// Snapshot the wearer's currently-attached items as [attach_pt, key] pairs.
-// Used by the registry-update diff: pre-snapshot at action time, post-
-// snapshot at timer time, set/clear bits for what changed.
-list snapshot_attached() {
-    list out = [];
-    list attached = llGetAttachedList(llGetOwner());
-    integer n = llGetListLength(attached);
-    integer i = 0;
-    while (i < n) {
-        key k = llList2Key(attached, i);
-        list det = llGetObjectDetails(k, [OBJECT_ATTACHED_POINT]);
-        if (llGetListLength(det) >= 1) {
-            integer pt = llList2Integer(det, 0);
-            if (pt >= 0 && pt < 56) out += [pt, k];
-        }
-        i += 1;
-    }
-    return out;
-}
-
-// True if `path` falls under any currently-active folder lock. Reads
-// our OWN lock state from in-memory LockedNames rather than LSD so the
-// unlock-then-sweep flow doesn't race against the still-in-flight
-// settings.delta write. Foreign locks (plugin_outfits) are read from
-// LSD directly — we don't track those in-memory.
-integer is_path_locked(string path) {
-    integer fn = llGetListLength(LockedNames);
-    integer fi = 0;
-    while (fi < fn) {
-        string lp = llList2String(LockedNames, fi);
-        if (path == lp || llSubStringIndex(path, lp + "/") == 0) return TRUE;
-        fi += 1;
-    }
-    string outfits_csv = llLinksetDataRead("outfits.locked");
-    if (outfits_csv != "") {
-        list outfits = llCSV2List(outfits_csv);
-        integer on = llGetListLength(outfits);
-        integer oi = 0;
-        while (oi < on) {
-            string outfit_path = "~outfits/" + llList2String(outfits, oi);
-            if (path == outfit_path || llSubStringIndex(path, outfit_path + "/") == 0) return TRUE;
-            oi += 1;
-        }
-    }
-    if (llLinksetDataRead("plugin.outfit.active") == "1") {
-        string base_path = "~outfits/~base";
-        if (path == base_path || llSubStringIndex(path, base_path + "/") == 0) return TRUE;
-    }
-    return FALSE;
-}
-
-// Set/clear bit at position `pos` in the 56-character locked-bit string.
-// Pads short strings to full width with zeros so writers don't have to
-// initialise the LSD value explicitly on first touch.
-string set_bit(string bits, integer pos, integer val) {
-    if (pos < 0 || pos >= 56) return bits;
-    while (llStringLength(bits) < 56) bits = bits + LOCKED_BITS_INIT;
-    bits = llGetSubString(bits, 0, 55);
-    string repl = "0";
-    if (val) repl = "1";
-    return llGetSubString(bits, 0, pos - 1) + repl + llGetSubString(bits, pos + 1, -1);
-}
-
-// Look up [pt, key] in a stride-2 snapshot. Returns TRUE if the pair is
-// present. Used by the diff to detect "new at this slot" vs "still there"
-// vs "gone."
-integer snapshot_has(list snap, integer pt, key k) {
-    integer n = llGetListLength(snap);
-    integer i = 0;
-    while (i < n) {
-        if (llList2Integer(snap, i) == pt && llList2Key(snap, i + 1) == k) return TRUE;
-        i += 2;
-    }
-    return FALSE;
-}
-
-// Queue a post-action registry update. Captures the pre-action snapshot
-// and arms the timer for REGISTRY_DELAY. The caller should fire the RLV
-// command immediately AFTER calling this — pre-snapshot needs to reflect
-// the state *before* the action.
-queue_registry_update(string path, string op) {
-    RegistryUpdatePending = TRUE;
-    RegistryUpdatePath    = path;
-    RegistryUpdateOp      = op;
-    RegistryPreSnapshot   = snapshot_attached();
-    llSetTimerEvent(REGISTRY_DELAY);
-}
-
-// Apply the deferred diff. Runs on timer fire when RegistryUpdatePending
-// is set. For "attach": diff (post - pre) → set bit for each new slot
-// based on whether the source path is locked. For "detach": diff (pre -
-// post) → clear bit for each newly-empty slot.
-apply_registry_update() {
-    list post = snapshot_attached();
-    integer locked_path = is_path_locked(RegistryUpdatePath);
-    string locked = llLinksetDataRead(WORN_REGISTRY_LOCKED_KEY);
-    if (locked == "" || llStringLength(locked) < 56) locked = LOCKED_BITS_INIT;
-    string orig = locked;
-
-    if (RegistryUpdateOp == "attach") {
-        integer pn = llGetListLength(post);
-        integer pi = 0;
-        while (pi < pn) {
-            integer pt = llList2Integer(post, pi);
-            key k = llList2Key(post, pi + 1);
-            if (!snapshot_has(RegistryPreSnapshot, pt, k)) {
-                integer val = 0;
-                if (locked_path) val = 1;
-                locked = set_bit(locked, pt, val);
-            }
-            pi += 2;
-        }
-    }
-    else if (RegistryUpdateOp == "detach") {
-        integer sn = llGetListLength(RegistryPreSnapshot);
-        integer si = 0;
-        while (si < sn) {
-            integer pt = llList2Integer(RegistryPreSnapshot, si);
-            key k = llList2Key(RegistryPreSnapshot, si + 1);
-            if (!snapshot_has(post, pt, k)) {
-                locked = set_bit(locked, pt, 0);
-            }
-            si += 2;
-        }
-    }
-
-    if (locked != orig) {
-        llMessageLinked(LINK_SET, SETTINGS_BUS,
-            "settings.delta:" + WORN_REGISTRY_LOCKED_KEY + ":" + locked, NULL_KEY);
-    }
-
-    RegistryUpdatePending = FALSE;
-    RegistryUpdatePath    = "";
-    RegistryUpdateOp      = "";
-    RegistryPreSnapshot   = [];
-}
-
-// Begin a sequential @getpath sweep over every currently-attached slot.
-// Called from lock_folder / unlock_folder after the LSD state and
-// in-memory LockedNames have been updated. As each @getpath response
-// lands, handle_path_response updates a working copy of the locked-bits
-// string; when all slots have been probed, a single settings.delta
-// pushes the result.
-//
-// Shares RLV_CHAN with the existing @getinvworn picker scan; listen()
-// multiplexes via ProbeActive. Timer multiplexes too (registry-update >
-// probe > scan-timeout).
-begin_path_sweep(string probe_path, string op) {
-    list slots = [];
-    list attached = llGetAttachedList(llGetOwner());
-    integer n = llGetListLength(attached);
-    integer i = 0;
-    while (i < n) {
-        list det = llGetObjectDetails(llList2Key(attached, i), [OBJECT_ATTACHED_POINT]);
-        if (llGetListLength(det) >= 1) {
-            integer pt = llList2Integer(det, 0);
-            if (pt >= 0 && pt < 56 && llListFindList(slots, [pt]) == -1) {
-                slots += [pt];
-            }
-        }
-        i += 1;
-    }
-    if (llGetListLength(slots) == 0) return;
-
-    ProbeSlots      = slots;
-    ProbeIdx        = 0;
-    ProbePath       = probe_path;
-    ProbeOp         = op;
-    ProbeActive     = TRUE;
-    ProbeLockedBits = llLinksetDataRead(WORN_REGISTRY_LOCKED_KEY);
-    if (ProbeLockedBits == "" || llStringLength(ProbeLockedBits) < 56) {
-        ProbeLockedBits = LOCKED_BITS_INIT;
-    }
-
-    if (RlvListenHandle == 0) {
-        RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
-    }
-    llSetTimerEvent(RLV_TIMEOUT);
-    integer first_pt = llList2Integer(ProbeSlots, 0);
-    rlv_force("@getpath:" + (string)first_pt + "=" + (string)RLV_CHAN);
-}
-
-// One @getpath response landed. If the returned path matches the probe
-// subtree, update the bit per ProbeOp: lock → set, unlock → clear (but
-// only if no OTHER active lock still covers the path — checks
-// is_path_locked, which now reads in-memory LockedNames so the
-// just-removed unlock entry is genuinely gone). Advances to the next
-// slot or finalizes the sweep with a single settings.delta write.
-handle_path_response(string message) {
-    if (!ProbeActive) return;
-    if (ProbeIdx >= llGetListLength(ProbeSlots)) return;
-
-    integer pt = llList2Integer(ProbeSlots, ProbeIdx);
-    string path = message;
-    integer path_match = FALSE;
-    if (path != "" && (path == ProbePath || llSubStringIndex(path, ProbePath + "/") == 0)) {
-        path_match = TRUE;
-    }
-    if (path_match) {
-        if (ProbeOp == "lock") {
-            ProbeLockedBits = set_bit(ProbeLockedBits, pt, 1);
-        }
-        else if (ProbeOp == "unlock") {
-            if (!is_path_locked(path)) {
-                ProbeLockedBits = set_bit(ProbeLockedBits, pt, 0);
-            }
-        }
-    }
-
-    ProbeIdx += 1;
-    if (ProbeIdx < llGetListLength(ProbeSlots)) {
-        integer next_pt = llList2Integer(ProbeSlots, ProbeIdx);
-        llSetTimerEvent(RLV_TIMEOUT);
-        rlv_force("@getpath:" + (string)next_pt + "=" + (string)RLV_CHAN);
-        return;
-    }
-
-    // Probe complete — write changes if any.
-    string orig = llLinksetDataRead(WORN_REGISTRY_LOCKED_KEY);
-    if (orig == "" || llStringLength(orig) < 56) orig = LOCKED_BITS_INIT;
-    if (ProbeLockedBits != orig) {
-        llMessageLinked(LINK_SET, SETTINGS_BUS,
-            "settings.delta:" + WORN_REGISTRY_LOCKED_KEY + ":" + ProbeLockedBits, NULL_KEY);
-    }
-    ProbeActive     = FALSE;
-    ProbeSlots      = [];
-    ProbeIdx        = 0;
-    ProbePath       = "";
-    ProbeOp         = "";
-    ProbeLockedBits = "";
-    if (!RegistryUpdatePending) llSetTimerEvent(0.0);
-}
 
 integer json_has(string j, list path) {
     return (llJsonGetValue(j, path) != JSON_INVALID);
@@ -589,33 +335,19 @@ rlv_force(string command) {
 }
 
 attach_folder(string folder_name) {
-    // Pre-snapshot must be taken BEFORE the RLV command fires so the
-    // diff captures items that arrived as a result of this @attachall.
-    queue_registry_update(folder_name, "attach");
     rlv_force("@attachall:" + folder_name + "=force");
 }
 
 detach_folder(string folder_name) {
-    queue_registry_update(folder_name, "detach");
     rlv_force("@detachall:" + folder_name + "=force");
 }
 
 lock_folder(string folder_name) {
     rlv_op("rlv.apply", "detachallthis:" + folder_name);
-    // Update the worn.registry.locked bit vector for currently-attached
-    // items whose source falls under the just-locked subtree. Note that
-    // LockedNames must already include folder_name before this is called
-    // (caller's responsibility) so is_path_locked sees it as locked.
-    begin_path_sweep(folder_name, "lock");
 }
 
 unlock_folder(string folder_name) {
     rlv_op("rlv.release", "detachallthis:" + folder_name);
-    // Clear bits for currently-attached items whose source was under the
-    // unlocked subtree — unless another active lock still covers it (the
-    // probe re-checks via is_path_locked, which now reads in-memory
-    // LockedNames and won't see this just-removed entry).
-    begin_path_sweep(folder_name, "unlock");
 }
 
 /* -------------------- UI -------------------- */
@@ -1085,26 +817,6 @@ default
     }
 
     timer() {
-        // Multiplexed in priority order:
-        //   1. Registry-update deadline (2 s after an attach/detach action)
-        //   2. @getpath probe timeout (one of the slot probes didn't get
-        //      a viewer reply — abandon the rest of the sweep)
-        //   3. @getinvworn picker scan timeout
-        if (RegistryUpdatePending) {
-            apply_registry_update();
-            llSetTimerEvent(0.0);
-            return;
-        }
-        if (ProbeActive) {
-            ProbeActive     = FALSE;
-            ProbeSlots      = [];
-            ProbeIdx        = 0;
-            ProbePath       = "";
-            ProbeOp         = "";
-            ProbeLockedBits = "";
-            llSetTimerEvent(0.0);
-            return;
-        }
         // RLV @getinv query timed out — viewer is not RLV-enabled or not responding
         stop_rlv_listen();
         if (CurrentUser != NULL_KEY) {
@@ -1115,14 +827,7 @@ default
 
     listen(integer channel, string name, key id, string message) {
         if (channel == RLV_CHAN && id == llGetOwner()) {
-            // Multiplex: route @getpath replies to the probe handler
-            // when a sweep is active; otherwise treat as @getinvworn
-            // reply for the picker scan.
-            if (ProbeActive) {
-                handle_path_response(message);
-            } else {
-                handle_rlv_response(message);
-            }
+            handle_rlv_response(message);
         }
     }
 
