@@ -28,7 +28,7 @@ public class DialogTests
     public void TestDialog_OpensOnACLGrant()
     {
         // Complete flow: UI start → ACL query → ACL grant → Dialog open
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -55,7 +55,7 @@ public class DialogTests
     public void TestDialog_SessionIdGeneration()
     {
         // Verify dialog opens with proper session tracking
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -85,7 +85,7 @@ public class DialogTests
     public void TestDialog_ButtonValidation()
     {
         // Verify dialog has expected buttons
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -117,7 +117,7 @@ public class DialogTests
     public void TestDialog_BackButtonReturnsToRoot()
     {
         // Clicking Back should send return message
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -150,7 +150,7 @@ public class DialogTests
     public void TestDialog_SessionTimeout()
     {
         // Simulate dialog timeout
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -185,7 +185,7 @@ public class DialogTests
     public void TestDialog_MultipleUsers()
     {
         // Two users should have independent sessions
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";

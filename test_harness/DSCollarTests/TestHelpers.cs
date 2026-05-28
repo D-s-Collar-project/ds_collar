@@ -121,17 +121,20 @@ public static class TestHelpers
     /// </summary>
     public static string LoadScript(string filename)
     {
-        // Navigate from test_harness/bin/Debug/net8.0 to src/ng/
+        // Pre-promotion validation: tests target src/lsl/collar/dev/ (the
+        // active development branch). Promotion pipeline is
+        // dev → experimental → ng → release-candidate → stable, so
+        // catching regressions before reconcile means validating dev/.
         string projectRoot = Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory, 
-            "..", "..", "..", "..", "src", "ng"
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "src", "lsl", "collar", "dev"
         ));
-        
+
         string path = Path.Combine(projectRoot, filename);
-        
+
         if (!File.Exists(path))
             throw new FileNotFoundException($"Script not found: {path}");
-        
+
         return File.ReadAllText(path);
     }
 

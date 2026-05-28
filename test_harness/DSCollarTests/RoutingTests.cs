@@ -28,7 +28,7 @@ public class RoutingTests
     public void TestStrictRouting_AcceptsExactMatch()
     {
         // Load a plugin with STRICT routing
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         // Get the script's SCRIPT_ID
@@ -52,7 +52,7 @@ public class RoutingTests
     public void TestStrictRouting_RejectsBroadcast()
     {
         // Load a plugin with STRICT routing
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         // Send broadcast message (to: "*")
@@ -73,7 +73,7 @@ public class RoutingTests
     public void TestStrictRouting_RejectsWrongContext()
     {
         // Load animate plugin
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         // Send message routed to different plugin
@@ -94,7 +94,7 @@ public class RoutingTests
     public void TestStrictRouting_RejectsMissingToField()
     {
         // Load a plugin with STRICT routing
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         // Send message WITHOUT "to" field (unrouted)
@@ -114,7 +114,7 @@ public class RoutingTests
     public void TestStrictRouting_AcceptsKernelLifecycle()
     {
         // Kernel lifecycle messages should always be processed (unrouted)
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string msg = CreateMessage("type", "register_now");
@@ -129,7 +129,7 @@ public class RoutingTests
     public void TestStrictRouting_PingPongFlow()
     {
         // Test heartbeat mechanism
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string pingMsg = CreateMessage("type", "ping");
@@ -147,7 +147,7 @@ public class RoutingTests
         var harness1 = new LSLTestHarness.LSLTestHarness();
         var harness2 = new LSLTestHarness.LSLTestHarness();
 
-        string script1 = LoadScript("ds_collar_plugin_animate.lsl");
+        string script1 = LoadScript("plugin_animate.lsl");
         string script2 = LoadScript("ds_collar_plugin_blacklist.lsl");
 
         harness1.LoadScript(script1);

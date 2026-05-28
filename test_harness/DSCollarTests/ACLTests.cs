@@ -30,7 +30,7 @@ public class ACLTests
     public void TestACL_RequestOnUIStart()
     {
         // When plugin receives UI start, it should request ACL validation
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -56,7 +56,7 @@ public class ACLTests
     public void TestACL_DenialBlocksMenu()
     {
         // When ACL denies access, plugin should not show menu
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -89,7 +89,7 @@ public class ACLTests
     public void TestACL_GrantShowsMenu()
     {
         // When ACL grants access, plugin should show menu
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -116,7 +116,7 @@ public class ACLTests
     public void TestACL_NoRevalidationOnButtonClick()
     {
         // After initial ACL validation, button clicks should NOT re-request ACL
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
@@ -152,7 +152,7 @@ public class ACLTests
     public void TestACL_SessionValidation()
     {
         // Only current session user should process dialog responses
-        string script = LoadScript("ds_collar_plugin_animate.lsl");
+        string script = LoadScript("plugin_animate.lsl");
         _harness!.LoadScript(script);
 
         string scriptId = _harness.GetScriptContext() ?? "plugin_animate";
