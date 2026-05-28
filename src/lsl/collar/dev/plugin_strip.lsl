@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 18
+REVISION: 19
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Lock detection is live —
@@ -28,6 +28,12 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              shadow lock state; plugin_outfits and plugin_folders
              don't write anything for us to read.
 CHANGES:
+- v1.10 rev 19: Conservative layer suppression — when LockedFolders is
+  non-empty (any folder lock active, from parse_detachallthis OR LSD),
+  build_worn_layers returns empty. RLV has no @getpath equivalent for
+  clothing layers so per-layer source folder is unknowable; hide all
+  rather than risk displaying locked items. Wearer falls back to
+  plugin_outfits Wear for layer changes when folder locks are in play.
 - v1.10 rev 18: Revert rev 17 (worn.registry.locked bit-vector reader).
   Restore rev 15's @getpath sweep mechanism — extracts @detachallthis
   paths from @getstatusall:detach and probes each worn attachment slot
