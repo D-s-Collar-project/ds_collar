@@ -1,33 +1,34 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 16
+REVISION: 17
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
-         self-owned wearer / primary owner). Items worn from
-         #RLV/~outfits/~base are protected against strip whenever
-         plugin_outfits is in its active state (its @detachallthis lock
-         on ~outfits/~base blocks the strip command at force time).
-         Pairs with plugin_outfits (#RLV/~outfits/ as the outfits library;
-         the ~base subfolder is the protected "non-strippable" set).
+         self-owned wearer / primary owner). Items worn from folders
+         under any locked subtree are filtered out of the picker via
+         the shared worn.registry.locked bit vector (maintained by
+         plugin_outfits and plugin_folders).
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Enumerates worn items live via @getoutfit +
              llGetAttachedList; reads lock state via @getstatusall on
              three keyspaces (remoutfit, remattach, detach). Per-slot
-             locks filter at build time; folder-scoped @detachallthis
-             locks are now pre-filtered too — parse_detachallthis pulls
-             the locked paths out of @getstatusall:detach into
-             LockedFolders, and QState=5 fires a sequential @getpath
-             probe per worn attachment so filter_worn_attach_by_folder
-             can drop any slot whose inventory path falls under a
-             locked subtree. Tilde-prefixed folder names (~outfits /
-             ~outfits/~base) keep paths visible to @getpath; dot-prefixed
-             foreign locks still slip through here and are caught
-             post-click by the verify_attempted_strip → DiscoveredLocked
-             safety net. No @detachallthis claim is issued here —
-             plugin_outfits owns the ~outfits/~base lock (it needs to
-             be releasable via the outfits on/off toggle).
+             RLV locks filter at build time. Folder-scoped
+             @detachallthis locks are filtered via the shared
+             worn.registry.locked bit vector — 56-character 0/1 string,
+             position i = "1" when the item currently at attach point
+             i was attached from a folder under a locked subtree at
+             the time it was attached. The vector is written by
+             plugin_outfits / plugin_folders at attach/detach/lock/
+             unlock time (see their write hooks); plugin_strip just
+             reads it, applies the filter, and reconciles stale bits
+             for slots that are no longer attached. The "wearer
+             dragged this from inventory, no RLV tracking" case is
+             accepted: that item won't appear in the registry and
+             shows in the picker. verify_attempted_strip →
+             DiscoveredLocked still catches surprise lock failures
+             on first click as a safety net.
 CHANGES:
+- v1.10 rev 17: Replace the @getinvworn folder-scan filter (revs 15-16, then 18 in dev) with a shared worn.registry.locked bit-vector read from LSD. plugin_outfits and plugin_folders own the writes (see their respective revs); plugin_strip just looks up the attach-point bit per worn item via llGetSubString(locked_bits, ATTACH_*, ATTACH_*). Reconciliation: at picker render, slots whose registry bit is 1 but where nothing is currently attached get cleared, and the trimmed vector is pushed back via settings.delta. Drops the QState=5 dispatch, ScanQueue / ScanIdx / WornFolderNames globals, the LockedFolders parsing, the @getinvworn scan loop, and the DEBUG_STRIP scaffolding + logd helper. Adds SETTINGS_BUS to the consolidated ISP block (needed for the reconciliation write).
 - v1.10 rev 16: Fix rev 15's pre-filter not catching @detachallthis:~outfits/~base. The three @getstatusall calls (remoutfit / remattach / detach) now request `;|` separator instead of the default `/`. Folder paths in @detachallthis:<path> entries embed `/` and were being shredded by the response parser — e.g. `/detachallthis:~outfits/~base/` parsed as `["", "detachallthis:~outfits", "~base", ""]`, so LockedFolders captured a truncated `~outfits` instead of `~outfits/~base`. Switching to `|` keeps paths intact. parse_status and parse_detachallthis both updated to split on `|`.
 - v1.10 rev 15: Re-introduce the @getpath pre-filter for folder-locked attachments. parse_detachallthis pulls @detachallthis:<path> entries out of the @getstatusall:detach response into LockedFolders; QState=5 then runs a sequential @getpath per worn attachment slot, and filter_worn_attach_by_folder drops any slot whose returned inventory path falls under a locked subtree. Triggered only when LockedFolders is non-empty AND WornAttach has entries, so wearers with no folder locks active see no added latency. Works now because plugin_outfits rev 13 moved the protected subtree from dot-prefixed (.outfits/.base) to tilde-prefixed (~outfits/~base) — @getpath returns real paths for tilde-prefixed folders. Foreign dot-prefixed folder locks still slip through here (RLV hides them from @getpath); the existing verify_attempted_strip → DiscoveredLocked safety net catches them on first click.
 - v1.10 rev 14: Fix "no attachments visible" — two distinct bugs. (a) Rev 10's GlobalDetachLocked filter in build_worn_attach was based on a wrong reading of the RLV spec: bare @detach=n locks ONLY the object that issued it (the collar), not all attachments, but the filter was hiding every attached item whenever plugin_lock was locked (which is the default state). Drop the GlobalDetachLocked skip; per-slot @detach:<slot>=n locks still filter via LockedAttach. (b) ATTACH_NAMES stopped at index 40, so anything attached to a Bento mesh point (LHAND_RING1=41 through HIND_RFOOT=55) failed the attach_pt < attach_names_n bounds check and never appeared. Extend to 56 entries covering all current LSL ATTACH_* constants.
@@ -138,6 +139,7 @@ CHANGES:
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
+integer SETTINGS_BUS     = 800;
 integer UI_BUS           = 900;
 integer DIALOG_BUS       = 950;
 
@@ -149,16 +151,14 @@ string PLUGIN_LABEL   = "Strip";
 integer RLV_CHAN    = 1888771;
 float   RLV_TIMEOUT = 10.0;
 
-// TEMPORARY: diagnostic logging for the rev 16 pre-filter regression.
-// Dumps raw @getstatusall:detach response, parsed LockedFolders, per-slot
-// @getpath responses, and WornAttach before/after the folder filter, all
-// prefixed with [strip:debug] so the wearer can grep them in chat. Strip
-// this block + the logd calls once the root cause is identified — same
-// pattern as DEBUG_STRIP in rev 7 before this file's previous cleanup.
-integer DEBUG_STRIP = TRUE;
-logd(string s) {
-    if (DEBUG_STRIP) llOwnerSay("[strip:debug] " + s);
-}
+/* -------------------- WORN REGISTRY -------------------- */
+// Shared lock bit vector keyed by ATTACH_* integer. Position i = "1" when
+// the item currently at attach point i was attached from a folder under a
+// locked subtree at attach time. plugin_outfits and plugin_folders write
+// it from their attach/detach/lock/unlock hooks; we just read it. See
+// kmod_settings rev 19 changelog for the schema.
+string WORN_REGISTRY_LOCKED_KEY = "worn.registry.locked";
+string LOCKED_BITS_INIT         = "00000000000000000000000000000000000000000000000000000000";  // 56 zeros — matches ATTACH_NAMES length
 
 /* -------------------- LAYER NAMES (matches @getoutfit response order) -------------------- */
 // RLV @getoutfit returns a 0/1 string with characters in this canonical
@@ -222,24 +222,10 @@ string  SessionId      = "";
 //   2 = waiting for @getstatusall:remoutfit response
 //   3 = waiting for @getstatusall:remattach response
 //   4 = waiting for @getstatusall:detach response — captures per-point
-//       @detach:<pt>=n locks, bare @detach=n, AND @detachallthis:<path>
-//       folder locks (which parse_detachallthis pulls into LockedFolders
-//       so the per-slot path probe in QState=5 can pre-filter the
-//       attachments picker).
-//   5 = breadth-first @getinvworn scan of every LockedFolders subtree.
-//       Each response lists subfolders with a 2-digit worn state
-//       (self/descendants); subfolders with self_state >= 2 land in
-//       WornFolderNames (the filter's match set), and subfolders with
-//       descendants_state >= 2 get enqueued for recursion. Replaces the
-//       earlier @getpath per-slot probe (revs 15-17), which only worked
-//       for items whose wearing went through RLV — items dragged from
-//       inventory via the viewer return empty from @getpath even when a
-//       link exists in #RLV. @getinvworn reads worn status from the
-//       inventory side and works regardless. Limitation: subfolders
-//       named after their items (OC convention) match the filter; loose
-//       links sitting directly at the top of ~base produce no subfolder
-//       entries, and those items fall through to the verify_attempted_strip
-//       → DiscoveredLocked safety net on first click.
+//       @detach:<pt>=n locks. @detachallthis:<path> entries are NOT
+//       parsed here — folder-scoped lock state is read from the shared
+//       worn.registry.locked bit vector instead (see rev 17 changelog
+//       and filter_worn_attach_by_registry).
 //   0 = idle (results assembled, category menu rendered)
 //
 // Note: @getattach (the bit-string attach query) is GONE — replaced by
@@ -252,50 +238,14 @@ integer GlobalOutfitLocked = FALSE;
 integer GlobalAttachLocked = FALSE;
 list    LockedLayers       = [];
 list    LockedAttach       = [];     // per-point @remattach:<pt>=n AND @detach:<pt>=n
-// Folder paths under @detachallthis (parsed out of the @getstatusall:detach
-// response in QState=4). Used by the QState=5 path-probe pass to pre-filter
-// attachments whose inventory path falls under any locked subtree. Now that
-// the project's protected folders use tilde prefixes (~outfits/~base) — see
-// plugin_outfits rev 13 — @getpath returns real paths for them and the
-// pre-filter actually applies. Dot-prefixed locks from foreign plugins still
-// slip through here (RLV hides those from @getpath); the existing
-// verify_attempted_strip + DiscoveredLocked safety net catches them.
-list    LockedFolders      = [];
-
 // Per-category worn-item tables built after the RLV queries complete.
 //   WornLayers : stride 1, [layer_name]                — from @getoutfit.
 //   WornAttach : stride 2, [point_name, item_name]     — from llGetAttachedList.
 // Locked entries are filtered out at build time so the pickers never
-// display them. WornAttach gets a second filter pass after QState=5 if any
-// @detachallthis folder lock is active.
+// display them. Folder-scoped locks (@detachallthis) get applied via the
+// worn.registry.locked bit vector read after build (see filter_worn_attach_by_registry).
 list    WornLayers   = [];
 list    WornAttach   = [];
-
-// QState=5 scan state. We walk each LockedFolders entry via @getinvworn
-// to enumerate its subfolders + worn status. Subfolders whose worn state
-// is >= 2 (some/all worn) are recorded as WornFolderNames; the filter
-// then drops WornAttach entries whose item_name matches or contains any
-// of those names. ScanQueue is the breadth-first work queue (paths to
-// @getinvworn next); ScanIdx is the current cursor (advancing through
-// the queue as responses come in).
-//
-// Why not @getpath: @getpath/@getpathnew rely on RLV's "attached-from"
-// tracking, which only gets populated when wearing happens through an
-// RLV command (@attach, @attachall) or via the viewer's RLV-aware
-// Wear-Folder flow. Items the wearer attached by dragging from inventory
-// are invisible to @getpath even when a link exists in #RLV. @getinvworn
-// instead reports folder worn-status from the inventory side, which
-// resolves regardless of how the item was attached.
-//
-// Caveat: this works cleanly when ~outfits/~base has subfolders named
-// after their items (e.g. "Body", "Head", "Jewelry"). Flat layouts
-// where all links sit at the top of ~base produce an empty @getinvworn
-// response (no subfolders) — those items can't be filtered by this
-// mechanism. The verify_attempted_strip + DiscoveredLocked safety net
-// still catches them on first click.
-list    ScanQueue       = [];
-integer ScanIdx         = 0;
-list    WornFolderNames = [];
 
 // "" = nothing selected; "L" = Layers picker active; "A" = Attachments
 // picker active. Set when the user picks a category, cleared on Back to
@@ -455,12 +405,8 @@ begin_query() {
     GlobalAttachLocked = FALSE;
     LockedLayers       = [];
     LockedAttach       = [];
-    LockedFolders      = [];
     WornLayers         = [];
     WornAttach         = [];
-    ScanQueue          = [];
-    ScanIdx            = 0;
-    WornFolderNames    = [];
 
     QState = 1;
     if (RlvListenHandle == 0) RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
@@ -468,45 +414,73 @@ begin_query() {
     rlv_force("@getoutfit=" + (string)RLV_CHAN);
 }
 
-// Drop entries from WornAttach whose item name matches (or contains as
-// a substring) any name in WornFolderNames. WornFolderNames is populated
-// by the QState=5 @getinvworn scan: subfolders under each LockedFolders
-// entry that have a worn-state digit of 2 or 3 (some/all of the
-// subfolder's items are worn).
+// Drop entries from WornAttach whose attach-point bit is set in
+// worn.registry.locked. Bit position = ATTACH_* integer (mapped via
+// ATTACH_NAMES). plugin_outfits and plugin_folders maintain the vector
+// at attach/detach/lock/unlock time — see kmod_settings rev 19 changelog.
 //
-// Substring rather than exact match: wearers conventionally name a
-// subfolder like "Body" while the attached object's name is the full
-// product (e.g. "Maitreya Lara Body V6.2"). The folder name appears
-// inside the object name, so contains-match catches it. Caveat: false
-// positives possible if an unrelated attached object happens to contain
-// the same word — acceptable for a UI declutter pass; verify_attempted_strip
-// is the source of truth for whether a strip will actually fail.
-filter_worn_attach_by_folder() {
-    if (llGetListLength(WornFolderNames) == 0) return;
-    if (llGetListLength(WornAttach) == 0)      return;
+// Also reconciles stale bits: if the registry says slot N is locked but
+// nothing is currently attached at N, clear the bit and push the trimmed
+// vector back via settings.delta. Cheap O(56) pass; only writes when the
+// vector actually changes.
+filter_worn_attach_by_registry() {
+    if (llGetListLength(WornAttach) == 0) return;
 
+    string locked = llLinksetDataRead(WORN_REGISTRY_LOCKED_KEY);
+    if (locked == "" || llStringLength(locked) < 56) {
+        locked = LOCKED_BITS_INIT;
+    }
+
+    // Reconciliation: clear bits for slots that aren't actually attached.
+    // Build a 56-char "is attached at N" string from llGetAttachedList.
+    string attached_bits = LOCKED_BITS_INIT;
+    list attached = llGetAttachedList(llGetOwner());
+    integer ai = 0;
+    integer an = llGetListLength(attached);
+    while (ai < an) {
+        list det = llGetObjectDetails(llList2Key(attached, ai), [OBJECT_ATTACHED_POINT]);
+        if (llGetListLength(det) >= 1) {
+            integer pt = llList2Integer(det, 0);
+            if (pt >= 0 && pt < 56) {
+                attached_bits = llGetSubString(attached_bits, 0, pt - 1)
+                    + "1" + llGetSubString(attached_bits, pt + 1, -1);
+            }
+        }
+        ai += 1;
+    }
+    string reconciled = "";
+    integer ri = 0;
+    integer dirty = FALSE;
+    while (ri < 56) {
+        string lb = llGetSubString(locked, ri, ri);
+        string ab = llGetSubString(attached_bits, ri, ri);
+        if (lb == "1" && ab == "0") {
+            reconciled += "0";
+            dirty = TRUE;
+        } else {
+            reconciled += lb;
+        }
+        ri += 1;
+    }
+    if (dirty) {
+        locked = reconciled;
+        llMessageLinked(LINK_SET, SETTINGS_BUS,
+            "settings.delta:" + WORN_REGISTRY_LOCKED_KEY + ":" + locked, NULL_KEY);
+    }
+
+    // Filter: drop WornAttach entries whose attach-point bit is set.
     list new_worn = [];
-    integer n  = llGetListLength(WornAttach);
-    integer fn = llGetListLength(WornFolderNames);
-    integer i  = 0;
+    integer n = llGetListLength(WornAttach);
+    integer i = 0;
     while (i < n) {
         string slot = llList2String(WornAttach, i);
         string item = llList2String(WornAttach, i + 1);
-
-        integer locked = FALSE;
-        integer fi = 0;
-        while (fi < fn) {
-            string folder = llList2String(WornFolderNames, fi);
-            if (folder != ""
-                && (item == folder
-                    || llSubStringIndex(item, folder) != -1)) {
-                locked = TRUE;
-                fi = fn;  // break
-            } else {
-                fi += 1;
-            }
+        integer pt = llListFindList(ATTACH_NAMES, [slot]);
+        integer bit_set = FALSE;
+        if (pt >= 0 && pt < 56 && llGetSubString(locked, pt, pt) == "1") {
+            bit_set = TRUE;
         }
-        if (!locked) new_worn += [slot, item];
+        if (!bit_set) new_worn += [slot, item];
         i += 2;
     }
     WornAttach = new_worn;
@@ -975,11 +949,9 @@ handle_rlv_response(string message) {
         // object (the collar itself), not all attachments — treating it as
         // a global lock would hide every attached item whenever plugin_lock
         // had @detach=n active on the collar (the default state).
-        // QState=5 then drives the @getinvworn folder scan for path-locked
-        // attachments. The verify_attempted_strip → DiscoveredLocked safety
-        // net catches anything the scan misses (e.g. items whose containing
-        // folder isn't found by @getinvworn).
-        logd("QState=4 raw response: '" + message + "'");
+        // Folder-scoped @detachallthis locks aren't consumed by parse_status
+        // here — that state lives in worn.registry.locked and gets read by
+        // filter_worn_attach_by_registry after the build phase.
         list parsed_detach = parse_status(message, "detach");
         // Drop the global-flag head-marker if parse_status saw a bare
         // "detach" token — we don't act on it (see above), but we still
@@ -996,110 +968,17 @@ handle_rlv_response(string message) {
             }
             di += 1;
         }
-        // parse_status with key_name="detachallthis" extracts the path
-        // suffix from each "detachallthis:<path>" entry. RLV never emits
-        // a bare "detachallthis" token (always with a path argument),
-        // so parse_status's global_seen head-marker can't fire — no
-        // post-strip needed here.
-        LockedFolders = parse_status(message, "detachallthis");
-        logd("LockedFolders parsed: [" + llDumpList2String(LockedFolders, " | ") + "] (" + (string)llGetListLength(LockedFolders) + " entries)");
+        // @detachallthis:<path> entries are NOT consumed here — folder-
+        // scoped lock state lives in worn.registry.locked (the bit
+        // vector plugin_outfits / plugin_folders maintain). The vector
+        // gets read by filter_worn_attach_by_registry right after the
+        // build phase, no further RLV roundtrips needed.
 
         verify_attempted_strip();
         build_worn_layers();
         build_worn_attach();
-        logd("build_worn_attach: " + (string)(llGetListLength(WornAttach) / 2) + " attachments before folder filter");
+        filter_worn_attach_by_registry();
 
-        // If any folder locks are active AND we have attachments to filter,
-        // kick off QState=5 (@getinvworn scan of LockedFolders subtrees).
-        // Otherwise render now.
-        if (llGetListLength(LockedFolders) > 0 && llGetListLength(WornAttach) > 0) {
-            QState     = 5;
-            ScanQueue  = LockedFolders;  // seed: scan each lock root
-            ScanIdx    = 0;
-            string first_path = llList2String(ScanQueue, 0);
-            logd("QState=5 starting @getinvworn scan of '" + first_path + "'");
-            llSetTimerEvent(RLV_TIMEOUT);
-            rlv_force("@getinvworn:" + first_path + "=" + (string)RLV_CHAN);
-            return;
-        }
-
-        logd("Skipping QState=5 (LockedFolders=" + (string)llGetListLength(LockedFolders) + ", WornAttach pairs=" + (string)(llGetListLength(WornAttach) / 2) + ")");
-        QState = 0;
-        stop_rlv_listen();
-        show_current_picker(PickPage);
-        return;
-    }
-    if (QState == 5) {
-        // @getinvworn scan response. The message lists the subfolders
-        // of ScanQueue[ScanIdx] as "name|<self><descendants>" pairs
-        // separated by commas. Each state digit is 0=empty, 1=none worn,
-        // 2=some worn, 3=all worn. We record subfolders whose self-state
-        // is >= 2 (something directly in that subfolder is worn) as
-        // WornFolderNames — the filter then matches WornAttach by name
-        // substring against those.
-        //
-        // We also enqueue any subfolder with descendants-state >= 2 for
-        // deeper recursion, so nested worn structures (e.g. ~base/Outfits/Body)
-        // surface their leaf folder names too.
-        string current_path = "";
-        if (ScanIdx < llGetListLength(ScanQueue)) {
-            current_path = llList2String(ScanQueue, ScanIdx);
-        }
-        logd("@getinvworn '" + current_path + "' → '" + message + "'");
-
-        if (message != "") {
-            list entries = llParseString2List(message, [","], []);
-            integer en = llGetListLength(entries);
-            integer ei = 0;
-            while (ei < en) {
-                string entry = llList2String(entries, ei);
-                integer pipe = llSubStringIndex(entry, "|");
-                if (pipe > 0) {
-                    string folder_name = llGetSubString(entry, 0, pipe - 1);
-                    string state_str   = llGetSubString(entry, pipe + 1, -1);
-                    integer self_state = 0;
-                    integer desc_state = 0;
-                    if (llStringLength(state_str) >= 1) {
-                        self_state = (integer)llGetSubString(state_str, 0, 0);
-                    }
-                    if (llStringLength(state_str) >= 2) {
-                        desc_state = (integer)llGetSubString(state_str, 1, 1);
-                    }
-
-                    // Record name when items at this level are worn
-                    // (self_state covers leaf-folder hits).
-                    if (self_state >= 2) {
-                        if (llListFindList(WornFolderNames, [folder_name]) == -1) {
-                            WornFolderNames += [folder_name];
-                        }
-                    }
-                    // Recurse when descendants have worn items (catches
-                    // nested layouts where the leaf is deeper).
-                    if (desc_state >= 2) {
-                        string child_path = folder_name;
-                        if (current_path != "") {
-                            child_path = current_path + "/" + folder_name;
-                        }
-                        ScanQueue += [child_path];
-                    }
-                }
-                ei += 1;
-            }
-        }
-
-        ScanIdx += 1;
-        if (ScanIdx < llGetListLength(ScanQueue)) {
-            string next_path = llList2String(ScanQueue, ScanIdx);
-            llSetTimerEvent(RLV_TIMEOUT);
-            rlv_force("@getinvworn:" + next_path + "=" + (string)RLV_CHAN);
-            return;
-        }
-
-        logd("WornFolderNames: [" + llDumpList2String(WornFolderNames, " | ") + "] (" + (string)llGetListLength(WornFolderNames) + " entries)");
-        integer before_pairs = llGetListLength(WornAttach) / 2;
-        filter_worn_attach_by_folder();
-        integer after_pairs = llGetListLength(WornAttach) / 2;
-        logd("filter_worn_attach_by_folder: " + (string)before_pairs + " → " + (string)after_pairs + " attachments");
         QState = 0;
         stop_rlv_listen();
         show_current_picker(PickPage);

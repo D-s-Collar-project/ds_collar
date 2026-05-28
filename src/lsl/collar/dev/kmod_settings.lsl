@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 18
+REVISION: 19
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -17,6 +17,7 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               notecard reload; consumers fall back to in-script defaults
               via lsd_int(key, fallback) when the notecard omits a key.
 CHANGES:
+- v1.1 rev 19: Register worn.registry.locked + worn.registry.paths in MANAGED_SETTINGS_KEYS. Shared attach-point lock bit vector: position i = ATTACH_* integer i, value "1" = the item currently at that attach point was attached from a folder under a locked subtree. plugin_outfits / plugin_folders write bits at attach/detach/lock/unlock time; plugin_strip reads the vector to filter the picker. Paths key is an audit-only CSV of source paths the writers have referenced. Both keys wipe on factory reset alongside the rest of the managed family.
 - v1.1 rev 18: Register plugin.outfit.active in MANAGED_SETTINGS_KEYS
   for plugin_outfits's runtime on/off toggle (0 = disabled +
   ~outfits/~base unlocked, 1 = enabled; folder names retconned in
@@ -230,6 +231,8 @@ list MANAGED_SETTINGS_KEYS = [
     "folders.locked",         // plugin_folders
     "outfits.locked",         // plugin_outfits
     "plugin.outfit.active",   // plugin_outfits on/off toggle
+    "worn.registry.locked",   // shared attach-point lock bit vector (plugin_outfits / plugin_folders write, plugin_strip reads)
+    "worn.registry.paths",    // shared CSV audit of source paths currently referenced by the locked bit vector
     "relay.mode",             // plugin_relay
     "relay.hardcoremode",     // plugin_relay
     "chat.prefix",            // plugin_chat
