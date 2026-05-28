@@ -36,7 +36,21 @@ CHANGES:
   Drops filter_worn_attach_by_registry, the SETTINGS_BUS dependency,
   the WORN_REGISTRY_* constants, and the LockedFolders/AttachPaths
   reconciliation write-back. Companion to plugin_outfits rev 17 (which
-  drops the bit-vector writer side).
+  drops the bit-vector writer side). Also: dialog layout brought into
+  spec compliance per feedback_dialog_layout_convention — action_buttons
+  computed up-front (none for strip today), page_size derived as
+  `9 - action_count`, target_slots if-ladder uses `first_content_slot`
+  guards. PageSize constant removed. LSD-direct fallback added for
+  folder lock detection: lsd_locked_folders() reads folders.locked,
+  outfits.locked, and plugin.outfit.active (→ ~outfits/~base) and
+  unions the result into LockedFolders alongside parse_detachallthis's
+  external/relay-applied catch. Closes the case where some RLVa builds
+  don't surface our own @detachallthis claims in @getstatusall:detach.
+  Layers: when any folder lock is active, ALL worn layers are
+  suppressed (RLV has no @getpath equivalent for layers, so we can't
+  determine per-layer source folder — conservative all-or-nothing
+  rather than risk displaying locked items). Wearer can still change
+  layers via plugin_outfits Wear when folder locks are in play.
 - v1.10 rev 17: Replace the @getinvworn folder-scan filter (revs 15-16, then 18 in dev) with a shared worn.registry.locked bit-vector read from LSD. plugin_outfits and plugin_folders own the writes (see their respective revs); plugin_strip just looks up the attach-point bit per worn item via llGetSubString(locked_bits, ATTACH_*, ATTACH_*). Reconciliation: at picker render, slots whose registry bit is 1 but where nothing is currently attached get cleared, and the trimmed vector is pushed back via settings.delta. Drops the QState=5 dispatch, ScanQueue / ScanIdx / WornFolderNames globals, the LockedFolders parsing, the @getinvworn scan loop, and the DEBUG_STRIP scaffolding + logd helper. Adds SETTINGS_BUS to the consolidated ISP block (needed for the reconciliation write).
 - v1.10 rev 16: Fix rev 15's pre-filter not catching @detachallthis:~outfits/~base. The three @getstatusall calls (remoutfit / remattach / detach) now request `;|` separator instead of the default `/`. Folder paths in @detachallthis:<path> entries embed `/` and were being shredded by the response parser — e.g. `/detachallthis:~outfits/~base/` parsed as `["", "detachallthis:~outfits", "~base", ""]`, so LockedFolders captured a truncated `~outfits` instead of `~outfits/~base`. Switching to `|` keeps paths intact. parse_status and parse_detachallthis both updated to split on `|`.
 - v1.10 rev 15: Re-introduce the @getpath pre-filter for folder-locked attachments. parse_detachallthis pulls @detachallthis:<path> entries out of the @getstatusall:detach response into LockedFolders; QState=5 then runs a sequential @getpath per worn attachment slot, and filter_worn_attach_by_folder drops any slot whose returned inventory path falls under a locked subtree. Triggered only when LockedFolders is non-empty AND WornAttach has entries, so wearers with no folder locks active see no added latency. Works now because plugin_outfits rev 13 moved the protected subtree from dot-prefixed (.outfits/.base) to tilde-prefixed (~outfits/~base) — @getpath returns real paths for tilde-prefixed folders. Foreign dot-prefixed folder locks still slip through here (RLV hides them from @getpath); the existing verify_attempted_strip → DiscoveredLocked safety net catches them on first click.
@@ -382,6 +396,34 @@ advance_query() {
     if (QState == 4) { rlv_force("@getstatusall:detach;|="   + (string)RLV_CHAN); }
 }
 
+// Read locked folder paths from LSD. Other collar plugins are the
+// authoritative source for their own locks; parse_detachallthis is a
+// fallback for external/relay-applied locks. Reading from LSD avoids
+// any dependency on the viewer's @getstatusall:detach response surfacing
+// our @detachallthis claims (some RLVa builds don't include them).
+list lsd_locked_folders() {
+    list out = [];
+
+    string folders_csv = llLinksetDataRead("folders.locked");
+    if (folders_csv != "") out += llCSV2List(folders_csv);
+
+    string outfits_csv = llLinksetDataRead("outfits.locked");
+    if (outfits_csv != "") {
+        list names = llCSV2List(outfits_csv);
+        integer i = 0;
+        integer n = llGetListLength(names);
+        while (i < n) {
+            out += ["~outfits/" + llList2String(names, i)];
+            i += 1;
+        }
+    }
+
+    string active = llLinksetDataRead("plugin.outfit.active");
+    if ((integer)active) out += ["~outfits/~base"];
+
+    return out;
+}
+
 // Extract `detachallthis:<path>` entries from a @getstatusall:detach response.
 list parse_detachallthis(string raw) {
     list out = [];
@@ -461,6 +503,16 @@ filter_worn_attach_by_folder() {
 }
 
 build_worn_layers() {
+    // RLV has no @getpath equivalent for clothing layers, so we cannot
+    // determine the source folder of a worn layer. When any folder lock
+    // is active we conservatively suppress ALL layers — we'd rather hide
+    // an unlocked layer than display a locked one. Wearer can still
+    // change layers via plugin_outfits Wear when folder locks are in play.
+    if (llGetListLength(LockedFolders) > 0) {
+        WornLayers = [];
+        return;
+    }
+
     integer max_layers = llGetListLength(STRIPPABLE_LAYER_IDX);
     WornLayers = prealloc(max_layers);
 
@@ -815,6 +867,19 @@ handle_rlv_response(string message) {
             di += 1;
         }
         LockedFolders = parse_detachallthis(message);
+
+        // Augment with LSD-known folder locks (plugin_folders, plugin_outfits).
+        // Authoritative source for our own locks; parse_detachallthis above
+        // covers external/relay-applied locks. Union ensures we filter
+        // even when the viewer's response omits our claims.
+        list known = lsd_locked_folders();
+        integer kn = llGetListLength(known);
+        integer ki = 0;
+        while (ki < kn) {
+            string lf = llList2String(known, ki);
+            if (llListFindList(LockedFolders, [lf]) == -1) LockedFolders += [lf];
+            ki += 1;
+        }
 
         verify_attempted_strip();
         build_worn_layers();
