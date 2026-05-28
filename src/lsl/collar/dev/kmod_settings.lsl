@@ -19,9 +19,10 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
 CHANGES:
 - v1.1 rev 18: Register plugin.outfit.active in MANAGED_SETTINGS_KEYS
   for plugin_outfits's runtime on/off toggle (0 = disabled +
-  .outfits/.base unlocked, 1 = enabled). Settings key follows the
-  user-specified name verbatim (deviates from the existing
-  <short>.<key> convention).
+  ~outfits/~base unlocked, 1 = enabled; folder names retconned in
+  plugin_outfits rev 13 — were .outfits/.base at the time of this
+  rev). Settings key follows the user-specified name verbatim
+  (deviates from the existing <short>.<key> convention).
 - v1.1 rev 17: Register outfits.locked in MANAGED_SETTINGS_KEYS for
   plugin_outfits rev 5 (persistent per-outfit @detachallthis locks,
   same pattern as folders.locked / lock.locked).

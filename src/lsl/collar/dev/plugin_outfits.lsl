@@ -1,13 +1,13 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 12
-PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
+REVISION: 13
+PURPOSE: Browse #RLV/~outfits subfolders and act on them. Five actions
          per outfit:
            Add    — attach the folder additively (layer on top)
-           Wear   — replace: detach all .outfits items then attach
-                    the chosen folder. .outfits/.base items are
-                    protected by plugin_strip's @detachallthis claim
+           Wear   — replace: detach worn unlocked items then attach
+                    the chosen folder. ~outfits/~base items are
+                    protected by this plugin's @detachallthis claim
                     and silently survive.
            Remove — detach this outfit's items
            Lock   — claim @detachallthis on the outfit (locks it
@@ -15,16 +15,18 @@ PURPOSE: Browse #RLV/.outfits subfolders and act on them. Five actions
            Unlock — release the lock
          The picker also exposes a Help button that delivers the
          "D/s Collar outfits setup" notecard describing the expected
-         #RLV/.outfits/.base layout.
+         #RLV/~outfits/~base layout.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
-             visibility. Subfolder enumeration via @getinv:.outfits on
-             every menu entry — no persisted manifest. The
-             .outfits/.base subfolder is intentionally invisible to
-             every RLV enumeration command (dot-prefixed names are
-             systematically hidden by the API), so the plugin cannot
-             programmatically verify it exists; instead the picker
-             offers a Help button that delivers the setup notecard
-             on demand. Lock state is
+             visibility. Subfolder enumeration via @getinv:~outfits on
+             every menu entry — no persisted manifest. Folder names
+             use a tilde prefix (orthodox-RLV convention, matches OC):
+             ~outfits is visible to all RLV enumeration commands, sorts
+             to the bottom of the inventory tree alphabetically, and
+             — crucially — its paths resolve under @getpath, so
+             plugin_strip can pre-filter locked items from its picker.
+             The ~base subfolder is hidden from THIS plugin's outfit
+             picker by a tilde-prefix skip in show_picker; it remains
+             visible to RLV otherwise. Lock state is
              persistent via kmod_settings (KEY_LOCKED CSV in LSD),
              mirroring the plugin_lock / plugin_folders pattern:
              locks survive detach/reattach and script reset, and only
@@ -43,6 +45,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
              Lock/Unlock.
 CHANGES:
+- v1.10 rev 13: Migrate the outfit-system folder names from dot-prefixed (.outfits / .outfits/.base) to tilde-prefixed (~outfits / ~outfits/~base). Tilde-prefixed folders are visible to every RLV enumeration command (@getinv, @getpath, @getinvworn …), which unblocks plugin_strip's path-based pre-filter for picker contents — see plugin_strip rev 15. ~base is kept out of the outfit picker by the existing dot-or-tilde skip in handle_rlv_response. Constants OUTFITS_ROOT / BASE_FOLDER repointed; all live comments and user-facing strings updated. Wearers must rename their inventory folders to match (.outfits → ~outfits, .base → ~base inside it); the setup notecard is rewritten to describe the new layout.
 - v1.10 rev 12: Wear's strip is now three-phase and symmetric across attachments and clothing layers: @detachallthis:.outfits=force (subtree-as-unit clear of unlocked .outfits items), then @remattach=force (attachments worn from outside .outfits), then @remoutfit=force (system clothing layers worn from outside .outfits). .base and any locked outfit folder, attachment point, or layer survive via the standard RLV lock-respect path. Attach stays on @attachall:.outfits/<name>=force — the *this family is locks / self-referential detach only, not attaches.
 - v1.10 rev 11: Wear now uses @detachallthis / @attachallthis (subtree-as-unit variants) instead of @detachall / @attachall. Lock semantics unchanged — locked subfolders still skipped — but the verbs match the intent (operate on .outfits as one subtree) and stay symmetric on both sides of the replace.
 - v1.10 rev 10: Default plugin.outfit.active to OFF when KEY_ACTIVE is
@@ -131,13 +134,13 @@ string PLUGIN_LABEL   = "Outfits";
 /* -------------------- RLV -------------------- */
 integer RLV_CHAN    = 1888772;
 float   RLV_TIMEOUT = 10.0;
-string  OUTFITS_ROOT  = ".outfits";          // #RLV-relative root for outfit subfolders.
-string  BASE_FOLDER   = ".outfits/.base";    // protected non-strippable subfolder.
+string  OUTFITS_ROOT  = "~outfits";          // #RLV-relative root for outfit subfolders.
+string  BASE_FOLDER   = "~outfits/~base";    // protected non-strippable subfolder.
 string  RLV_CONSUMER  = "outfits";           // kmod_rlv consumer id for lock claims.
 
 /* -------------------- SETTINGS KEYS -------------------- */
 string  KEY_LOCKED = "outfits.locked";        // CSV of locked outfit names.
-string  KEY_ACTIVE = "plugin.outfit.active";  // 0=off (.base unlocked), 1=on.
+string  KEY_ACTIVE = "plugin.outfit.active";  // 0=off (~base unlocked), 1=on.
 
 /* -------------------- INVENTORY -------------------- */
 string  SETUP_NOTECARD = "D/s Collar outfits setup";
@@ -149,11 +152,11 @@ list    gPolicyButtons = [];
 string  SessionId      = "";
 
 // Menu-state machine values used by show_*/handle_dialog_response:
-//   "scanning"     = awaiting @getinv:.outfits response
+//   "scanning"     = awaiting @getinv:~outfits response
 //   "pick"         = paginated outfit picker
 //   "action"       = per-outfit Wear/Replace submenu
 //   "disabled"     = plugin is OFF; root menu shows Enable/Help/Back
-//   "empty"        = plugin is ON but #RLV/.outfits has no outfit
+//   "empty"        = plugin is ON but #RLV/~outfits has no outfit
 //                    subfolders; menu shows Help/Disable/Back
 string  MenuContext      = "";
 string  SelectedOutfit   = "";
@@ -165,10 +168,10 @@ integer PageSize         = 7;  // 12 dialog slots − 3 nav − 2 action (Help+D
 
 // Runtime on/off toggle. OutfitsActive mirrors KEY_ACTIVE in LSD;
 // LastActive is the sentinel apply_settings_sync uses to detect
-// transitions and emit the corresponding @detachallthis:.outfits/.base
+// transitions and emit the corresponding @detachallthis:~outfits/~base
 // apply / release through kmod_rlv. -1 forces the first sync to emit.
-// Default OFF so fresh wearers can set up #RLV/.outfits/.base without
-// fighting a pre-emptive .base lock; the wearer opts in via Enable.
+// Default OFF so fresh wearers can set up #RLV/~outfits/~base without
+// fighting a pre-emptive ~base lock; the wearer opts in via Enable.
 integer OutfitsActive    = 0;
 integer LastActive       = -1;
 
@@ -351,9 +354,9 @@ apply_settings_sync() {
     }
 
     // Active toggle. KEY_ACTIVE is 0 or 1; default 0 (off) when absent
-    // so fresh installs do not lock .base before the wearer has built
-    // out #RLV/.outfits. LastActive's -1 sentinel forces an emit on the
-    // first sync after state_entry so the .base claim state is in sync
+    // so fresh installs do not lock ~base before the wearer has built
+    // out #RLV/~outfits. LastActive's -1 sentinel forces an emit on the
+    // first sync after state_entry so the ~base claim state is in sync
     // with LSD even when the LSD value matches OutfitsActive's
     // in-script default.
     string active_str = llLinksetDataRead(KEY_ACTIVE);
@@ -373,7 +376,7 @@ apply_settings_sync() {
 }
 
 // Toggle handler. Flips OutfitsActive, emits the matching rlv.apply or
-// rlv.release for the .base claim immediately (so the wearer sees the
+// rlv.release for the ~base claim immediately (so the wearer sees the
 // effect without waiting for the settings.sync round-trip), and
 // persists via settings.delta. LastActive is updated so apply_settings_sync
 // recognises the subsequent sync as a no-op. llMessageLinked is inlined
@@ -415,7 +418,7 @@ release_persisted_locks() {
             i += 1;
         }
     }
-    // .base claim (only if it was active — release is a no-op otherwise
+    // ~base claim (only if it was active — release is a no-op otherwise
     // but the viewer logs it; skip if KEY_ACTIVE is explicitly 0).
     string active_str = llLinksetDataRead(KEY_ACTIVE);
     integer was_active = 1;
@@ -538,7 +541,7 @@ show_picker(integer page) {
 }
 
 // Root menu shown when KEY_ACTIVE is 0. The picker is bypassed
-// entirely — no @getinv:.outfits roundtrip, no outfit list — and the
+// entirely — no @getinv:~outfits roundtrip, no outfit list — and the
 // user sees a short status with Enable / Help / Back. Enable is gated
 // by the same Disable policy (ACL 2-5); ACL 1 sees only Help and Back.
 show_disabled_menu() {
@@ -546,7 +549,7 @@ show_disabled_menu() {
     MenuContext = "disabled";
 
     string body = "Outfits is currently DISABLED.\n";
-    body += ".outfits/.base is unlocked — the wearer can change\n";
+    body += "~outfits/~base is unlocked — the wearer can change\n";
     body += "appearance freely. Re-enable to restore protection and ";
     body += "resume outfit browsing.";
 
@@ -566,11 +569,10 @@ show_disabled_menu() {
     ]), NULL_KEY);
 }
 
-// Shown when scan_outfits returns an empty list (no non-dot subfolders
-// under #RLV/.outfits). Replaces an earlier return_to_root path that
-// left the wearer stuck with .base locked after a premature Enable
-// and no Disable button reachable. Help delivers the setup notecard;
-// Disable (ACL 2-5 only) flips KEY_ACTIVE back off so .base unlocks.
+// Shown when scan_outfits returns an empty list (no eligible subfolders
+// under #RLV/~outfits — both dot- and tilde-prefixed entries are
+// filtered, so ~base never counts). Help delivers the setup notecard;
+// Disable (ACL 2-5 only) flips KEY_ACTIVE back off so ~base unlocks.
 show_empty_menu() {
     SessionId   = generate_session_id();
     MenuContext = "empty";
@@ -607,7 +609,7 @@ show_action(string outfit_name) {
 
     string body = "Outfit: " + outfit_name + status + "\n\n";
     body += "Add    - attach this folder on top of what is worn\n";
-    body += "Wear   - replace: detach all .outfits items, attach this\n";
+    body += "Wear   - replace: detach worn unlocked items, attach this\n";
     body += "Remove - detach this outfit's items\n";
     if (btn_allowed("Lock") || btn_allowed("Unlock")) {
         body += "Lock   - protect this outfit from removal\n";
@@ -643,14 +645,11 @@ show_action(string outfit_name) {
 
 // Delivers the setup notecard to the action user. Wired to the Help
 // button on the outfit picker; the picker's body footer mentions it.
-// Previously also auto-fired from a `.base`-not-found precheck — that
-// precheck was dropped because RLV systematically hides dot-prefixed
-// folders from every enumeration command (@getinv, @getinvworn, …),
-// making it fundamentally impossible for the plugin to verify a
-// dot-prefixed protected subfolder exists. The .outfits/.base lock
-// applied by plugin_strip still works (locks act on the path
-// regardless of hidden status); we just can't validate the wearer's
-// setup, so we expose the notecard as opt-in help instead.
+// Under the tilde naming the wearer's ~base could be verified via
+// @getinv now (paths under ~outfits are visible), but the precheck
+// remains dropped — it was rejecting fully-configured wearers in
+// pathological cases and the Help notecard is an adequate opt-in
+// surface for new wearers.
 give_setup_notecard() {
     if (llGetInventoryType(SETUP_NOTECARD) != INVENTORY_NOTECARD) {
         llRegionSayTo(CurrentUser, 0,
@@ -684,14 +683,14 @@ apply_add(string outfit_name) {
 }
 
 // Wear — replace. Strip is symmetric across attachments and system
-// clothing layers: (1) @detachallthis:.outfits=force clears the
-// .outfits subtree explicitly (locked subfolders like .base and any
+// clothing layers: (1) @detachallthis:~outfits=force clears the
+// ~outfits subtree explicitly (locked subfolders like ~base and any
 // locked outfit folder survive); (2) @remattach=force catches
-// attachments worn from outside .outfits; (3) @remoutfit=force catches
-// system clothing layers worn from outside .outfits. All three respect
+// attachments worn from outside ~outfits; (3) @remoutfit=force catches
+// system clothing layers worn from outside ~outfits. All three respect
 // every lock RLV knows about (@detach=n, per-point @remattach:<pt>=n,
 // per-layer @remoutfit:<layer>=n, parent-folder @detachallthis), so
-// the collar, any locked attachment, and .base layers survive. Then
+// the collar, any locked attachment, and ~base layers survive. Then
 // the chosen outfit attaches via @attachall (the *this family is for
 // locks and self-referential detach, not for attaches).
 apply_wear(string outfit_name) {
@@ -887,11 +886,11 @@ handle_rlv_response(string message) {
     if (MenuContext != "scanning") return;
 
     // Parse the raw @getinv CSV. Dot-prefixed and tilde-prefixed entries
-    // are filtered out — the protected .base folder is hidden by RLV's
-    // @getinv rule (every enumeration command suppresses dot-prefixed
-    // names per the RLV API spec), so there is no programmatic way to
-    // verify .base exists. The wearer can request setup instructions via
-    // the picker's Help button if needed.
+    // are filtered out by our own check below — this is what keeps the
+    // protected ~base subfolder out of the picker. RLV's @getinv only
+    // hides dot-prefixed entries, not tilde-prefixed, so the explicit
+    // skip is load-bearing. The wearer can request setup instructions
+    // via the picker's Help button if ~base hasn't been set up yet.
     Outfits = [];
 
     if (message != "") {
