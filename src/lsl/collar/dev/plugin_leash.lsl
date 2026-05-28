@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 23
+REVISION: 24
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
          multi-step flows (Pass/Offer/Coffle, Post) to hidden sub-plugins.
@@ -13,6 +13,7 @@ ARCHITECTURE: Renderer for the leash module. Picker flows now live in
               subpath; the sub-plugin returns to us via ui.menu.start
               with our context.
 CHANGES:
+- v1.1 rev 24: Settings menu surfaces Enhanced (ACL 3+ only) and the texture sub-menu gains Invisible. Enhanced button reflects the engine's persisted EnhancedMode (synced via new "enhanced" field on plugin.leash.state); click sends toggle_enhanced through the standard plugin.leash.action path. Texture menu now offers Chain / Silk / Invisible; settings body labels the current selection accordingly.
 - v1.1 rev 23: Expose Coffle to ACL 1 (public). Previous policy listed
   Coffle for ACL 3/4/5 only; public touchers can now coffle the wearer
   to a third-party avatar via the standard avatar picker. Engine-side
@@ -111,7 +112,8 @@ integer Leashed = FALSE;
 key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
-string LeashTexture = "chain"; // "chain" or "silk"
+string LeashTexture = "chain"; // "chain" / "silk" / "invisible"
+integer EnhancedMode = FALSE;  // ACL 3+ wearer-side toggle (engine-owned state)
 integer LeashMode = 0;       // 0=avatar, 1=coffle, 2=post
 key LeashTarget = NULL_KEY;  // Target for coffle/post
 
@@ -335,22 +337,35 @@ showSettingsMenu() {
     else            item_buttons += [btn("Turn: Off", "toggle_turn")];
     item_buttons += [btn("Texture", "texture")];
 
+    // Enhanced toggle is ACL 3+ only (trustees/owners). Engine enforces
+    // the same floor on the action; this just hides the button for
+    // lower ACLs so they don't get a deny notice.
+    if (UserAcl >= 3) {
+        if (EnhancedMode) item_buttons += [btn("Enhanced: On",  "toggle_enhanced")];
+        else              item_buttons += [btn("Enhanced: Off", "toggle_enhanced")];
+    }
+
     string texture_label = "Chain";
-    if (LeashTexture == "silk") texture_label = "Silk";
+    if      (LeashTexture == "silk")      texture_label = "Silk";
+    else if (LeashTexture == "invisible") texture_label = "Invisible";
 
     string body = "Leash Settings\nLength: " + (string)LeashLength
                 + "m\nTurn to face: " + (string)TurnToFace
                 + "\nTexture: " + texture_label;
+    if (UserAcl >= 3) {
+        body += "\nEnhanced: " + (string)EnhancedMode;
+    }
     list button_data = reorder_item_buttons(nav_buttons, item_buttons);
     showMenu("settings", "Settings", body, button_data);
 }
 
 showTextureMenu() {
     string current = "Chain";
-    if (LeashTexture == "silk") current = "Silk";
+    if      (LeashTexture == "silk")      current = "Silk";
+    else if (LeashTexture == "invisible") current = "Invisible";
 
     list nav_buttons  = [btn("Back", "back")];
-    list item_buttons = [btn("Chain", "chain"), btn("Silk", "silk")];
+    list item_buttons = [btn("Chain", "chain"), btn("Silk", "silk"), btn("Invisible", "invisible")];
     list button_data  = reorder_item_buttons(nav_buttons, item_buttons);
     showMenu("texture", "Texture",
              "Select leash texture\nCurrent: " + current, button_data);
@@ -569,6 +584,10 @@ handleButtonClick(string ctx) {
             sendLeashAction("toggle_turn");
             scheduleStateQuery("settings");
         }
+        else if (ctx == "toggle_enhanced") {
+            sendLeashAction("toggle_enhanced");
+            scheduleStateQuery("settings");
+        }
         else if (ctx == "texture") {
             showTextureMenu();
         }
@@ -580,7 +599,7 @@ handleButtonClick(string ctx) {
         if (ctx == "back") {
             showSettingsMenu();
         }
-        else if (ctx == "chain" || ctx == "silk") {
+        else if (ctx == "chain" || ctx == "silk" || ctx == "invisible") {
             llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
                 "type", "plugin.leash.action",
                 "action", "set_texture",
@@ -741,6 +760,8 @@ default
                 if (tmp != JSON_INVALID) TurnToFace = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["texture"]);
                 if (tmp != JSON_INVALID) LeashTexture = tmp;
+                tmp = llJsonGetValue(msg, ["enhanced"]);
+                if (tmp != JSON_INVALID) EnhancedMode = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["mode"]);
                 if (tmp != JSON_INVALID) LeashMode = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["target"]);

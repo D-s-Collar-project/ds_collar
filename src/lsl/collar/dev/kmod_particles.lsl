@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 17
+REVISION: 18
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 18: Add INVISIBLE_TEXTURE (fully-transparent library texture) as a third ParticleStyle. render_leash_particles routes "invisible" to that UUID; particle system still emits (FOLLOW_SRC + TARGET_POS keep tethering math live), just renders nothing. Picked over alpha=0 to avoid any residual ribbon/sprite trail artifacts at very small alpha thresholds.
 - v1.1 rev 17: Add SILK_TEXTURE alongside CHAIN_TEXTURE; render_leash_particles (renamed from render_chain_particles) now picks the texture from ParticleStyle ("chain" / "silk", default "chain"). handle_particles_start parses the requested style up-front so the idempotence guard can detect a style change and re-render on chain↔silk swap. All other particle knobs remain shared across styles.
 - v1.1 rev 16: Swap CHAIN_*_SCALE X/Y. FOLLOW_VELOCITY aligns the
   particle's Y axis to motion, so link length goes on Y not X.
@@ -115,6 +116,7 @@ integer LM_PING_INTERVAL = 8;  // Ping every 8 seconds
 // branch in render_leash_particles.
 string   CHAIN_TEXTURE     = "ebe48305-8955-2b27-7656-3c39cee2cc1b";
 string   SILK_TEXTURE      = "78ce70e9-b10d-3650-a54c-aca6bdc9cddb";
+string   INVISIBLE_TEXTURE = "8dcd4a48-2d37-4909-9f78-f7a9eb4ef903";
 float    CHAIN_BURST_RATE  = 0.02;                  // ~50 sprites/sec
 integer  CHAIN_PART_COUNT  = 1;
 float    CHAIN_MAX_AGE     = 2.0;                   // travel time src->target
@@ -322,8 +324,11 @@ render_leash_particles(key target) {
 
     // Pick the texture for the current style. Unknown styles fall back
     // to chain so a stale settings value doesn't blank the leash visual.
+    // "invisible" uses a fully-transparent library texture so the particle
+    // system still emits (tethering math stays live) but renders nothing.
     string texture = CHAIN_TEXTURE;
-    if (ParticleStyle == "silk") texture = SILK_TEXTURE;
+    if (ParticleStyle == "silk")           texture = SILK_TEXTURE;
+    else if (ParticleStyle == "invisible") texture = INVISIBLE_TEXTURE;
 
     llLinkParticleSystem(LeashpointLink, [
         PSYS_SRC_PATTERN, PSYS_SRC_PATTERN_DROP,
