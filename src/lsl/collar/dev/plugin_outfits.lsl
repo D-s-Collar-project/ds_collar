@@ -43,7 +43,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
              Lock/Unlock.
 CHANGES:
-- v1.10 rev 12: Wear's strip is now three-phase and symmetric across attachments and clothing layers: @detachallthis:.outfits=force (subtree-as-unit clear of unlocked .outfits items), then @remattach=force (attachments worn from outside .outfits), then @remoutfit=force (system clothing layers worn from outside .outfits). .base and any locked outfit folder, attachment point, or layer survive via the standard RLV lock-respect path. Attach side remains @attachallthis:.outfits/<name>=force.
+- v1.10 rev 12: Wear's strip is now three-phase and symmetric across attachments and clothing layers: @detachallthis:.outfits=force (subtree-as-unit clear of unlocked .outfits items), then @remattach=force (attachments worn from outside .outfits), then @remoutfit=force (system clothing layers worn from outside .outfits). .base and any locked outfit folder, attachment point, or layer survive via the standard RLV lock-respect path. Attach stays on @attachall:.outfits/<name>=force — the *this family is locks / self-referential detach only, not attaches.
 - v1.10 rev 11: Wear now uses @detachallthis / @attachallthis (subtree-as-unit variants) instead of @detachall / @attachall. Lock semantics unchanged — locked subfolders still skipped — but the verbs match the intent (operate on .outfits as one subtree) and stay symmetric on both sides of the replace.
 - v1.10 rev 10: Default plugin.outfit.active to OFF when KEY_ACTIVE is
   absent in LSD (fresh installs, pre-rev-9 collars). Booting with .base
@@ -692,12 +692,13 @@ apply_add(string outfit_name) {
 // every lock RLV knows about (@detach=n, per-point @remattach:<pt>=n,
 // per-layer @remoutfit:<layer>=n, parent-folder @detachallthis), so
 // the collar, any locked attachment, and .base layers survive. Then
-// the chosen outfit attaches via @attachallthis.
+// the chosen outfit attaches via @attachall (the *this family is for
+// locks and self-referential detach, not for attaches).
 apply_wear(string outfit_name) {
     rlv_force("@detachallthis:" + OUTFITS_ROOT + "=force");
     rlv_force("@remattach=force");
     rlv_force("@remoutfit=force");
-    rlv_force("@attachallthis:" + OUTFITS_ROOT + "/" + outfit_name + "=force");
+    rlv_force("@attachall:" + OUTFITS_ROOT + "/" + outfit_name + "=force");
     llRegionSayTo(CurrentUser, 0, "Wearing: " + outfit_name);
 }
 
