@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 24
+REVISION: 25
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Lock detection is live —
@@ -28,6 +28,13 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              shadow lock state; plugin_outfits and plugin_folders
              don't write anything for us to read.
 CHANGES:
+- v1.10 rev 25: Minimal targeted @getpath debug. Two callsites only:
+  one log per Q5 response (slot + raw response), one summary at the end
+  of the filter pass (attach + layer counts kept). Both inlined as
+  `if (DEBUG_STRIP) llRegionSayTo(...)` so when DEBUG_STRIP=FALSE the
+  argument strings are never constructed — no heap pressure. Diagnoses
+  the rev 24 over-filter (items in non-base outfits being dropped) by
+  showing exactly what @getpath returns for each worn slot.
 - v1.10 rev 24: Strip rev 21 debug instrumentation — stack-heap collision
   in-world from logd() argument strings being built per call even before
   the helper decided whether to emit. ~28 callsites with large
@@ -224,6 +231,11 @@ integer DIALOG_BUS       = 950;
 
 string PLUGIN_CONTEXT = "ui.core.strip";
 string PLUGIN_LABEL   = "Strip";
+
+// Minimal targeted debug for @getpath responses. Set DEBUG_STRIP=FALSE
+// to silence. Heap-budget aware: only logs per-slot @getpath result
+// (one short line per slot) and a one-line summary. No full-state dumps.
+integer DEBUG_STRIP = TRUE;
 
 integer RLV_CHAN    = 1888771;
 float   RLV_TIMEOUT = 10.0;
@@ -992,6 +1004,8 @@ handle_rlv_response(string message) {
         integer pair_idx = PathCheckIdx * 2;
         if (pair_idx < llGetListLength(WornAttach)) {
             string slot = llList2String(WornAttach, pair_idx);
+            if (DEBUG_STRIP) llRegionSayTo(llGetOwner(), 0,
+                "[strip] @getpath:" + slot + " -> [" + message + "]");
             AttachPaths += [slot, message];
         }
         PathCheckIdx += 1;
@@ -1003,6 +1017,9 @@ handle_rlv_response(string message) {
             return;
         }
         filter_worn_attach_by_folder();
+        if (DEBUG_STRIP) llRegionSayTo(llGetOwner(), 0,
+            "[strip] after filter: " + (string)(llGetListLength(WornAttach) / 2)
+            + " attach kept, " + (string)llGetListLength(WornLayers) + " layers kept");
         QState = 0;
         stop_rlv_listen();
         show_current_picker(PickPage);

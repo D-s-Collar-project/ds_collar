@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 18
+REVISION: 19
 PURPOSE: Browse #RLV/~outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -48,6 +48,17 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              @getstatusall:detach + @getpath at picker render time;
              this plugin does NOT maintain a shadow lock vector.
 CHANGES:
+- v1.10 rev 19: Defensive cleanup of stale @detachallthis claims at scan
+  time. Legacy paths "outfits/base" (rev 22 paradigm) and "outfits/~base"
+  (rev 13 paradigm) are always released — plugin_outfits no longer manages
+  either, so any active claim is necessarily stale. The current
+  "outfits/.base" claim is released when the wearer's scan response
+  contains "base" or "~base" (signals wrong paradigm — our .base lock
+  has nothing to bind to) OR no outfits at all (wearer hasn't set up).
+  LastActive and OutfitsActive synced to 0 in those cases so
+  apply_settings_sync doesn't re-apply on the next sync. Direct llOwnerSay
+  (not kmod_rlv routed) because the cleanup is by-spec defensive —
+  bypasses refcount tracking by design.
 - v1.10 rev 18: BASE_FOLDER renamed from "outfits/base" to "outfits/.base"
   (dot-prefixed). Per RLV spec, dot-prefixed folders are "disabled folders"
   excluded from the RLV folder API — @getpath returns empty for items
@@ -714,8 +725,12 @@ handle_rlv_response(string message) {
     if (MenuContext != "scanning") return;
 
     // @getinv only hides dot-prefixed; we skip both dot- and tilde-prefixed
-    // so ~base stays out of the picker.
+    // so ~base stays out of the picker. Also detect base/~base in the scan
+    // — if either is visible, the wearer is on a non-canonical paradigm
+    // (current convention is dot-prefixed .base) and our .base lock has
+    // nothing to apply to.
     Outfits = [];
+    integer has_alt_base = FALSE;
     if (message != "") {
         list raw = llParseString2List(message, [","], []);
         integer n = llGetListLength(raw);
@@ -729,6 +744,7 @@ handle_rlv_response(string message) {
         while (i < n) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
             if (entry != "") {
+                if (entry == "base" || entry == "~base") has_alt_base = TRUE;
                 string first = llGetSubString(entry, 0, 0);
                 // Skip dot/tilde-prefixed entries (RLV system convention).
                 // .base is dot-prefixed so it's caught by the dot check.
@@ -742,6 +758,24 @@ handle_rlv_response(string message) {
         if (filled == 0)     Outfits = [];
         else if (filled < n) Outfits = llList2List(Outfits, 0, filled - 1);
         if (filled > 0) Outfits = llListSort(Outfits, 1, TRUE);
+    }
+
+    // Defensive cleanup of stale @detachallthis claims.
+    //   - outfits/base (legacy plain-name paradigm) and outfits/~base
+    //     (legacy rev 13 tilde paradigm): ALWAYS released. plugin_outfits
+    //     no longer manages either path; releasing is a no-op if no claim
+    //     is active, clears the orphan otherwise.
+    //   - outfits/.base (current paradigm): released ONLY when the wearer
+    //     has base or ~base in their inventory (clear wrong-paradigm
+    //     signal) OR no outfits at all. In both cases our .base lock has
+    //     nothing to apply to. LastActive and OutfitsActive are synced so
+    //     apply_settings_sync doesn't re-apply on the next settings.sync.
+    llOwnerSay("@detachallthis:outfits/base=y");
+    llOwnerSay("@detachallthis:outfits/~base=y");
+    if (has_alt_base || llGetListLength(Outfits) == 0) {
+        llOwnerSay("@detachallthis:outfits/.base=y");
+        LastActive    = 0;
+        OutfitsActive = 0;
     }
 
     if (llGetListLength(Outfits) == 0) {
