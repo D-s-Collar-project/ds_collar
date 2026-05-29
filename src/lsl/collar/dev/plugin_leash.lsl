@@ -13,7 +13,7 @@ ARCHITECTURE: Renderer for the leash module. Picker flows now live in
               subpath; the sub-plugin returns to us via ui.menu.start
               with our context.
 CHANGES:
-- v1.1 rev 25: Enhanced mode now applies its RLV restrictions LOCALLY (like plugin_lock's @detach toggle) instead of round-tripping through kmod_leash_engine. Clicking the toggle flips EnhancedMode in-script and issues @sittp,tploc,tplm,tplure=n (on) / =y (off) directly via llOwnerSay; no plugin.leash.action is sent and the engine "enhanced" broadcast field is no longer read. Was non-functional because the engine path required engine rev 34's toggle_enhanced handler. Toggle button relabeled "Enhance: Y" / "Enhance: N" (was "Enhanced: On/Off"); settings body reads "Enhanced mode: Enabled|Disabled" (was "Enhanced: 0|1"). NOTE: in-memory only this pass — not persisted across relog (RLV clears on relog anyway); full plugin_lock-style persistence + retiring the engine's now-dormant enhanced subsystem is a planned follow-up. Texture routing (chain/silk/invisible) unchanged and confirmed working via button_data context. Settings body also relabels the Turn line: "Turn to face: 0|1" -> "Turn to leasher: Enabled|Disabled" (button stays "Turn: On/Off"); the toggle still routes to the engine, which owns the @setrot follow-rotation.
+- v1.1 rev 25: Enhanced mode is now applied LOCALLY via llOwnerSay (no kmod_leash_engine round-trip; the engine path needed rev 34's toggle_enhanced handler and never fired). The restrictions FOLLOW THE LEASH, matching the original engine semantics: sync_enhanced() issues @sittp,tploc,tplm,tplure=n only while EnhancedMode is on AND the wearer is leashed, and =y to clear — so they lift automatically when the leash unclips and re-arm on the next clip. EnhancedMode (intent) is owned in-script; the toggle (ACL 3+) flips it and calls sync_enhanced(); the plugin.leash.state handler also calls sync_enhanced() on every Leashed change. Idempotent via EnhancedApplied, which defaults TRUE so the first sync at boot (state_entry calls sync_enhanced()) forces a clean clear — enforcing the invariant "not leashed => no leash RLV restrictions" even after a bare reset-while-worn that would otherwise strand a stale @sittp. Toggle button "Enhance: Y" / "Enhance: N" (was "Enhanced: On/Off"); body "Enhanced mode: Enabled|Disabled" (was "Enhanced: 0|1"). NOTE: EnhancedMode intent is in-memory only this pass (a reset turns it off rather than restoring it on); persisting the intent is a planned follow-up. Texture routing (chain/silk/invisible) unchanged, working via button_data context. Turn line relabeled "Turn to face: 0|1" -> "Turn to leasher: Enabled|Disabled" (button stays "Turn: On/Off"); Turn toggle still routes to the engine, which owns the @setrot follow-rotation.
 - v1.1 rev 24: Settings menu surfaces Enhanced (ACL 3+ only) and the texture sub-menu gains Invisible. Enhanced button reflects the engine's persisted EnhancedMode (synced via new "enhanced" field on plugin.leash.state); click sends toggle_enhanced through the standard plugin.leash.action path. Texture menu now offers Chain / Silk / Invisible; settings body labels the current selection accordingly.
 - v1.1 rev 23: Expose Coffle to ACL 1 (public). Previous policy listed
   Coffle for ACL 3/4/5 only; public touchers can now coffle the wearer
@@ -114,7 +114,10 @@ key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
 string LeashTexture = "chain"; // "chain" / "silk" / "invisible"
-integer EnhancedMode = FALSE;  // ACL 3+ toggle, applied locally (see apply_enhanced_restrictions)
+integer EnhancedMode = FALSE;     // ACL 3+ intent toggle, applied locally (see sync_enhanced)
+integer EnhancedApplied = TRUE;   // whether @sittp,... is currently issued (idempotence guard).
+                                  // Defaults TRUE so the first sync at boot forces a clean clear,
+                                  // wiping any stale restriction left by a reset-while-worn.
 integer LeashMode = 0;       // 0=avatar, 1=coffle, 2=post
 key LeashTarget = NULL_KEY;  // Target for coffle/post
 
@@ -459,12 +462,22 @@ sendLeashAction(string action) {
     ]), CurrentUser);
 }
 
-// Enhanced mode is applied LOCALLY here, like plugin_lock's @detach toggle —
-// no leash-engine round-trip. When on, issue the TP/sit lockdown; when off,
-// lift it. ACL >= 3 is enforced at the call site (button only shown to 3+).
-apply_enhanced_restrictions() {
-    if (EnhancedMode) llOwnerSay("@sittp=n,tploc=n,tplm=n,tplure=n");
-    else              llOwnerSay("@sittp=y,tploc=y,tplm=y,tplure=y");
+// Enhanced TP/sit restrictions are applied LOCALLY (no leash-engine round-trip),
+// but they FOLLOW THE LEASH: active only while EnhancedMode is on AND the wearer
+// is currently leashed. So they clear automatically when the leash unclips
+// (Leashed -> FALSE) and re-arm on the next clip. Idempotent via EnhancedApplied
+// to avoid redundant RLV chatter. Call this after any change to EnhancedMode or
+// Leashed. ACL >= 3 is enforced at the toggle call site (button only shown to 3+).
+sync_enhanced() {
+    integer want = (EnhancedMode && Leashed);
+    if (want && !EnhancedApplied) {
+        llOwnerSay("@sittp=n,tploc=n,tplm=n,tplure=n");
+        EnhancedApplied = TRUE;
+    }
+    else if (!want && EnhancedApplied) {
+        llOwnerSay("@sittp=y,tploc=y,tplm=y,tplure=y");
+        EnhancedApplied = FALSE;
+    }
 }
 
 sendLeashActionWithTarget(string action, key target) {
@@ -599,10 +612,10 @@ handleButtonClick(string ctx) {
             scheduleStateQuery("settings");
         }
         else if (ctx == "toggle_enhanced") {
-            // Local toggle — flip, apply RLV directly, redraw. No engine.
+            // Local toggle — flip intent, then sync against leash state. No engine.
             if (UserAcl >= 3) {
                 EnhancedMode = !EnhancedMode;
-                apply_enhanced_restrictions();
+                sync_enhanced();
             }
             showSettingsMenu();
         }
@@ -694,6 +707,10 @@ default
 
         cleanupSession();
         register_self();
+        // Baseline: not leashed at boot, so guarantee enhanced restrictions
+        // are cleared. EnhancedApplied defaults TRUE so this first sync issues
+        // a clean @...=y, wiping anything a reset-while-worn left behind.
+        sync_enhanced();
         queryState();
     }
     
@@ -778,8 +795,11 @@ default
                 if (tmp != JSON_INVALID) TurnToFace = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["texture"]);
                 if (tmp != JSON_INVALID) LeashTexture = tmp;
-                // EnhancedMode is now owned locally (applied like plugin_lock),
-                // so we intentionally do NOT read it from the engine broadcast.
+                // EnhancedMode is owned locally (not read from the broadcast),
+                // but the restrictions follow the leash: re-sync against the
+                // just-updated Leashed so an unclip clears them and a clip
+                // re-arms them.
+                sync_enhanced();
                 tmp = llJsonGetValue(msg, ["mode"]);
                 if (tmp != JSON_INVALID) LeashMode = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["target"]);
