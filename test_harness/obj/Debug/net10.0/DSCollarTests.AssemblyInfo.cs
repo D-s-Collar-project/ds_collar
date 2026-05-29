@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("DSCollarTests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+040c0a927b95e97d7402cc5347a01372a24d137c")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ae2279ec960460f0e282c3904da17dda9b84fcdf")]
 [assembly: System.Reflection.AssemblyProductAttribute("DSCollarTests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("DSCollarTests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
