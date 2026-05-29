@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 17
+REVISION: 18
 PURPOSE: Browse #RLV/~outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -48,6 +48,15 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              @getstatusall:detach + @getpath at picker render time;
              this plugin does NOT maintain a shadow lock vector.
 CHANGES:
+- v1.10 rev 18: BASE_FOLDER renamed from "outfits/base" to "outfits/.base"
+  (dot-prefixed). Per RLV spec, dot-prefixed folders are "disabled folders"
+  excluded from the RLV folder API — @getpath returns empty for items
+  worn from .base. plugin_strip relies on this spec-defined invisibility
+  to drop base items from its picker without needing a hardcoded constant
+  or LSD-shared state. The handle_rlv_response skip filter reverts to
+  dot-or-tilde only; the exact-name "base" skip from rev 17 was needed
+  only when base was plainly named. Wearers must rename their inventory
+  folder from "base" to ".base" inside #RLV/outfits/.
 - v1.10 rev 17: Revert revs 15+16 (worn.registry.locked bit-vector writer
   and @getpath probe sweep). The shadow lock vector caused a Mono stack-heap
   collision and was unnecessary: plugin_strip can ask the viewer directly
@@ -146,7 +155,7 @@ string PLUGIN_LABEL   = "Outfits";
 integer RLV_CHAN    = 1888772;
 float   RLV_TIMEOUT = 10.0;
 string  OUTFITS_ROOT = "outfits";
-string  BASE_FOLDER  = "outfits/base";
+string  BASE_FOLDER  = "outfits/.base";
 string  RLV_CONSUMER = "outfits";
 
 string  KEY_LOCKED = "outfits.locked";
@@ -470,7 +479,7 @@ show_disabled_menu() {
     MenuContext = "disabled";
 
     string body = "Outfits is currently DISABLED.\n";
-    body += "outfits/base is unlocked — the wearer can change\n";
+    body += "outfits/.base is unlocked — the wearer can change\n";
     body += "appearance freely. Re-enable to restore protection and ";
     body += "resume outfit browsing.";
 
@@ -721,9 +730,9 @@ handle_rlv_response(string message) {
             string entry = llStringTrim(llList2String(raw, i), STRING_TRIM);
             if (entry != "") {
                 string first = llGetSubString(entry, 0, 0);
-                // Skip dot/tilde-prefixed entries (RLV system convention)
-                // and the protected "base" subfolder by exact name.
-                if (first != "." && first != "~" && entry != "base") {
+                // Skip dot/tilde-prefixed entries (RLV system convention).
+                // .base is dot-prefixed so it's caught by the dot check.
+                if (first != "." && first != "~") {
                     Outfits = llListReplaceList(Outfits, [entry], filled, filled);
                     filled += 1;
                 }

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 24
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Lock detection is live —
@@ -28,6 +28,58 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              shadow lock state; plugin_outfits and plugin_folders
              don't write anything for us to read.
 CHANGES:
+- v1.10 rev 24: Strip rev 21 debug instrumentation — stack-heap collision
+  in-world from logd() argument strings being built per call even before
+  the helper decided whether to emit. ~28 callsites with large
+  llDumpList2String concatenations were enough to push memory over the
+  Mono limit. DEBUG_STRIP constant, logd() helper, and the skip_reason /
+  verdict tracking strings in build_worn_attach + filter_worn_attach_by_folder
+  all removed. Architecture is the spec-aligned rev 23 design — if items
+  aren't filtering as expected in-world, ask the wearer to describe what
+  shows up and we can add targeted minimal diagnostics rather than the
+  blanket trace.
+- v1.10 rev 23: Spec-aligned attachment filter via dot-folder invisibility.
+  plugin_outfits rev 18 renamed BASE_FOLDER to "outfits/.base" — per RLV
+  spec dot-prefixed folders are "disabled folders" excluded from the RLV
+  folder API, so @getpath returns empty for items in .base. Filter rule
+  flipped: empty @getpath → DROP (not KEEP). By design, RLV-invisible
+  items don't appear in the strip menu — covers .base items, items in
+  any other dot/tilde folder, AND items attached from outside #RLV
+  (HUDs, drag-attached restraints, etc.). Wearer uses normal SL detach
+  for non-#RLV items. BASE_FOLDER constant removed (no longer needed —
+  the invisibility is structural). lsd_locked_folders no longer seeds
+  with base; just folders.locked + outfits.locked. Q5 @getpath sweep
+  now fires whenever worn attachments exist (was: only when LockedFolders
+  non-empty) so the empty-path drop rule applies universally. Layer
+  conservative-suppress-all rule (rev 19) reverted — non-base layers are
+  strippable per @remoutfit/@remattach per-name filter; folder-locked
+  layers fall through to verify_attempted_strip → DiscoveredLocked first
+  click reveal.
+- v1.10 rev 22: outfits/base always excluded from the strip picker,
+  independent of plugin.outfit.active. The base subfolder holds the
+  wearer's protected core (mesh body, skin, eyes, base mesh attachments)
+  and should never be stripped via this menu — use plugin_outfits Wear
+  to swap base items. BASE_FOLDER constant added; lsd_locked_folders()
+  seeds out with [BASE_FOLDER] unconditionally instead of gating on
+  plugin.outfit.active.
+- v1.10 rev 21: Full debug instrumentation for attachment lock detection.
+  DEBUG_STRIP toggle (currently TRUE) + logd() helper emit a tagged
+  "[strip] ..." trace via llRegionSayTo(wearer). Coverage: begin_query
+  state transitions, all four QState response payloads (raw + parsed),
+  bare-detach / per-slot LockedAttach merge, LSD-read folder locks
+  (folders.locked / outfits.locked / plugin.outfit.active), union into
+  LockedFolders, build_worn_attach per-slot KEEP/DROP with reason, Q5
+  @getpath sweep (each query + each reply), and filter_worn_attach_by_folder
+  per-slot match decision with the normalized path and matched LockedFolders
+  entry. Toggle DEBUG_STRIP=FALSE to silence before shipping.
+- v1.10 rev 20: Path-match normalization in filter_worn_attach_by_folder.
+  RLV/RLVa @getpath response format varies by viewer build — some return
+  "outfits/myout", others add leading/trailing slashes, others reflect
+  the wearer's actual inventory casing. New normalize_path() trims
+  whitespace, lowercases, and strips leading/trailing slashes. Applied
+  to both sides of the match (LockedFolders entries pre-normalized once
+  per filter call, @getpath result normalized per slot). Empty paths
+  still kept (DiscoveredLocked safety net catches those on first click).
 - v1.10 rev 19: Conservative layer suppression — when LockedFolders is
   non-empty (any folder lock active, from parse_detachallthis OR LSD),
   build_worn_layers returns empty. RLV has no @getpath equivalent for
@@ -402,11 +454,16 @@ advance_query() {
     if (QState == 4) { rlv_force("@getstatusall:detach;|="   + (string)RLV_CHAN); }
 }
 
-// Read locked folder paths from LSD. Other collar plugins are the
-// authoritative source for their own locks; parse_detachallthis is a
-// fallback for external/relay-applied locks. Reading from LSD avoids
-// any dependency on the viewer's @getstatusall:detach response surfacing
-// our @detachallthis claims (some RLVa builds don't include them).
+// Build the folder-lock set used by the picker filter from LSD.
+//   - folders.locked CSV (plugin_folders) and outfits.locked CSV
+//     (plugin_outfits) are read as authoritative sources for locks
+//     owned by other collar plugins.
+//   - parse_detachallthis (called separately in QState=4) covers
+//     external/relay-applied locks that don't have LSD state.
+// Note: outfits/.base is not seeded here — it's a dot-prefixed folder,
+// so @getpath returns empty for items there. The empty-path-drops-item
+// rule in filter_worn_attach_by_folder handles base exclusion via the
+// spec-defined "disabled folder" invisibility.
 list lsd_locked_folders() {
     list out = [];
 
@@ -423,9 +480,6 @@ list lsd_locked_folders() {
             i += 1;
         }
     }
-
-    string active = llLinksetDataRead("plugin.outfit.active");
-    if ((integer)active) out += ["outfits/base"];
 
     return out;
 }
@@ -471,16 +525,45 @@ list parse_status(string raw, string key_name) {
     return out;
 }
 
-// Drop WornAttach entries whose @getpath result falls under any LockedFolders
-// entry. Empty paths (item outside #RLV or in a dot-hidden folder) are kept;
-// the post-strip verify catches those.
-filter_worn_attach_by_folder() {
-    if (llGetListLength(LockedFolders) == 0) return;
-    if (llGetListLength(WornAttach) == 0)    return;
+// Normalize a folder path for comparison: trim whitespace, lowercase,
+// strip leading and trailing slashes. RLV/RLVa's @getpath response format
+// is not perfectly consistent across viewer builds — some return
+// "outfits/myout", others "/outfits/myout", "outfits/myout/", or with
+// mixed casing reflecting actual inventory. Normalizing both sides of
+// the match eliminates these variations.
+string normalize_path(string p) {
+    p = llToLower(llStringTrim(p, STRING_TRIM));
+    integer pn = llStringLength(p);
+    if (pn == 0) return p;
+    if (llGetSubString(p, 0, 0) == "/") {
+        p = llGetSubString(p, 1, -1);
+        pn -= 1;
+    }
+    if (pn > 0 && llGetSubString(p, -1, -1) == "/") p = llGetSubString(p, 0, -2);
+    return p;
+}
 
+// Filter WornAttach entries by lock state. Two drop rules:
+//   1. Empty @getpath result — item is in a dot/tilde-prefixed folder OR
+//      not under #RLV at all. Per spec, RLV's folder API treats these as
+//      "disabled folders" (invisible). By design we don't expose
+//      RLV-invisible items in the strip menu — wearer uses normal SL
+//      detach for non-#RLV items, and outfits/.base items are protected
+//      via this same mechanism.
+//   2. Path matches an entry in LockedFolders (@detachallthis-locked
+//      subtree). Both sides of the match are normalize_path'd.
+filter_worn_attach_by_folder() {
+    if (llGetListLength(WornAttach) == 0) return;
+
+    integer lf_n = llGetListLength(LockedFolders);
+    list normalized_lf = [];
+    integer ln = 0;
+    while (ln < lf_n) {
+        normalized_lf += [normalize_path(llList2String(LockedFolders, ln))];
+        ln += 1;
+    }
     list new_worn = [];
     integer n = llGetListLength(WornAttach);
-    integer lf_n = llGetListLength(LockedFolders);
     integer i = 0;
     while (i < n) {
         string slot = llList2String(WornAttach, i);
@@ -488,37 +571,37 @@ filter_worn_attach_by_folder() {
         string path = "";
         integer pi = llListFindList(AttachPaths, [slot]);
         if (pi != -1) path = llList2String(AttachPaths, pi + 1);
+        string npath = normalize_path(path);
 
-        integer locked = FALSE;
-        if (path != "") {
+        integer drop = FALSE;
+        if (npath == "") {
+            drop = TRUE;
+        } else {
             integer lj = 0;
             while (lj < lf_n) {
-                string lf = llList2String(LockedFolders, lj);
-                if (path == lf || llSubStringIndex(path, lf + "/") == 0) {
-                    locked = TRUE;
+                string lf = llList2String(normalized_lf, lj);
+                if (lf != "" && (npath == lf || llSubStringIndex(npath, lf + "/") == 0)) {
+                    drop = TRUE;
                     lj = lf_n;
                 } else {
                     lj += 1;
                 }
             }
         }
-        if (!locked) new_worn += [slot, item];
+        if (!drop) new_worn += [slot, item];
         i += 2;
     }
     WornAttach = new_worn;
 }
 
 build_worn_layers() {
-    // RLV has no @getpath equivalent for clothing layers, so we cannot
-    // determine the source folder of a worn layer. When any folder lock
-    // is active we conservatively suppress ALL layers — we'd rather hide
-    // an unlocked layer than display a locked one. Wearer can still
-    // change layers via plugin_outfits Wear when folder locks are in play.
-    if (llGetListLength(LockedFolders) > 0) {
-        WornLayers = [];
-        return;
-    }
-
+    // Per-layer locks (@remoutfit:<name>=n) and the global @remoutfit=n
+    // are filtered here directly. Folder-locked layers (worn from a
+    // @detachallthis subtree) can't be pre-identified because RLV has no
+    // @getpath equivalent for clothing layers — those fall through to
+    // verify_attempted_strip → DiscoveredLocked on first click and are
+    // hidden thereafter. Wearer can also use plugin_outfits Wear for
+    // bulk swaps when folder locks are in play.
     integer max_layers = llGetListLength(STRIPPABLE_LAYER_IDX);
     WornLayers = prealloc(max_layers);
 
@@ -552,7 +635,6 @@ build_worn_attach() {
     integer max_n = llGetListLength(attached);
     integer cap = max_n * 2;
     WornAttach = prealloc(cap);
-
     integer filled = 0;
     integer attach_names_n = llGetListLength(ATTACH_NAMES);
     integer i = 0;
@@ -862,7 +944,9 @@ handle_rlv_response(string message) {
         //   detach:<pt>        — merged into LockedAttach
         //   detachallthis:<p>  — LockedFolders → QState=5 path sweep
         list parsed = parse_status(message, "detach");
+        integer global_detach = FALSE;
         if (llGetListLength(parsed) > 0 && llList2String(parsed, 0) == "") {
+            global_detach = TRUE;
             parsed = llDeleteSubList(parsed, 0, 0);
         }
         integer di = 0;
@@ -873,7 +957,6 @@ handle_rlv_response(string message) {
             di += 1;
         }
         LockedFolders = parse_detachallthis(message);
-
         // Augment with LSD-known folder locks (plugin_folders, plugin_outfits).
         // Authoritative source for our own locks; parse_detachallthis above
         // covers external/relay-applied locks. Union ensures we filter
@@ -886,19 +969,20 @@ handle_rlv_response(string message) {
             if (llListFindList(LockedFolders, [lf]) == -1) LockedFolders += [lf];
             ki += 1;
         }
-
         verify_attempted_strip();
         build_worn_layers();
         build_worn_attach();
-
-        if (llGetListLength(LockedFolders) > 0 && llGetListLength(WornAttach) > 0) {
+        // Always sweep when worn attachments exist — empty @getpath
+        // responses identify RLV-invisible items (dot/tilde folders or
+        // not under #RLV) which are dropped per the by-design exclusion.
+        if (llGetListLength(WornAttach) > 0) {
             QState = 5;
             PathCheckIdx = 0;
             llSetTimerEvent(RLV_TIMEOUT);
-            rlv_force("@getpath:" + llList2String(WornAttach, 0) + "=" + (string)RLV_CHAN);
+            string first_slot = llList2String(WornAttach, 0);
+            rlv_force("@getpath:" + first_slot + "=" + (string)RLV_CHAN);
             return;
         }
-
         QState = 0;
         stop_rlv_listen();
         show_current_picker(PickPage);
@@ -914,7 +998,8 @@ handle_rlv_response(string message) {
         integer next_idx = PathCheckIdx * 2;
         if (next_idx < llGetListLength(WornAttach)) {
             llSetTimerEvent(RLV_TIMEOUT);
-            rlv_force("@getpath:" + llList2String(WornAttach, next_idx) + "=" + (string)RLV_CHAN);
+            string next_slot = llList2String(WornAttach, next_idx);
+            rlv_force("@getpath:" + next_slot + "=" + (string)RLV_CHAN);
             return;
         }
         filter_worn_attach_by_folder();
