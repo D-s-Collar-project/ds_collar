@@ -1,75 +1,53 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 17
-PURPOSE: Strip individual unlocked attachments or layers worn from
-         #RLV shared folders, excluding anything in #RLV/outfits/.base
-         and anything that any active RLV restriction prevents from
-         being detached.
-ACL: 1 (public — available to every ACL level).
-SCOPE — what the picker IS allowed to show:
-- Attachments whose @getpathnew:<slot> returns a non-empty path AND
-  whose path is NOT under any active @detachallthis-locked subtree
-  AND whose attach point has no @detach:<slot>=n / @remattach:<slot>=n.
-- Clothing layers whose @getoutfit bit is 1, whose @remoutfit:<name>
-  has no per-layer lock, AND whose global @remoutfit=n is not active.
-SCOPE — what the picker MUST NOT show:
-- Items in outfits/.base — the dot prefix makes RLV's folder API
-  (@getpathnew specifically) return empty for them, which we treat
-  as DROP. The same dot-skip simultaneously hides items not in any
-  #RLV shared folder (HUDs, drag-attached, mesh body parts), which
-  matches the "RLV shared folders only" requirement.
-- Items whose @getpathnew result falls under any active
-  @detachallthis:<path>=n claim (e.g. a locked outfits/myout).
-- Items at a slot with @detach:<slot>=n or @remattach:<slot>=n
-  (per-slot locks visible via @getstatusall).
-- Worn clothing layers when ANY @detachallthis claim is active.
-  RLV exposes no per-layer source-folder query — so when even one
-  folder lock is in play we conservatively hide all layers rather
-  than risk surfacing a locked one.
-KNOWN GAP:
-- A foreign attachment that self-locks via bare @detach=n (the
-  standard restraint self-lock pattern) is invisible to us — the
-  RLV spec deliberately hides the issuing UUID. Such items will
-  appear in the picker on first session entry; the strip command
-  silently fails, verify_attempted_strip detects the still-worn
-  item, and DiscoveredLocked hides it for the rest of the session.
-ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven
-             button visibility. Five-step RLV query chain per
-             picker render:
-               Q1  @getoutfit                      → layer bits
-               Q2  @getstatusall:remoutfit;|       → layer locks
-               Q3  @getstatusall:remattach;|       → per-slot remattach
-               Q4  @getstatusall:detach;|          → per-slot detach
-                                                     + detachallthis paths
-               Q5  @getpathnew:<slot>=<chan>, one  → item source folder(s)
-                    per worn attachment slot
-             Q5 is skipped entirely when there are zero detachallthis
-             entries AND zero worn attachments — no point probing
-             paths when there's nothing to match against.
+REVISION: 19
+PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
+         Public to every ACL. Items in @detachallthis-locked subfolders
+         (e.g. plugin_outfits's outfits/.base claim) silently survive
+         the strip command; locked-folder paths are surfaced in the
+         picker header so the wearer can see which folders are
+         protected even though per-item folder membership is
+         unknowable via RLV.
+ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
+             visibility. Enumerates worn items live via @getoutfit +
+             llGetAttachedList; reads lock state via @getstatusall on
+             three keyspaces (remoutfit, remattach, detach). The
+             detach response also surfaces @detachallthis:<path>
+             entries; their paths are displayed in the picker header
+             but cannot be used to filter individual items — RLV's
+             @getpath returns the worn item's ORIGINAL inventory
+             location (typically main inventory), not the #RLV-folder
+             link's location, so for the standard SL inventory-link
+             outfit pattern (links in #RLV pointing to originals
+             elsewhere) per-item folder filtering is structurally
+             impossible. Items in locked folders appear in the picker;
+             the strip command silently fails on them; the
+             verify_attempted_strip + DiscoveredLocked pair catches
+             the failure on first click and hides them for the rest
+             of the session. parse_status uses `;|` separator so
+             @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.10 rev 19: Revert the rev 16-18 @getpath/@getpathnew path-filter
+  architecture. Verified empirically with both slot-form and UUID-form
+  sweeps — every worn item returned empty path, because for the
+  standard SL inventory-link layout the worn UUID resolves to the
+  ORIGINAL asset's folder (in main inventory), not the #RLV link's
+  folder. No RLV command bridges this gap (@getinv returns subfolder
+  names not item names). Restored stable rev 14/15's architecture (no
+  Q5 sweep, no per-item filter, no layer-suppression rule), kept
+  dev's `;|`-separator parsing so @detachallthis paths don't get
+  split, added a header line in the picker listing
+  @detachallthis-locked folder paths so the wearer can see which
+  folders are protected. DiscoveredLocked items stay visible marked
+  with " *" (rev 17 UX preserved); a "* = locked" legend appears in
+  the body header whenever any item carries the mark.
+- v1.10 rev 18: Switch Q5 @getpathnew sweep from slot-form to UUID-form
+  (reverted in rev 19).
 - v1.10 rev 17: DiscoveredLocked items stay visible in the picker
-  marked with " *" instead of disappearing. The bare-@detach=n
-  self-locked attachments we can't pre-detect (RLV spec hides UUIDs
-  of issuing scripts) now appear with the asterisk after first
-  click-fail. Body header gains "*=locked" legend. Click on a marked
-  item still fires the strip; RLV silently fails again;
-  verify_attempted_strip is a no-op for already-discovered items
-  (still emits the "X is locked" warning). Same behaviour for
-  layers and attachments.
-- v1.10 rev 16: Full rewrite to implement the picker scope spec above.
-  New: parse_detachallthis pulls detachallthis:<path> entries from the
-  Q4 response into LockedFolders; Q5 @getpathnew sweep resolves each
-  worn attachment's #RLV-relative path(s) and filter_worn_attach_by_folder
-  drops slots whose path is empty (in .base or not under #RLV) OR
-  matches any LockedFolders entry. Multi-path @getpathnew responses
-  (comma-separated when an item is linked to several folders) are
-  split and each path checked. normalize_path lowercases and strips
-  leading/trailing slashes on both sides so RLVa formatting variation
-  doesn't break the match. Layers conservatively suppressed when any
-  folder lock is active (RLV provides no per-layer source-folder
-  query). The bare-@detach=n blind spot stays as documented above —
-  caught by DiscoveredLocked on first click.
+  marked with " *".
+- v1.10 rev 16: Full rewrite to implement a path-based picker filter
+  via @getpathnew (reverted in rev 19).
 - v1.10 rev 14: ATTACH_NAMES extended to 56 entries (Bento slots).
   Drop GlobalDetachLocked filter from build_worn_attach (bare detach
   is normal collar state).
@@ -133,8 +111,7 @@ integer UserAcl        = 0;
 list    gPolicyButtons = [];
 string  SessionId      = "";
 
-// 1=@getoutfit  2=@getstatusall:remoutfit  3=:remattach  4=:detach
-// 5=per-slot @getpathnew sweep (skipped if LockedFolders empty)
+// 1=@getoutfit  2=@getstatusall:remoutfit  3=:remattach  4=:detach  0=idle
 integer QState = 0;
 
 string  RawOutfit          = "";
@@ -142,11 +119,9 @@ integer GlobalOutfitLocked = FALSE;
 integer GlobalAttachLocked = FALSE;
 list    LockedLayers       = [];     // layer names with @remoutfit:<name>=n
 list    LockedAttach       = [];     // slot names with @remattach:<slot>=n OR @detach:<slot>=n
-list    LockedFolders      = [];     // detachallthis:<path> from Q4
+list    LockedFolders      = [];     // @detachallthis:<path> from Q4 — shown in picker header
 list    WornLayers         = [];     // stride 1
 list    WornAttach         = [];     // stride 2: [slot, item_name]
-list    AttachPaths        = [];     // stride 2: [slot, raw_getpathnew_response]
-integer PathCheckIdx       = 0;
 
 string  CurrentCategory = "";        // "" = chooser, "L" = layers, "A" = attach
 integer PickPage    = 0;
@@ -194,21 +169,6 @@ list prealloc(integer n) {
     list buf = [""];
     while (llGetListLength(buf) < n) buf = buf + buf;
     return llList2List(buf, 0, n - 1);
-}
-
-// Lowercase + strip leading/trailing slashes. Applied to both sides of
-// the path match so RLVa response formatting (leading "/", trailing "/",
-// case differences) doesn't break it.
-string normalize_path(string p) {
-    p = llToLower(llStringTrim(p, STRING_TRIM));
-    integer pn = llStringLength(p);
-    if (pn == 0) return p;
-    if (llGetSubString(p, 0, 0) == "/") {
-        p = llGetSubString(p, 1, -1);
-        pn -= 1;
-    }
-    if (pn > 0 && llGetSubString(p, -1, -1) == "/") p = llGetSubString(p, 0, -2);
-    return p;
 }
 
 /* -------------------- LIFECYCLE -------------------- */
@@ -273,8 +233,6 @@ cleanup_session() {
     LockedFolders      = [];
     WornLayers         = [];
     WornAttach         = [];
-    AttachPaths        = [];
-    PathCheckIdx       = 0;
     CurrentCategory    = "";
     PickPage           = 0;
     LastMaxPage        = 0;
@@ -306,8 +264,6 @@ begin_query() {
     LockedFolders      = [];
     WornLayers         = [];
     WornAttach         = [];
-    AttachPaths        = [];
-    PathCheckIdx       = 0;
 
     QState = 1;
     if (RlvListenHandle == 0) RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
@@ -347,7 +303,8 @@ list parse_status(string raw, string key_name) {
     return out;
 }
 
-// Extract detachallthis:<path> entries from a Q4 response.
+// Extract detachallthis:<path> entries from a Q4 response. Shown in the
+// picker header so the wearer can see which folders are protected.
 list parse_detachallthis(string raw) {
     list out = [];
     if (raw == "") return out;
@@ -370,15 +327,6 @@ list parse_detachallthis(string raw) {
 /* -------------------- BUILD WORN LISTS -------------------- */
 
 build_worn_layers() {
-    // RLV exposes no per-layer source-folder query — so when ANY folder
-    // lock is active we conservatively suppress all strippable layers,
-    // because we can't tell which layer is from a locked subtree.
-    // Wearer uses plugin_outfits Wear for layer changes in that case.
-    if (llGetListLength(LockedFolders) > 0) {
-        WornLayers = [];
-        return;
-    }
-
     integer max_layers = llGetListLength(STRIPPABLE_LAYER_IDX);
     WornLayers = prealloc(max_layers);
     integer filled = 0;
@@ -392,10 +340,8 @@ build_worn_layers() {
             integer skip = FALSE;
             if (GlobalOutfitLocked) skip = TRUE;
             if (!skip && llListFindList(LockedLayers, [layer_name]) != -1) skip = TRUE;
-            // DiscoveredLocked layers are NOT skipped — they appear in the
-            // picker with a " *" mark (see show_picker). Click still fires
-            // the strip; RLV silently fails; verify_attempted_strip is a
-            // no-op for already-discovered items.
+            // DiscoveredLocked layers stay visible — marked with " *" by
+            // show_picker so the wearer sees the lock without item churn.
             if (!skip) {
                 WornLayers = llListReplaceList(WornLayers, [layer_name], filled, filled);
                 filled += 1;
@@ -428,8 +374,8 @@ build_worn_attach() {
                     integer skip = FALSE;
                     if (GlobalAttachLocked) skip = TRUE;
                     if (!skip && llListFindList(LockedAttach, [slot_name]) != -1) skip = TRUE;
-                    // DiscoveredLocked items are NOT skipped — they appear
-                    // in the picker with a " *" mark (see show_picker).
+                    // DiscoveredLocked items stay visible — marked with
+                    // " *" by show_picker.
                     if (!skip) {
                         WornAttach = llListReplaceList(WornAttach,
                             [slot_name, item_name], filled, filled + 1);
@@ -442,70 +388,6 @@ build_worn_attach() {
     }
     if (filled == 0)       WornAttach = [];
     else if (filled < cap) WornAttach = llList2List(WornAttach, 0, filled - 1);
-}
-
-// Apply two drop rules to WornAttach:
-//   1. Empty @getpathnew response → DROP. This covers both items in
-//      dot-prefixed folders (incl. outfits/.base — RLV's folder API
-//      treats dot folders as disabled) AND items not under #RLV at
-//      all (HUDs, drag-attached, mesh body parts). Per the picker
-//      spec, neither category belongs in the UI.
-//   2. Any returned path falls under any LockedFolders entry → DROP.
-//      @getpathnew returns comma-separated paths when an item is
-//      linked into multiple #RLV folders, so we check each.
-filter_worn_attach_by_folder() {
-    if (llGetListLength(WornAttach) == 0) return;
-
-    integer lf_n = llGetListLength(LockedFolders);
-    list normalized_lf = [];
-    integer ln = 0;
-    while (ln < lf_n) {
-        normalized_lf += [normalize_path(llList2String(LockedFolders, ln))];
-        ln += 1;
-    }
-
-    list new_worn = [];
-    integer n = llGetListLength(WornAttach);
-    integer i = 0;
-    while (i < n) {
-        string slot = llList2String(WornAttach, i);
-        string item = llList2String(WornAttach, i + 1);
-        string raw_response = "";
-        integer pi = llListFindList(AttachPaths, [slot]);
-        if (pi != -1) raw_response = llList2String(AttachPaths, pi + 1);
-
-        integer drop = FALSE;
-        if (raw_response == "") {
-            // Rule 1: empty → DROP.
-            drop = TRUE;
-        } else {
-            // Rule 2: split comma-separated paths and check each.
-            // llCSV2List("") returns [""] not [] — guarded above so we
-            // only get here with non-empty input.
-            list raw_paths = llCSV2List(raw_response);
-            integer rp_n = llGetListLength(raw_paths);
-            integer rpi = 0;
-            while (rpi < rp_n && !drop) {
-                string single = normalize_path(llList2String(raw_paths, rpi));
-                if (single != "") {
-                    integer lj = 0;
-                    while (lj < lf_n) {
-                        string lf = llList2String(normalized_lf, lj);
-                        if (lf != "" && (single == lf || llSubStringIndex(single, lf + "/") == 0)) {
-                            drop = TRUE;
-                            lj = lf_n;
-                        } else {
-                            lj += 1;
-                        }
-                    }
-                }
-                rpi += 1;
-            }
-        }
-        if (!drop) new_worn += [slot, item];
-        i += 2;
-    }
-    WornAttach = new_worn;
 }
 
 /* -------------------- POST-STRIP VERIFY -------------------- */
@@ -536,8 +418,8 @@ integer is_attach_slot_worn(string slot_name) {
 }
 
 // If the just-attempted item is still worn, the strip silently failed
-// (most commonly a self-issued @detach=n that we can't pre-detect).
-// Record the slot/layer so subsequent renders omit it.
+// (almost always a parent-folder @detachallthis). Record the slot/layer
+// so subsequent renders omit it; notify the wearer once.
 verify_attempted_strip() {
     if (AttemptedItem == "") return;
     list parts = llParseString2List(AttemptedItem, [":"], []);
@@ -563,6 +445,14 @@ verify_attempted_strip() {
 
 /* -------------------- UI -------------------- */
 
+// Format LockedFolders as a single comma-separated line for the picker
+// header. Returns "" when nothing is locked.
+string locked_folders_line() {
+    integer n = llGetListLength(LockedFolders);
+    if (n == 0) return "";
+    return "Locked folders: " + llDumpList2String(LockedFolders, ", ") + "\n";
+}
+
 show_category_menu() {
     SessionId       = sid();
     CurrentCategory = "";
@@ -570,6 +460,7 @@ show_category_menu() {
     LastMaxPage     = 0;
 
     string body = "Strip menu\n\n";
+    body += locked_folders_line();
     body += "Layers:      " + (string)llGetListLength(WornLayers) + " strippable\n";
     body += "Attachments: " + (string)(llGetListLength(WornAttach) / 2) + " strippable\n\n";
     body += "Choose category.";
@@ -605,11 +496,8 @@ show_picker(string category, integer page) {
     SessionId       = sid();
     CurrentCategory = category;
 
-    // No action buttons; page_size = 9 (full content area).
-    integer action_count = 0;
-    integer page_size    = 9;
-
-    integer max_page = 0;
+    integer page_size = 9;
+    integer max_page  = 0;
     if (total > 0) max_page = (total - 1) / page_size;
     if (page < 0)        page = 0;
     if (page > max_page) page = max_page;
@@ -622,10 +510,12 @@ show_picker(string category, integer page) {
     integer count = end_idx - start_idx;
 
     string body = header;
+    body += locked_folders_line();
+    if (llGetListLength(DiscoveredLocked) > 0) body += "* = locked\n";
     if (total == 0) {
         body += "\nNothing to strip.";
     } else {
-        body += "*=locked  Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
+        body += "Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
         integer k = 0;
         while (k < count) {
             integer item_idx = start_idx + k;
@@ -650,9 +540,7 @@ show_picker(string category, integer page) {
     integer pad_i;
     for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
 
-    integer first_content_slot = 3 + action_count;
-    integer total_buttons      = first_content_slot + count;
-
+    integer total_buttons = 3 + count;
     list target_slots = [];
     if (total_buttons > 9)  target_slots += [9];
     if (total_buttons > 10) target_slots += [10];
@@ -660,9 +548,9 @@ show_picker(string category, integer page) {
     if (total_buttons > 6)  target_slots += [6];
     if (total_buttons > 7)  target_slots += [7];
     if (total_buttons > 8)  target_slots += [8];
-    if (first_content_slot <= 3 && total_buttons > 3) target_slots += [3];
-    if (first_content_slot <= 4 && total_buttons > 4) target_slots += [4];
-    if (first_content_slot <= 5 && total_buttons > 5) target_slots += [5];
+    if (total_buttons > 3)  target_slots += [3];
+    if (total_buttons > 4)  target_slots += [4];
+    if (total_buttons > 5)  target_slots += [5];
 
     integer ci = 0;
     while (ci < count) {
@@ -786,7 +674,7 @@ handle_rlv_response(string message) {
         // Q4 detach response carries three concepts:
         //   bare detach        — ignored (normal collar self-lock state)
         //   detach:<slot>      — merged into LockedAttach (per-slot lock)
-        //   detachallthis:<p>  — LockedFolders (drives Q5 path sweep)
+        //   detachallthis:<p>  — surfaced in LockedFolders for header display
         list parsed = parse_status(message, "detach");
         if (llGetListLength(parsed) > 0 && llList2String(parsed, 0) == "") {
             parsed = llDeleteSubList(parsed, 0, 0);
@@ -803,44 +691,6 @@ handle_rlv_response(string message) {
         verify_attempted_strip();
         build_worn_layers();
         build_worn_attach();
-
-        // Q5 only when needed: skipped if no folder locks AND no worn
-        // attachments (no point querying paths with nothing to match).
-        // When folder locks ARE active we always sweep so we can apply
-        // both drop rules (empty path AND path-match).
-        if (llGetListLength(WornAttach) > 0
-            && (llGetListLength(LockedFolders) > 0 || llGetListLength(LockedFolders) == 0)) {
-            // The "always sweep when attachments exist" branch — even
-            // without folder locks we still need to drop empty-path
-            // items per the picker spec (Rule 1 in filter_worn_attach_by_folder).
-            QState = 5;
-            PathCheckIdx = 0;
-            llSetTimerEvent(RLV_TIMEOUT);
-            string first_slot = llList2String(WornAttach, 0);
-            rlv_force("@getpathnew:" + first_slot + "=" + (string)RLV_CHAN);
-            return;
-        }
-
-        QState = 0;
-        stop_rlv_listen();
-        show_current_picker(PickPage);
-        return;
-    }
-    if (QState == 5) {
-        integer pair_idx = PathCheckIdx * 2;
-        if (pair_idx < llGetListLength(WornAttach)) {
-            string slot = llList2String(WornAttach, pair_idx);
-            AttachPaths += [slot, message];
-        }
-        PathCheckIdx += 1;
-        integer next_idx = PathCheckIdx * 2;
-        if (next_idx < llGetListLength(WornAttach)) {
-            llSetTimerEvent(RLV_TIMEOUT);
-            string next_slot = llList2String(WornAttach, next_idx);
-            rlv_force("@getpathnew:" + next_slot + "=" + (string)RLV_CHAN);
-            return;
-        }
-        filter_worn_attach_by_folder();
         QState = 0;
         stop_rlv_listen();
         show_current_picker(PickPage);

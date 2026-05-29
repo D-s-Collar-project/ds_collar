@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
@@ -26,6 +26,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              here — plugin_outfits owns the .outfits/.base lock (it
              needs to be releasable via the outfits on/off toggle).
 CHANGES:
+- v1.10 rev 15: Drop dead `if (max_layers > 0)` guard in
+  build_worn_layers — STRIPPABLE_LAYER_IDX is a constant 13 entries,
+  the wrapper was always-true. No behaviour change.
 - v1.10 rev 14: Fix "no attachments visible" — two distinct bugs. (a) Rev 10's GlobalDetachLocked filter in build_worn_attach was based on a wrong reading of the RLV spec: bare @detach=n locks ONLY the object that issued it (the collar), not all attachments, but the filter was hiding every attached item whenever plugin_lock was locked (which is the default state). Drop the GlobalDetachLocked skip; per-slot @detach:<slot>=n locks still filter via LockedAttach. (b) ATTACH_NAMES stopped at index 40, so anything attached to a Bento mesh point (LHAND_RING1=41 through HIND_RFOOT=55) failed the attach_pt < attach_names_n bounds check and never appeared. Extend to 56 entries covering all current LSL ATTACH_* constants.
 - v1.10 rev 13: Drop the @detachallthis:.outfits/.base claim from
   register_self — plugin_outfits rev 9 now owns the .base lock so it
@@ -473,12 +476,9 @@ list parse_status(string raw, string key_name) {
 build_worn_layers() {
     integer max_layers = llGetListLength(STRIPPABLE_LAYER_IDX);
 
-    WornLayers = [];
-    if (max_layers > 0) {
-        list buf = [""];
-        while (llGetListLength(buf) < max_layers) buf = buf + buf;
-        WornLayers = llList2List(buf, 0, max_layers - 1);
-    }
+    list buf = [""];
+    while (llGetListLength(buf) < max_layers) buf = buf + buf;
+    WornLayers = llList2List(buf, 0, max_layers - 1);
 
     integer filled = 0;
     string  layer_name;
