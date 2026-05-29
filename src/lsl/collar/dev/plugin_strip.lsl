@@ -1,139 +1,82 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 15
-PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
-         Available to every ACL level (public / owned wearer / trustee /
-         self-owned wearer / primary owner). Items worn from
-         #RLV/outfits/.base are protected against strip whenever
-         plugin_outfits is in its active state (its @detachallthis lock
-         on outfits/.base blocks the strip command at force time).
-         Pairs with plugin_outfits (#RLV/outfits/ as the outfits library;
-         the .base subfolder is the protected "non-strippable" set).
-ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
-             visibility. Enumerates worn items live via @getoutfit +
-             llGetAttachedList; reads lock state via @getstatusall on
-             three keyspaces (remoutfit, remattach, detach). Per-slot
-             locks filter at build time; folder-scoped locks (e.g.
-             @detachallthis:outfits/.base) block the strip itself but
-             cannot be pre-filtered — RLV's @getpath ignores
-             dot-prefixed folders, and the entire outfits/.base subtree
-             is invisible to path resolution. Items in such folders
-             appear in the picker on first session entry; the
-             verify_attempted_strip → DiscoveredLocked discovery pair
-             catches them on the first click and hides them for the
-             rest of the session. No @detachallthis claim is issued
-             here — plugin_outfits owns the outfits/.base lock (it
-             needs to be releasable via the outfits on/off toggle).
+REVISION: 17
+PURPOSE: Strip individual unlocked attachments or layers worn from
+         #RLV shared folders, excluding anything in #RLV/outfits/.base
+         and anything that any active RLV restriction prevents from
+         being detached.
+ACL: 1 (public — available to every ACL level).
+SCOPE — what the picker IS allowed to show:
+- Attachments whose @getpathnew:<slot> returns a non-empty path AND
+  whose path is NOT under any active @detachallthis-locked subtree
+  AND whose attach point has no @detach:<slot>=n / @remattach:<slot>=n.
+- Clothing layers whose @getoutfit bit is 1, whose @remoutfit:<name>
+  has no per-layer lock, AND whose global @remoutfit=n is not active.
+SCOPE — what the picker MUST NOT show:
+- Items in outfits/.base — the dot prefix makes RLV's folder API
+  (@getpathnew specifically) return empty for them, which we treat
+  as DROP. The same dot-skip simultaneously hides items not in any
+  #RLV shared folder (HUDs, drag-attached, mesh body parts), which
+  matches the "RLV shared folders only" requirement.
+- Items whose @getpathnew result falls under any active
+  @detachallthis:<path>=n claim (e.g. a locked outfits/myout).
+- Items at a slot with @detach:<slot>=n or @remattach:<slot>=n
+  (per-slot locks visible via @getstatusall).
+- Worn clothing layers when ANY @detachallthis claim is active.
+  RLV exposes no per-layer source-folder query — so when even one
+  folder lock is in play we conservatively hide all layers rather
+  than risk surfacing a locked one.
+KNOWN GAP:
+- A foreign attachment that self-locks via bare @detach=n (the
+  standard restraint self-lock pattern) is invisible to us — the
+  RLV spec deliberately hides the issuing UUID. Such items will
+  appear in the picker on first session entry; the strip command
+  silently fails, verify_attempted_strip detects the still-worn
+  item, and DiscoveredLocked hides it for the rest of the session.
+ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven
+             button visibility. Five-step RLV query chain per
+             picker render:
+               Q1  @getoutfit                      → layer bits
+               Q2  @getstatusall:remoutfit;|       → layer locks
+               Q3  @getstatusall:remattach;|       → per-slot remattach
+               Q4  @getstatusall:detach;|          → per-slot detach
+                                                     + detachallthis paths
+               Q5  @getpathnew:<slot>=<chan>, one  → item source folder(s)
+                    per worn attachment slot
+             Q5 is skipped entirely when there are zero detachallthis
+             entries AND zero worn attachments — no point probing
+             paths when there's nothing to match against.
 CHANGES:
-- v1.10 rev 15: Align path references in PURPOSE/ARCHITECTURE to
-  plugin_outfits's current convention: outfits/.base (plain "outfits"
-  parent, dot-prefixed ".base" subfolder). Historical CHANGES entries
-  below reference the older ".outfits/.base" convention from earlier
-  paradigms and are left as-is. No code change.
-- v1.10 rev 14: Fix "no attachments visible" — two distinct bugs. (a) Rev 10's GlobalDetachLocked filter in build_worn_attach was based on a wrong reading of the RLV spec: bare @detach=n locks ONLY the object that issued it (the collar), not all attachments, but the filter was hiding every attached item whenever plugin_lock was locked (which is the default state). Drop the GlobalDetachLocked skip; per-slot @detach:<slot>=n locks still filter via LockedAttach. (b) ATTACH_NAMES stopped at index 40, so anything attached to a Bento mesh point (LHAND_RING1=41 through HIND_RFOOT=55) failed the attach_pt < attach_names_n bounds check and never appeared. Extend to 56 entries covering all current LSL ATTACH_* constants.
-- v1.10 rev 13: Drop the @detachallthis:.outfits/.base claim from
-  register_self — plugin_outfits rev 9 now owns the .base lock so it
-  can be released by the on/off toggle. plugin_strip's role shrinks
-  to "enumerate worn items, show picker, force-strip on click";
-  .base protection comes entirely from whichever consumer is
-  currently claiming the folder (default: plugin_outfits while
-  active). BASE_FOLDER and RLV_CONSUMER constants removed (their
-  only use was the claim).
-- v1.10 rev 12: Internal refactor — no behavior change. Merge
-  show_layer_picker + show_attach_picker into a single
-  show_picker(category, page); the two were ~75 lines each and
-  diverged only in the worn-list source, row formatter, and header
-  text. Inline parse_detach_status into the QState=4 handler via
-  parse_status("detach"); the dedicated parser was duplicating
-  what parse_status already does.
-- v1.10 rev 11: Drop the @getpath path-verify machinery (rev 9) and
-  the folder-tracking half of rev 10 (LockedFolders, /detachallthis
-  parsing in parse_detach_status, path_locked, begin_path_check,
-  QState=5, PathCheckIdx). The RLV spec is explicit that @getpath
-  "does not take disabled folders into account (folders which name
-  begins with a dot)" — so the probe returns empty for every item
-  under .outfits/.base and the filter could never see them. Rev 9
-  was also wrong about @detachallthis not blocking @remattach: RLV
-  does honor the lock against the strip command (the strip silently
-  fails), which is why the existing verify_attempted_strip +
-  DiscoveredLocked pair was already catching .base items on the
-  first click. Net: ~80 lines lighter, same effective behavior.
-  Per-point @detach:<pt>=n detection from rev 10 is kept.
-- v1.10 rev 10: Add @getstatusall:detach query as QState=4 (path-check
-  bumped to QState=5). Catches three more lock sources that previously
-  slipped through to the picker: bare @detach=n (hides all
-  attachments), per-point @detach:<pt>=n (hides that slot), and
-  @detachallthis:<path> folder locks beyond .outfits/.base (hides
-  slots whose inventory path falls under any reported folder). One
-  more RLV roundtrip on menu open; reuses the existing path-verify
-  pass for folder-scoped filtering.
-- v1.10 rev 9: Pre-filter the attachment picker by inventory path. The
-  @detachallthis:.outfits/.base claim was not blocking @remattach:<pt>
-  =force across RLVa versions, so .base items were being stripped
-  despite the lock. After the existing 3-query build pass, the plugin
-  now walks WornAttach via @getpath:<slot> (new QState=4) and drops
-  any row whose inventory path is in .outfits/.base before rendering
-  the picker. Adds N RLV roundtrips on menu open (typically <1s for
-  5-10 attachments). The folder-lock claim is kept for defense in
-  depth against other detach paths (manual, @detachall:.outfits, relay).
-- v1.10 rev 8: Ellipsize attachment item names in show_attach_picker
-  to 30 chars. Mesh-body names regularly exceed 50 chars and 9 such
-  rows + header overflowed llDialog's 512-char body limit.
-- v1.10 rev 7: Strip DEBUG_STRIP scaffolding and logd() calls now
-  that rev 5's @getstatusall syntax fix and rev 6's UI split are
-  confirmed working in-world.
-- v1.10 rev 6: UI split + free attachment names. The unified picker
-  (mixed L:/A: rows) is replaced by a top-level category chooser
-  (Layers / Attachments / Back) that drills into a paginated
-  per-category picker. Attachments now show real item names from
-  llGetAttachedList(llGetOwner()) — display reads e.g.
-  "1. Maitreya Cuffs @left hand" instead of just "A: left hand".
-  Internal changes:
-    * @getattach RLV query is gone — llGetAttachedList is synchronous,
-      faster (no roundtrip), and bundles OBJECT_NAME with the slot
-      mapping so we don't need to maintain a separate attachment-to-
-      name lookup.
-    * Query chain shrinks from 4 RLV roundtrips to 3 (outfit + two
-      getstatusall lock queries).
-    * WornItems (stride-2 mixed) replaced by WornLayers (stride-1) +
-      WornAttach (stride-2: point, item_name).
-    * CurrentCategory tracks which picker is active so post-strip
-      re-renders return to the same picker, while a fresh menu entry
-      always lands on the category chooser.
-    * verify_attempted_strip's bit-string check for attach is replaced
-      by is_attach_slot_worn (re-queries llGetAttachedList).
-- v1.10 rev 5: Fix the @getstatusall lock-detection probes. The
-  syntax was inverted — `@getstatusall;remoutfit=<chan>` (semicolon)
-  vs the canonical `@getstatusall:<filter>=<chan>` (colon). The
-  semicolon-form is reserved for an optional custom separator
-  AFTER a filter; using it as the filter-delimiter parses as an
-  unrecognised command and the viewer silently drops it. Both
-  invocations corrected to use the colon form.
-- v1.10 rev 4: Move the protected-folder lock from `.base` (top-level)
-  to `.outfits/.base` (nested) to match the OC-style outfit-system
-  convention paired with plugin_outfits: `#RLV/.outfits/` is the
-  outfits library, `#RLV/.outfits/.base/` is the non-strippable
-  subfolder. Items linked from `.outfits/<name>/` (regular outfits)
-  are no longer folder-locked, so plugin_outfits' Replace
-  (@detachall:.outfits=force + @attachall:.outfits/<new>=force) can
-  swap them; .base items are silently skipped by the force command
-  because of the @detachallthis lock applied here.
-- v1.10 rev 3: Open policy to all ACL levels (1/2/3/4/5). Previous
-  exclusion of ACL 2/4 (owned/self-owned wearer) is dropped at the
-  user's direction; the .base @detachallthis claim already prevents
-  the wearer from stripping their core attachments, so policy-gating
-  the entire plugin was redundant.
-- v1.10 rev 2: build_worn_list pre-allocates WornItems via list
-  doubling and fills with llListReplaceList instead of `+=` inside
-  the layer/attach loops. Matches plugin_folders rev 26 pattern;
-  clears the analyzer's O(N²) loop-concat warning.
-- v1.10 rev 1: Hide locked items from the picker instead of marking
-  them. @getstatusall-detected y/n locks filter immediately; locks
-  applied via @detachallthis (e.g., on .base) are caught on the
-  first strip attempt via DiscoveredLocked and hidden thereafter.
-  Plugin now claims @detachallthis:.base on register so items worn
-  from #RLV/.base cannot be stripped via this menu (or anywhere).
+- v1.10 rev 17: DiscoveredLocked items stay visible in the picker
+  marked with " *" instead of disappearing. The bare-@detach=n
+  self-locked attachments we can't pre-detect (RLV spec hides UUIDs
+  of issuing scripts) now appear with the asterisk after first
+  click-fail. Body header gains "*=locked" legend. Click on a marked
+  item still fires the strip; RLV silently fails again;
+  verify_attempted_strip is a no-op for already-discovered items
+  (still emits the "X is locked" warning). Same behaviour for
+  layers and attachments.
+- v1.10 rev 16: Full rewrite to implement the picker scope spec above.
+  New: parse_detachallthis pulls detachallthis:<path> entries from the
+  Q4 response into LockedFolders; Q5 @getpathnew sweep resolves each
+  worn attachment's #RLV-relative path(s) and filter_worn_attach_by_folder
+  drops slots whose path is empty (in .base or not under #RLV) OR
+  matches any LockedFolders entry. Multi-path @getpathnew responses
+  (comma-separated when an item is linked to several folders) are
+  split and each path checked. normalize_path lowercases and strips
+  leading/trailing slashes on both sides so RLVa formatting variation
+  doesn't break the match. Layers conservatively suppressed when any
+  folder lock is active (RLV provides no per-layer source-folder
+  query). The bare-@detach=n blind spot stays as documented above —
+  caught by DiscoveredLocked on first click.
+- v1.10 rev 14: ATTACH_NAMES extended to 56 entries (Bento slots).
+  Drop GlobalDetachLocked filter from build_worn_attach (bare detach
+  is normal collar state).
+- v1.10 rev 13: Drop @detachallthis:.outfits/.base claim — plugin_outfits
+  owns it.
+- v1.10 rev 12: Merge per-category pickers into show_picker(category).
+- v1.10 rev 6: Category split (Layers / Attachments / Back).
 - v1.10 rev 0: Initial implementation.
 --------------------*/
 
@@ -150,29 +93,15 @@ string PLUGIN_LABEL   = "Strip";
 integer RLV_CHAN    = 1888771;
 float   RLV_TIMEOUT = 10.0;
 
-/* -------------------- LAYER NAMES (matches @getoutfit response order) -------------------- */
-// RLV @getoutfit returns a 0/1 string with characters in this canonical
-// order. Body-part layers (skull, eyes, hair, shape) are not strippable
-// via @remoutfit and are excluded from the worn list below.
+/* -------------------- LAYERS -------------------- */
 list LAYER_NAMES = [
     "gloves", "jacket", "pants", "shirt", "shoes", "skirt", "socks",
     "underpants", "undershirt", "skull", "eyes", "hair", "shape",
     "alpha", "tattoo", "physics", "universal"
 ];
-
-// Indices into LAYER_NAMES that @remoutfit accepts as targets.
 list STRIPPABLE_LAYER_IDX = [0, 1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 15, 16];
 
-/* -------------------- ATTACH POINT NAMES (LSL ATTACH_* constant order) -------------------- */
-// Index = LSL ATTACH_* integer (the value llGetObjectDetails returns for
-// OBJECT_ATTACHED_POINT). Position 0 is "none" (unattached). Positions
-// 31-38 are HUD points, excluded by HUD_IDX below — HUDs are private to
-// the wearer and this plugin is operated by non-wearer parties.
-//
-// Bento / mesh attachment points (41-55) added: items worn on hand
-// rings, tail, wings, jaw, alt face slots etc. used to fail the
-// `attach_pt < attach_names_n` bounds check in build_worn_attach and
-// silently disappear from the picker.
+/* -------------------- ATTACH POINTS -------------------- */
 list ATTACH_NAMES = [
     "",
     "chest", "skull", "left shoulder", "right shoulder",
@@ -198,67 +127,31 @@ list ATTACH_NAMES = [
     "left hind foot", "right hind foot"
 ];
 
-// HUD positions skipped when building the worn list.
-list HUD_IDX = [31, 32, 33, 34, 35, 36, 37, 38];
-
 /* -------------------- STATE -------------------- */
 key     CurrentUser    = NULL_KEY;
 integer UserAcl        = 0;
 list    gPolicyButtons = [];
 string  SessionId      = "";
 
-// Query state machine for the RLV roundtrip chain:
-//   1 = waiting for @getoutfit response
-//   2 = waiting for @getstatusall:remoutfit response
-//   3 = waiting for @getstatusall:remattach response
-//   4 = waiting for @getstatusall:detach response — captures per-point
-//       @detach:<pt>=n locks and bare @detach=n. Folder-scoped
-//       @detachallthis is ignored here: those locks block the strip
-//       itself (RLV honors them against @remattach:<pt>=force), but
-//       pre-filtering by folder is impossible because @getpath omits
-//       dot-prefixed paths and our convention puts the protected
-//       subtree under #RLV/outfits/.base. Such items are caught on
-//       first strip attempt by verify_attempted_strip and hidden via
-//       DiscoveredLocked for the rest of the session.
-//   0 = idle (results assembled, category menu rendered)
-//
-// Note: @getattach (the bit-string attach query) is GONE — replaced by
-// llGetAttachedList(llGetOwner()) which is synchronous, faster, and
-// also yields real attached-object item names (not just slot names).
+// 1=@getoutfit  2=@getstatusall:remoutfit  3=:remattach  4=:detach
+// 5=per-slot @getpathnew sweep (skipped if LockedFolders empty)
 integer QState = 0;
 
 string  RawOutfit          = "";
 integer GlobalOutfitLocked = FALSE;
 integer GlobalAttachLocked = FALSE;
-integer GlobalDetachLocked = FALSE;  // bare @detach=n — hides all attachments
-list    LockedLayers       = [];
-list    LockedAttach       = [];     // per-point @remattach:<pt>=n AND @detach:<pt>=n
+list    LockedLayers       = [];     // layer names with @remoutfit:<name>=n
+list    LockedAttach       = [];     // slot names with @remattach:<slot>=n OR @detach:<slot>=n
+list    LockedFolders      = [];     // detachallthis:<path> from Q4
+list    WornLayers         = [];     // stride 1
+list    WornAttach         = [];     // stride 2: [slot, item_name]
+list    AttachPaths        = [];     // stride 2: [slot, raw_getpathnew_response]
+integer PathCheckIdx       = 0;
 
-// Per-category worn-item tables built after the RLV queries complete.
-//   WornLayers : stride 1, [layer_name]                — from @getoutfit.
-//   WornAttach : stride 2, [point_name, item_name]     — from llGetAttachedList.
-// Locked entries are filtered out at build time so the pickers never
-// display them.
-list    WornLayers   = [];
-list    WornAttach   = [];
-
-// "" = nothing selected; "L" = Layers picker active; "A" = Attachments
-// picker active. Set when the user picks a category, cleared on Back to
-// the category menu, on session cleanup, and on a fresh begin_query.
-string  CurrentCategory = "";
-
+string  CurrentCategory = "";        // "" = chooser, "L" = layers, "A" = attach
 integer PickPage    = 0;
 integer LastMaxPage = 0;
-integer PageSize    = 9;
 
-// Post-strip lock discovery. apply_pick stashes the just-attempted
-// item id ("L:<name>" or "A:<name>") in AttemptedItem; after the
-// re-query lands, verify_attempted_strip checks whether the item is
-// still worn. If yes, the strip silently failed (locked by some
-// mechanism we couldn't pre-detect — typically a parent-folder
-// @detachallthis like .base) and the item id is appended to
-// DiscoveredLocked, which build_worn_list then filters. The list is
-// session-scoped and cleared by cleanup_session.
 string  AttemptedItem    = "";
 list    DiscoveredLocked = [];
 
@@ -270,7 +163,7 @@ integer json_has(string j, list path) {
     return (llJsonGetValue(j, path) != JSON_INVALID);
 }
 
-string generate_session_id() {
+string sid() {
     return PLUGIN_CONTEXT + "_" + (string)llGetUnixTime();
 }
 
@@ -290,34 +183,45 @@ integer btn_allowed(string label) {
     return (llListFindList(gPolicyButtons, [label]) != -1);
 }
 
-// Truncate long strings for dialog-body display. llDialog caps the body
-// at 512 chars; mesh-body attachments routinely have item names longer
-// than 50 chars, and 9 such rows blow past the limit. Returns at most
-// max_len characters, appending "..." when truncated.
 string ellipsize(string s, integer max_len) {
     if (llStringLength(s) <= max_len) return s;
     if (max_len <= 3)                 return llGetSubString(s, 0, max_len - 1);
     return llGetSubString(s, 0, max_len - 4) + "...";
 }
 
+list prealloc(integer n) {
+    if (n <= 0) return [];
+    list buf = [""];
+    while (llGetListLength(buf) < n) buf = buf + buf;
+    return llList2List(buf, 0, n - 1);
+}
+
+// Lowercase + strip leading/trailing slashes. Applied to both sides of
+// the path match so RLVa response formatting (leading "/", trailing "/",
+// case differences) doesn't break it.
+string normalize_path(string p) {
+    p = llToLower(llStringTrim(p, STRING_TRIM));
+    integer pn = llStringLength(p);
+    if (pn == 0) return p;
+    if (llGetSubString(p, 0, 0) == "/") {
+        p = llGetSubString(p, 1, -1);
+        pn -= 1;
+    }
+    if (pn > 0 && llGetSubString(p, -1, -1) == "/") p = llGetSubString(p, 0, -2);
+    return p;
+}
+
 /* -------------------- LIFECYCLE -------------------- */
 
 write_plugin_reg(string label) {
     string k = "plugin.reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "label",  label,
-        "script", llGetScriptName()
-    ]);
+    string v = llList2Json(JSON_OBJECT, ["label", label, "script", llGetScriptName()]);
     if (llLinksetDataRead(k) == v) return;
     llLinksetDataWrite(k, v);
 }
 
 register_self() {
-    // Open policy: every ACL level sees Strip. The wearer's core
-    // attachments are protected by plugin_outfits's @detachallthis:
-    // outfits/.base claim (when its toggle is on), so wearer access
-    // here only exposes strippable items — the strip command silently
-    // no-ops on locked items.
+    // ACL 1 (public) and every higher tier — Strip is open to all.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
         "1", "Strip",
         "2", "Strip",
@@ -325,9 +229,7 @@ register_self() {
         "4", "Strip",
         "5", "Strip"
     ]));
-
     write_plugin_reg(PLUGIN_LABEL);
-
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type",    "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
@@ -353,226 +255,182 @@ stop_rlv_listen() {
 
 cleanup_session() {
     stop_rlv_listen();
-
     if (SessionId != "") {
         llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-            "type",       "ui.dialog.close",
-            "session_id", SessionId
+            "type", "ui.dialog.close", "session_id", SessionId
         ]), NULL_KEY);
     }
-
-    SessionId           = "";
-    CurrentUser         = NULL_KEY;
-    UserAcl             = 0;
-    gPolicyButtons      = [];
-    QState              = 0;
-    RawOutfit           = "";
-    GlobalOutfitLocked  = FALSE;
-    GlobalAttachLocked  = FALSE;
-    GlobalDetachLocked  = FALSE;
-    LockedLayers        = [];
-    LockedAttach        = [];
-    WornLayers          = [];
-    WornAttach          = [];
-    CurrentCategory     = "";
-    PickPage            = 0;
-    LastMaxPage         = 0;
-    AttemptedItem       = "";
-    DiscoveredLocked    = [];
+    SessionId          = "";
+    CurrentUser        = NULL_KEY;
+    UserAcl            = 0;
+    gPolicyButtons     = [];
+    QState             = 0;
+    RawOutfit          = "";
+    GlobalOutfitLocked = FALSE;
+    GlobalAttachLocked = FALSE;
+    LockedLayers       = [];
+    LockedAttach       = [];
+    LockedFolders      = [];
+    WornLayers         = [];
+    WornAttach         = [];
+    AttachPaths        = [];
+    PathCheckIdx       = 0;
+    CurrentCategory    = "";
+    PickPage           = 0;
+    LastMaxPage        = 0;
+    AttemptedItem      = "";
+    DiscoveredLocked   = [];
 }
 
 return_to_root() {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",    "ui.menu.return",
-        "context", PLUGIN_CONTEXT,
-        "user",    (string)CurrentUser
+        "type", "ui.menu.return", "context", PLUGIN_CONTEXT, "user", (string)CurrentUser
     ]), NULL_KEY);
     cleanup_session();
 }
 
-/* -------------------- RLV -------------------- */
+/* -------------------- RLV QUERY CHAIN -------------------- */
 
 rlv_force(string command) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",    "rlv.force",
-        "command", command
+        "type", "rlv.force", "command", command
     ]), NULL_KEY);
 }
 
-start_listen_if_needed() {
-    if (RlvListenHandle == 0) {
-        RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
-    }
-}
-
-// Kick off the four-step RLV query chain at QState=1. Attachments are
-// enumerated synchronously via llGetAttachedList after QState 4 lands,
-// so they don't burn an RLV roundtrip. Called at session start and
-// after every successful strip (to refresh the data).
 begin_query() {
     RawOutfit          = "";
     GlobalOutfitLocked = FALSE;
     GlobalAttachLocked = FALSE;
-    GlobalDetachLocked = FALSE;
     LockedLayers       = [];
     LockedAttach       = [];
+    LockedFolders      = [];
     WornLayers         = [];
     WornAttach         = [];
+    AttachPaths        = [];
+    PathCheckIdx       = 0;
 
     QState = 1;
-    start_listen_if_needed();
+    if (RlvListenHandle == 0) RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
     llSetTimerEvent(RLV_TIMEOUT);
     rlv_force("@getoutfit=" + (string)RLV_CHAN);
 }
 
+// `;|` separator required: @detachallthis:<path> entries embed `/`,
+// which the default separator would split mid-path.
 advance_query() {
     llSetTimerEvent(RLV_TIMEOUT);
-    if (QState == 2) {
-        rlv_force("@getstatusall:remoutfit=" + (string)RLV_CHAN);
-        return;
-    }
-    if (QState == 3) {
-        rlv_force("@getstatusall:remattach=" + (string)RLV_CHAN);
-        return;
-    }
-    if (QState == 4) {
-        rlv_force("@getstatusall:detach=" + (string)RLV_CHAN);
-    }
+    if (QState == 2) { rlv_force("@getstatusall:remoutfit;|=" + (string)RLV_CHAN); return; }
+    if (QState == 3) { rlv_force("@getstatusall:remattach;|=" + (string)RLV_CHAN); return; }
+    if (QState == 4) { rlv_force("@getstatusall:detach;|="   + (string)RLV_CHAN); }
 }
 
-// Parse "/remoutfit:shirt/remoutfit" style responses. A bare "remoutfit"
-// (no ":part") means everything is locked at the category level; the
-// caller signals this by inspecting the returned head-marker "".
+/* -------------------- RESPONSE PARSERS -------------------- */
+
+// Parse "|key:val|key" style responses. Bare key (no `:val`) signals a
+// category-level lock and is returned as a leading "" entry.
 list parse_status(string raw, string key_name) {
     list out = [];
     if (raw == "") return out;
-    list parts = llParseString2List(raw, ["/"], []);
+    list parts = llParseString2List(raw, ["|"], []);
     integer n = llGetListLength(parts);
-    integer i = 0;
-    string prefix = key_name + ":";
+    string  prefix   = key_name + ":";
+    integer prefix_n = llStringLength(prefix);
     integer global_seen = FALSE;
+    integer i = 0;
     while (i < n) {
         string p = llStringTrim(llList2String(parts, i), STRING_TRIM);
-        if (p == key_name) {
-            global_seen = TRUE;
-        }
-        else if (llSubStringIndex(p, prefix) == 0) {
-            out += [llGetSubString(p, llStringLength(prefix), -1)];
-        }
+        if (p == key_name) global_seen = TRUE;
+        else if (llSubStringIndex(p, prefix) == 0) out += [llGetSubString(p, prefix_n, -1)];
         i += 1;
     }
     if (global_seen) out = [""] + out;
     return out;
 }
 
-// Build the per-category worn lists, filtered by all known lock sources:
-//   - GlobalOutfitLocked / GlobalAttachLocked (bare @remoutfit / @remattach=n)
-//   - LockedLayers / LockedAttach            (specific @remoutfit:<part>=n / @remattach:<point>=n)
-//   - DiscoveredLocked                       (parent-folder @detachallthis, learned post-strip)
-//
-// Layers are derived from the RLV @getoutfit bit string at canonical
-// LAYER_NAMES offsets. The build uses list-doubling pre-allocation +
-// llListReplaceList per fill to stay O(N log N) instead of the O(N²)
-// `+=` pattern the project's analyzer flags (matches plugin_folders
-// rev 26's idiom).
-build_worn_layers() {
-    integer max_layers = llGetListLength(STRIPPABLE_LAYER_IDX);
+// Extract detachallthis:<path> entries from a Q4 response.
+list parse_detachallthis(string raw) {
+    list out = [];
+    if (raw == "") return out;
+    list parts = llParseString2List(raw, ["|"], []);
+    integer n = llGetListLength(parts);
+    string  prefix   = "detachallthis:";
+    integer prefix_n = llStringLength(prefix);
+    integer i = 0;
+    while (i < n) {
+        string p = llStringTrim(llList2String(parts, i), STRING_TRIM);
+        if (llSubStringIndex(p, prefix) == 0) {
+            string path = llGetSubString(p, prefix_n, -1);
+            if (path != "") out += [path];
+        }
+        i += 1;
+    }
+    return out;
+}
 
-    WornLayers = [];
-    if (max_layers > 0) {
-        list buf = [""];
-        while (llGetListLength(buf) < max_layers) buf = buf + buf;
-        WornLayers = llList2List(buf, 0, max_layers - 1);
+/* -------------------- BUILD WORN LISTS -------------------- */
+
+build_worn_layers() {
+    // RLV exposes no per-layer source-folder query — so when ANY folder
+    // lock is active we conservatively suppress all strippable layers,
+    // because we can't tell which layer is from a locked subtree.
+    // Wearer uses plugin_outfits Wear for layer changes in that case.
+    if (llGetListLength(LockedFolders) > 0) {
+        WornLayers = [];
+        return;
     }
 
+    integer max_layers = llGetListLength(STRIPPABLE_LAYER_IDX);
+    WornLayers = prealloc(max_layers);
     integer filled = 0;
-    string  layer_name;
-    integer skip_flag;
-
     integer layer_count = llStringLength(RawOutfit);
     integer i = 0;
     while (i < max_layers) {
         integer layer_idx = llList2Integer(STRIPPABLE_LAYER_IDX, i);
-        if (layer_idx < layer_count) {
-            if (llGetSubString(RawOutfit, layer_idx, layer_idx) == "1") {
-                layer_name = llList2String(LAYER_NAMES, layer_idx);
-                skip_flag = FALSE;
-                if (GlobalOutfitLocked) skip_flag = TRUE;
-                if (!skip_flag) {
-                    if (llListFindList(LockedLayers, [layer_name]) != -1) skip_flag = TRUE;
-                }
-                if (!skip_flag) {
-                    if (llListFindList(DiscoveredLocked, ["L:" + layer_name]) != -1) skip_flag = TRUE;
-                }
-                if (!skip_flag) {
-                    WornLayers = llListReplaceList(WornLayers, [layer_name], filled, filled);
-                    filled += 1;
-                }
+        if (layer_idx < layer_count
+            && llGetSubString(RawOutfit, layer_idx, layer_idx) == "1") {
+            string layer_name = llList2String(LAYER_NAMES, layer_idx);
+            integer skip = FALSE;
+            if (GlobalOutfitLocked) skip = TRUE;
+            if (!skip && llListFindList(LockedLayers, [layer_name]) != -1) skip = TRUE;
+            // DiscoveredLocked layers are NOT skipped — they appear in the
+            // picker with a " *" mark (see show_picker). Click still fires
+            // the strip; RLV silently fails; verify_attempted_strip is a
+            // no-op for already-discovered items.
+            if (!skip) {
+                WornLayers = llListReplaceList(WornLayers, [layer_name], filled, filled);
+                filled += 1;
             }
         }
         i += 1;
     }
-
     if (filled == 0)              WornLayers = [];
     else if (filled < max_layers) WornLayers = llList2List(WornLayers, 0, filled - 1);
 }
 
-// Attachments come from llGetAttachedList(llGetOwner()), which returns
-// the UUIDs of every attached object on the wearer. For each we read
-// OBJECT_NAME and OBJECT_ATTACHED_POINT, map the integer attach point
-// to its canonical RLV slot name (ATTACH_NAMES[pt]), filter out HUDs
-// (slots 31-38) and locked slots, and store the [slot_name, item_name]
-// pair. Synchronous — no RLV roundtrip needed. Bonus over @getattach:
-// we get real item names for the picker labels.
+// HUD attach points (31-38) skipped via the pt range check.
 build_worn_attach() {
     list attached = llGetAttachedList(llGetOwner());
     integer max_n = llGetListLength(attached);
     integer cap = max_n * 2;
-
-    WornAttach = [];
-    if (cap > 0) {
-        list buf = [""];
-        while (llGetListLength(buf) < cap) buf = buf + buf;
-        WornAttach = llList2List(buf, 0, cap - 1);
-    }
-
+    WornAttach = prealloc(cap);
     integer filled = 0;
     integer attach_names_n = llGetListLength(ATTACH_NAMES);
     integer i = 0;
     while (i < max_n) {
-        key obj_key = llList2Key(attached, i);
-        list details = llGetObjectDetails(obj_key, [OBJECT_NAME, OBJECT_ATTACHED_POINT]);
+        list details = llGetObjectDetails(llList2Key(attached, i),
+            [OBJECT_NAME, OBJECT_ATTACHED_POINT]);
         if (llGetListLength(details) >= 2) {
             string  item_name = llList2String(details, 0);
-            integer attach_pt = llList2Integer(details, 1);
-            if (attach_pt > 0
-                && attach_pt < attach_names_n
-                && llListFindList(HUD_IDX, [attach_pt]) == -1) {
-                string slot_name = llList2String(ATTACH_NAMES, attach_pt);
+            integer pt        = llList2Integer(details, 1);
+            if (pt > 0 && pt < attach_names_n && (pt < 31 || pt > 38)) {
+                string slot_name = llList2String(ATTACH_NAMES, pt);
                 if (slot_name != "") {
-                    integer skip_flag = FALSE;
-                    if (GlobalAttachLocked) skip_flag = TRUE;
-                    // NB: do NOT treat GlobalDetachLocked as a global
-                    // attachment lock. Per the RLV spec, a bare
-                    // @detach=n issued by an attached object locks
-                    // ONLY that object — not all attachments. Earlier
-                    // revs misread the @getstatusall:detach response
-                    // (which surfaces a bare "detach" token whenever
-                    // *any* object has @detach=n active) as a wearer-
-                    // wide lock, which hid every attachment whenever
-                    // plugin_lock set @detach=n on the collar (i.e.
-                    // always). Per-slot locks (@detach:<slot>=n) are
-                    // merged into LockedAttach by the QState=4 handler
-                    // and filtered just below. Folder-scoped
-                    // @detachallthis still catches items via the
-                    // post-strip verify pair.
-                    if (!skip_flag) {
-                        if (llListFindList(LockedAttach, [slot_name]) != -1) skip_flag = TRUE;
-                    }
-                    if (!skip_flag) {
-                        if (llListFindList(DiscoveredLocked, ["A:" + slot_name]) != -1) skip_flag = TRUE;
-                    }
-                    if (!skip_flag) {
+                    integer skip = FALSE;
+                    if (GlobalAttachLocked) skip = TRUE;
+                    if (!skip && llListFindList(LockedAttach, [slot_name]) != -1) skip = TRUE;
+                    // DiscoveredLocked items are NOT skipped — they appear
+                    // in the picker with a " *" mark (see show_picker).
+                    if (!skip) {
                         WornAttach = llListReplaceList(WornAttach,
                             [slot_name, item_name], filled, filled + 1);
                         filled += 2;
@@ -582,24 +440,83 @@ build_worn_attach() {
         }
         i += 1;
     }
-
     if (filled == 0)       WornAttach = [];
     else if (filled < cap) WornAttach = llList2List(WornAttach, 0, filled - 1);
 }
 
-// True if the named clothing layer is still occupied per the latest
-// @getoutfit response. Used by verify_attempted_strip.
-integer is_layer_still_worn(string layer_name) {
-    integer layer_idx = llListFindList(LAYER_NAMES, [layer_name]);
-    if (layer_idx == -1) return FALSE;
-    if (layer_idx >= llStringLength(RawOutfit)) return FALSE;
-    return (llGetSubString(RawOutfit, layer_idx, layer_idx) == "1");
+// Apply two drop rules to WornAttach:
+//   1. Empty @getpathnew response → DROP. This covers both items in
+//      dot-prefixed folders (incl. outfits/.base — RLV's folder API
+//      treats dot folders as disabled) AND items not under #RLV at
+//      all (HUDs, drag-attached, mesh body parts). Per the picker
+//      spec, neither category belongs in the UI.
+//   2. Any returned path falls under any LockedFolders entry → DROP.
+//      @getpathnew returns comma-separated paths when an item is
+//      linked into multiple #RLV folders, so we check each.
+filter_worn_attach_by_folder() {
+    if (llGetListLength(WornAttach) == 0) return;
+
+    integer lf_n = llGetListLength(LockedFolders);
+    list normalized_lf = [];
+    integer ln = 0;
+    while (ln < lf_n) {
+        normalized_lf += [normalize_path(llList2String(LockedFolders, ln))];
+        ln += 1;
+    }
+
+    list new_worn = [];
+    integer n = llGetListLength(WornAttach);
+    integer i = 0;
+    while (i < n) {
+        string slot = llList2String(WornAttach, i);
+        string item = llList2String(WornAttach, i + 1);
+        string raw_response = "";
+        integer pi = llListFindList(AttachPaths, [slot]);
+        if (pi != -1) raw_response = llList2String(AttachPaths, pi + 1);
+
+        integer drop = FALSE;
+        if (raw_response == "") {
+            // Rule 1: empty → DROP.
+            drop = TRUE;
+        } else {
+            // Rule 2: split comma-separated paths and check each.
+            // llCSV2List("") returns [""] not [] — guarded above so we
+            // only get here with non-empty input.
+            list raw_paths = llCSV2List(raw_response);
+            integer rp_n = llGetListLength(raw_paths);
+            integer rpi = 0;
+            while (rpi < rp_n && !drop) {
+                string single = normalize_path(llList2String(raw_paths, rpi));
+                if (single != "") {
+                    integer lj = 0;
+                    while (lj < lf_n) {
+                        string lf = llList2String(normalized_lf, lj);
+                        if (lf != "" && (single == lf || llSubStringIndex(single, lf + "/") == 0)) {
+                            drop = TRUE;
+                            lj = lf_n;
+                        } else {
+                            lj += 1;
+                        }
+                    }
+                }
+                rpi += 1;
+            }
+        }
+        if (!drop) new_worn += [slot, item];
+        i += 2;
+    }
+    WornAttach = new_worn;
 }
 
-// True if the named attachment slot is still occupied per a fresh
-// llGetAttachedList probe. The attachment side no longer relies on
-// the @getattach bit string (we dropped that query), so this is the
-// canonical check.
+/* -------------------- POST-STRIP VERIFY -------------------- */
+
+integer is_layer_still_worn(string layer_name) {
+    integer idx = llListFindList(LAYER_NAMES, [layer_name]);
+    if (idx == -1) return FALSE;
+    if (idx >= llStringLength(RawOutfit)) return FALSE;
+    return (llGetSubString(RawOutfit, idx, idx) == "1");
+}
+
 integer is_attach_slot_worn(string slot_name) {
     list attached = llGetAttachedList(llGetOwner());
     integer attach_names_n = llGetListLength(ATTACH_NAMES);
@@ -609,8 +526,8 @@ integer is_attach_slot_worn(string slot_name) {
         list det = llGetObjectDetails(llList2Key(attached, i), [OBJECT_ATTACHED_POINT]);
         if (llGetListLength(det) >= 1) {
             integer pt = llList2Integer(det, 0);
-            if (pt > 0 && pt < attach_names_n) {
-                if (llList2String(ATTACH_NAMES, pt) == slot_name) return TRUE;
+            if (pt > 0 && pt < attach_names_n && llList2String(ATTACH_NAMES, pt) == slot_name) {
+                return TRUE;
             }
         }
         i += 1;
@@ -618,13 +535,11 @@ integer is_attach_slot_worn(string slot_name) {
     return FALSE;
 }
 
-// After a strip attempt, re-queries land here before the builders run.
 // If the just-attempted item is still worn, the strip silently failed
-// (RLV blocked it, almost certainly via a parent-folder @detachallthis)
-// — record the slot/layer so subsequent renders omit it.
+// (most commonly a self-issued @detach=n that we can't pre-detect).
+// Record the slot/layer so subsequent renders omit it.
 verify_attempted_strip() {
     if (AttemptedItem == "") return;
-
     list parts = llParseString2List(AttemptedItem, [":"], []);
     if (llGetListLength(parts) != 2) {
         AttemptedItem = "";
@@ -643,28 +558,20 @@ verify_attempted_strip() {
         }
         llRegionSayTo(CurrentUser, 0, aname + " is locked — cannot strip.");
     }
-
     AttemptedItem = "";
 }
 
 /* -------------------- UI -------------------- */
 
-// Top-level category chooser. Shown when the RLV query completes from a
-// fresh menu entry (CurrentCategory == ""). User picks Layers or
-// Attachments to drill into a per-category picker; Back returns to the
-// root menu. Three-button layout — no nav prefix, no padding.
 show_category_menu() {
-    SessionId       = generate_session_id();
+    SessionId       = sid();
     CurrentCategory = "";
     PickPage        = 0;
     LastMaxPage     = 0;
 
-    integer n_layers = llGetListLength(WornLayers);
-    integer n_attach = llGetListLength(WornAttach) / 2;
-
     string body = "Strip menu\n\n";
-    body += "Layers:      " + (string)n_layers + " strippable\n";
-    body += "Attachments: " + (string)n_attach + " strippable\n\n";
+    body += "Layers:      " + (string)llGetListLength(WornLayers) + " strippable\n";
+    body += "Attachments: " + (string)(llGetListLength(WornAttach) / 2) + " strippable\n\n";
     body += "Choose category.";
 
     list button_data = [
@@ -684,75 +591,68 @@ show_category_menu() {
     ]), NULL_KEY);
 }
 
-// Paginated picker for layers ("L") or attachments ("A"). Body shows
-// "1. shirt" for layers and "1. <name> @<slot>" for attachments. Buttons
-// are plain numbers, slot-mapped via the project's bottom-nav
-// top-to-bottom L-R convention. Back returns to the category menu.
 show_picker(string category, integer page) {
     integer total;
     string  header;
     if (category == "L") {
         total  = llGetListLength(WornLayers);
         header = "Strip — Layers\n";
-    }
-    else {
+    } else {
         total  = llGetListLength(WornAttach) / 2;
         header = "Strip — Attachments\n";
     }
 
-    SessionId       = generate_session_id();
+    SessionId       = sid();
     CurrentCategory = category;
 
-    integer max_page;
-    if (total == 0) max_page = 0;
-    else            max_page = (total - 1) / PageSize;
+    // No action buttons; page_size = 9 (full content area).
+    integer action_count = 0;
+    integer page_size    = 9;
+
+    integer max_page = 0;
+    if (total > 0) max_page = (total - 1) / page_size;
     if (page < 0)        page = 0;
     if (page > max_page) page = max_page;
     PickPage    = page;
     LastMaxPage = max_page;
 
-    integer start_idx = page * PageSize;
-    integer end_idx   = start_idx + PageSize;
+    integer start_idx = page * page_size;
+    integer end_idx   = start_idx + page_size;
     if (end_idx > total) end_idx = total;
     integer count = end_idx - start_idx;
 
     string body = header;
     if (total == 0) {
         body += "\nNothing to strip.";
-    }
-    else {
-        body += "Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
+    } else {
+        body += "*=locked  Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
         integer k = 0;
         while (k < count) {
             integer item_idx = start_idx + k;
+            string mark = "";
             if (category == "L") {
-                body += (string)(k + 1) + ". "
-                    + llList2String(WornLayers, item_idx) + "\n";
-            }
-            else {
-                // 30-char cap on the item name keeps a 9-row body under
-                // llDialog's 512-char limit even with worst-case slot
-                // names ("right shoulder" = 14 chars) and the two-digit
-                // page header.
+                string layer_name = llList2String(WornLayers, item_idx);
+                if (llListFindList(DiscoveredLocked, ["L:" + layer_name]) != -1) mark = " *";
+                body += (string)(k + 1) + ". " + layer_name + mark + "\n";
+            } else {
                 string slot_name = llList2String(WornAttach, item_idx * 2);
-                string item_name = ellipsize(
-                    llList2String(WornAttach, item_idx * 2 + 1), 30);
-                body += (string)(k + 1) + ". " + item_name + " @" + slot_name + "\n";
+                string item_name = ellipsize(llList2String(WornAttach, item_idx * 2 + 1), 30);
+                if (llListFindList(DiscoveredLocked, ["A:" + slot_name]) != -1) mark = " *";
+                body += (string)(k + 1) + ". " + item_name + " @" + slot_name + mark + "\n";
             }
             k += 1;
         }
     }
 
-    list button_data = [
-        btn("<<",   "prev"),
-        btn(">>",   "next"),
-        btn("Back", "back")
-    ];
-
+    // Project dialog convention (canonical: plugin_animate):
+    //   slots 0-2 = nav (<<, >>, Back); slots 3-11 = content top→bottom.
+    list button_data = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
     integer pad_i;
     for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
 
-    integer total_buttons = 3 + count;
+    integer first_content_slot = 3 + action_count;
+    integer total_buttons      = first_content_slot + count;
+
     list target_slots = [];
     if (total_buttons > 9)  target_slots += [9];
     if (total_buttons > 10) target_slots += [10];
@@ -760,17 +660,16 @@ show_picker(string category, integer page) {
     if (total_buttons > 6)  target_slots += [6];
     if (total_buttons > 7)  target_slots += [7];
     if (total_buttons > 8)  target_slots += [8];
-    if (total_buttons > 3)  target_slots += [3];
-    if (total_buttons > 4)  target_slots += [4];
-    if (total_buttons > 5)  target_slots += [5];
+    if (first_content_slot <= 3 && total_buttons > 3) target_slots += [3];
+    if (first_content_slot <= 4 && total_buttons > 4) target_slots += [4];
+    if (first_content_slot <= 5 && total_buttons > 5) target_slots += [5];
 
     integer ci = 0;
     while (ci < count) {
-        integer slot     = llList2Integer(target_slots, ci);
-        integer item_idx = start_idx + ci;
+        integer slot = llList2Integer(target_slots, ci);
         button_data = llListReplaceList(
             button_data,
-            [btn((string)(ci + 1), "pick:" + (string)item_idx)],
+            [btn((string)(ci + 1), "pick:" + (string)(start_idx + ci))],
             slot, slot
         );
         ci += 1;
@@ -787,9 +686,6 @@ show_picker(string category, integer page) {
     ]), NULL_KEY);
 }
 
-// Strip the item at item_idx in the currently-active category.
-// CurrentCategory must be "L" (layers) or "A" (attachments) before
-// this is called — set by show_picker on entry.
 apply_pick(integer item_idx) {
     if (CurrentCategory == "L") {
         if (item_idx < 0 || item_idx >= llGetListLength(WornLayers)) return;
@@ -804,20 +700,13 @@ apply_pick(integer item_idx) {
         AttemptedItem = "A:" + slot_name;
         rlv_force("@remattach:" + slot_name + "=force");
     }
-    else {
-        return;
-    }
+    else return;
 
-    // Re-query so the picker reflects what RLV actually removed.
-    // CurrentCategory is preserved across begin_query so the post-
-    // requery render goes back to the same picker the user clicked from.
     begin_query();
 }
 
 /* -------------------- DIALOG HANDLER -------------------- */
 
-// Re-show the picker matching the current category. Used by paginate
-// and post-strip return paths so we don't repeat the if-ladder.
 show_current_picker(integer page) {
     if (CurrentCategory == "L" || CurrentCategory == "A") show_picker(CurrentCategory, page);
     else                                                  show_category_menu();
@@ -826,38 +715,19 @@ show_current_picker(integer page) {
 handle_dialog_response(string msg) {
     if (!json_has(msg, ["session_id"])) return;
     if (llJsonGetValue(msg, ["session_id"]) != SessionId) return;
-
-    key response_user = (key)llJsonGetValue(msg, ["user"]);
-    if (response_user != CurrentUser) return;
+    if ((key)llJsonGetValue(msg, ["user"]) != CurrentUser) return;
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
 
-    // Category-menu branch: CurrentCategory == "" means we just rendered
-    // the Layers/Attachments chooser. Layers/attach drill into the
-    // corresponding picker; Back exits to the root menu.
     if (CurrentCategory == "") {
-        if (ctx == "layers") {
-            show_picker("L", 0);
-            return;
-        }
-        if (ctx == "attach") {
-            show_picker("A", 0);
-            return;
-        }
-        if (ctx == "back") {
-            return_to_root();
-        }
+        if (ctx == "layers") { show_picker("L", 0); return; }
+        if (ctx == "attach") { show_picker("A", 0); return; }
+        if (ctx == "back")   return_to_root();
         return;
     }
 
-    // Picker branch: CurrentCategory == "L" or "A". Back returns to the
-    // category menu (one level up, not to root); paginate stays in the
-    // current picker; pick:<n> dispatches to apply_pick.
-    if (ctx == "back") {
-        show_category_menu();
-        return;
-    }
+    if (ctx == "back") { show_category_menu(); return; }
     if (ctx == "prev") {
         if (PickPage == 0) show_current_picker(LastMaxPage);
         else               show_current_picker(PickPage - 1);
@@ -869,8 +739,7 @@ handle_dialog_response(string msg) {
         return;
     }
     if (llSubStringIndex(ctx, "pick:") == 0) {
-        integer idx = (integer)llGetSubString(ctx, 5, -1);
-        apply_pick(idx);
+        apply_pick((integer)llGetSubString(ctx, 5, -1));
     }
 }
 
@@ -880,81 +749,98 @@ handle_dialog_timeout(string msg) {
     cleanup_session();
 }
 
-/* -------------------- RLV RESPONSE HANDLER -------------------- */
+/* -------------------- RLV RESPONSE -------------------- */
 
 handle_rlv_response(string message) {
     if (CurrentUser == NULL_KEY) return;
 
     if (QState == 1) {
-        // @getoutfit response — raw 0/1 bit string per clothing layer.
         RawOutfit = message;
         QState = 2;
         advance_query();
         return;
     }
     if (QState == 2) {
-        // @getstatusall:remoutfit response — layer locks.
-        list parsed_outfit = parse_status(message, "remoutfit");
-        if (llGetListLength(parsed_outfit) > 0) {
-            if (llList2String(parsed_outfit, 0) == "") {
-                GlobalOutfitLocked = TRUE;
-                parsed_outfit = llDeleteSubList(parsed_outfit, 0, 0);
-            }
+        list parsed = parse_status(message, "remoutfit");
+        if (llGetListLength(parsed) > 0 && llList2String(parsed, 0) == "") {
+            GlobalOutfitLocked = TRUE;
+            parsed = llDeleteSubList(parsed, 0, 0);
         }
-        LockedLayers = parsed_outfit;
+        LockedLayers = parsed;
         QState = 3;
         advance_query();
         return;
     }
     if (QState == 3) {
-        // @getstatusall:remattach response — attach-point locks under the
-        // remattach keyspace. Records them in LockedAttach (per-point)
-        // and GlobalAttachLocked (bare), then fires the detach-keyspace
-        // query so per-point @detach:<pt>=n and folder locks land too.
-        list parsed_attach = parse_status(message, "remattach");
-        if (llGetListLength(parsed_attach) > 0) {
-            if (llList2String(parsed_attach, 0) == "") {
-                GlobalAttachLocked = TRUE;
-                parsed_attach = llDeleteSubList(parsed_attach, 0, 0);
-            }
+        list parsed = parse_status(message, "remattach");
+        if (llGetListLength(parsed) > 0 && llList2String(parsed, 0) == "") {
+            GlobalAttachLocked = TRUE;
+            parsed = llDeleteSubList(parsed, 0, 0);
         }
-        LockedAttach = parsed_attach;
+        LockedAttach = parsed;
         QState = 4;
         advance_query();
         return;
     }
     if (QState == 4) {
-        // @getstatusall:detach response — bare @detach=n + per-point
-        // @detach:<pt>=n. The head marker promotes to GlobalDetachLocked;
-        // the rest merge into LockedAttach (which already holds the
-        // remattach-keyspace entries from QState=3). Folder-scoped
-        // @detachallthis is parsed as a per-point entry by parse_status
-        // ("detachallthis:<path>" doesn't start with "detach:" so it's
-        // simply not matched); items in those folders surface in the
-        // picker but the strip command silently fails on them and the
-        // verify_attempted_strip + DiscoveredLocked pair catches the
-        // failure on first click. On a fresh menu entry CurrentCategory
-        // is "" and the category chooser is shown; after a strip attempt
-        // CurrentCategory is preserved so we land back on the same picker.
-        list parsed_detach = parse_status(message, "detach");
-        if (llGetListLength(parsed_detach) > 0) {
-            if (llList2String(parsed_detach, 0) == "") {
-                GlobalDetachLocked = TRUE;
-                parsed_detach = llDeleteSubList(parsed_detach, 0, 0);
-            }
+        // Q4 detach response carries three concepts:
+        //   bare detach        — ignored (normal collar self-lock state)
+        //   detach:<slot>      — merged into LockedAttach (per-slot lock)
+        //   detachallthis:<p>  — LockedFolders (drives Q5 path sweep)
+        list parsed = parse_status(message, "detach");
+        if (llGetListLength(parsed) > 0 && llList2String(parsed, 0) == "") {
+            parsed = llDeleteSubList(parsed, 0, 0);
         }
         integer di = 0;
-        integer dn = llGetListLength(parsed_detach);
+        integer dn = llGetListLength(parsed);
         while (di < dn) {
-            string pt = llList2String(parsed_detach, di);
-            if (pt != "" && llListFindList(LockedAttach, [pt]) == -1) {
-                LockedAttach += [pt];
-            }
+            string pt = llList2String(parsed, di);
+            if (pt != "" && llListFindList(LockedAttach, [pt]) == -1) LockedAttach += [pt];
             di += 1;
         }
+        LockedFolders = parse_detachallthis(message);
+
         verify_attempted_strip();
         build_worn_layers();
         build_worn_attach();
+
+        // Q5 only when needed: skipped if no folder locks AND no worn
+        // attachments (no point querying paths with nothing to match).
+        // When folder locks ARE active we always sweep so we can apply
+        // both drop rules (empty path AND path-match).
+        if (llGetListLength(WornAttach) > 0
+            && (llGetListLength(LockedFolders) > 0 || llGetListLength(LockedFolders) == 0)) {
+            // The "always sweep when attachments exist" branch — even
+            // without folder locks we still need to drop empty-path
+            // items per the picker spec (Rule 1 in filter_worn_attach_by_folder).
+            QState = 5;
+            PathCheckIdx = 0;
+            llSetTimerEvent(RLV_TIMEOUT);
+            string first_slot = llList2String(WornAttach, 0);
+            rlv_force("@getpathnew:" + first_slot + "=" + (string)RLV_CHAN);
+            return;
+        }
+
+        QState = 0;
+        stop_rlv_listen();
+        show_current_picker(PickPage);
+        return;
+    }
+    if (QState == 5) {
+        integer pair_idx = PathCheckIdx * 2;
+        if (pair_idx < llGetListLength(WornAttach)) {
+            string slot = llList2String(WornAttach, pair_idx);
+            AttachPaths += [slot, message];
+        }
+        PathCheckIdx += 1;
+        integer next_idx = PathCheckIdx * 2;
+        if (next_idx < llGetListLength(WornAttach)) {
+            llSetTimerEvent(RLV_TIMEOUT);
+            string next_slot = llList2String(WornAttach, next_idx);
+            rlv_force("@getpathnew:" + next_slot + "=" + (string)RLV_CHAN);
+            return;
+        }
+        filter_worn_attach_by_folder();
         QState = 0;
         stop_rlv_listen();
         show_current_picker(PickPage);
@@ -968,7 +854,6 @@ default {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }
-
         cleanup_session();
         register_self();
     }
@@ -978,13 +863,10 @@ default {
     }
 
     changed(integer change) {
-        if (change & CHANGED_OWNER) {
-            llResetScript();
-        }
+        if (change & CHANGED_OWNER) llResetScript();
     }
 
     timer() {
-        // RLV query timed out — viewer is not RLV-enabled or not responding.
         stop_rlv_listen();
         if (CurrentUser != NULL_KEY) {
             llRegionSayTo(CurrentUser, 0, "RLV not responding. Is RLV mode enabled?");
@@ -993,11 +875,7 @@ default {
     }
 
     listen(integer channel, string name, key id, string message) {
-        if (channel == RLV_CHAN) {
-            if (id == llGetOwner()) {
-                handle_rlv_response(message);
-            }
-        }
+        if (channel == RLV_CHAN && id == llGetOwner()) handle_rlv_response(message);
     }
 
     link_message(integer sender, integer num, string msg, key id) {
@@ -1005,12 +883,8 @@ default {
         if (msg_type == JSON_INVALID) return;
 
         if (num == KERNEL_LIFECYCLE) {
-            if (msg_type == "kernel.register.refresh") {
-                register_self();
-            }
-            else if (msg_type == "kernel.ping") {
-                send_pong();
-            }
+            if (msg_type == "kernel.register.refresh") register_self();
+            else if (msg_type == "kernel.ping") send_pong();
             else if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
                 llLinksetDataDelete("plugin.reg." + PLUGIN_CONTEXT);
                 llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
@@ -1020,12 +894,10 @@ default {
         else if (num == UI_BUS) {
             if (msg_type == "ui.menu.start") {
                 if (llJsonGetValue(msg, ["acl"]) == JSON_INVALID) return;
-                string ctx = llJsonGetValue(msg, ["context"]);
-                if (ctx != PLUGIN_CONTEXT) return;
+                if (llJsonGetValue(msg, ["context"]) != PLUGIN_CONTEXT) return;
                 if (id == NULL_KEY) return;
 
                 integer start_acl = (integer)llJsonGetValue(msg, ["acl"]);
-
                 gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, start_acl);
                 if (!btn_allowed("Strip")) {
                     llRegionSayTo(id, 0, "Access denied.");
@@ -1036,9 +908,6 @@ default {
 
                 CurrentUser     = id;
                 UserAcl         = start_acl;
-                // Fresh menu entry: drop any drilled-in category from a
-                // previous session so the RLV completion lands on the
-                // category chooser, not whichever picker was last open.
                 CurrentCategory = "";
                 PickPage        = 0;
                 llRegionSayTo(CurrentUser, 0, "Reading worn items...");
@@ -1046,12 +915,8 @@ default {
             }
         }
         else if (num == DIALOG_BUS) {
-            if (msg_type == "ui.dialog.response") {
-                handle_dialog_response(msg);
-            }
-            else if (msg_type == "ui.dialog.timeout") {
-                handle_dialog_timeout(msg);
-            }
+            if (msg_type == "ui.dialog.response") handle_dialog_response(msg);
+            else if (msg_type == "ui.dialog.timeout") handle_dialog_timeout(msg);
         }
     }
 }
