@@ -2,11 +2,11 @@
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
 REVISION: 19
-PURPOSE: Browse #RLV/~outfits subfolders and act on them. Four actions
+PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
            Wear   — replace: detach worn unlocked items then attach
-                    the chosen folder. ~outfits/~base items are
+                    the chosen folder. outfits/.base items are
                     protected by this plugin's @detachallthis claim
                     and silently survive.
            Remove — detach this outfit's items
@@ -16,25 +16,22 @@ PURPOSE: Browse #RLV/~outfits subfolders and act on them. Four actions
                     the prior Lock + Unlock pair.)
          The picker also exposes a Help button that delivers the
          "D/s Collar outfits setup" notecard describing the expected
-         #RLV/~outfits/~base layout.
+         #RLV/outfits/.base layout.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
-             visibility. Subfolder enumeration via @getinv:~outfits on
-             every menu entry — no persisted manifest. Folder names
-             use a tilde prefix (orthodox-RLV convention, matches OC):
-             ~outfits is visible to all RLV enumeration commands, sorts
-             to the bottom of the inventory tree alphabetically, and
-             — crucially — its paths resolve under @getpath, so
-             plugin_strip can pre-filter locked items from its picker.
-             The ~base subfolder is hidden from THIS plugin's outfit
-             picker by a tilde-prefix skip in show_picker; it remains
-             visible to RLV otherwise. Lock state is
-             persistent via kmod_settings (KEY_LOCKED CSV in LSD),
-             mirroring the plugin_lock / plugin_folders pattern:
-             locks survive detach/reattach and script reset, and only
-             release when the wearer explicitly Unlocks or
-             factory-resets. apply_settings_sync diffs the in-memory
-             list against the LSD CSV on every state_entry and
-             settings.sync, releasing removed locks and (re-)applying
+             visibility. Subfolder enumeration via @getinv:outfits on
+             every menu entry — no persisted manifest. The protected
+             base subfolder uses a dot prefix (.base), which RLV's
+             folder API treats as a "disabled folder" — invisible to
+             @getinv, @getpath, and @getinvworn — so it can't be
+             enumerated or picker-listed by plugin_strip. Items still
+             attach normally from there; the @detachallthis lock blocks
+             stripping. Lock state is persistent via kmod_settings
+             (KEY_LOCKED CSV in LSD), mirroring the plugin_lock /
+             plugin_folders pattern: locks survive detach/reattach and
+             script reset, and only release when the wearer explicitly
+             Unlocks or factory-resets. apply_settings_sync diffs the
+             in-memory list against the LSD CSV on every state_entry
+             and settings.sync, releasing removed locks and (re-)applying
              current ones. Factory reset releases viewer-side
              restrictions via direct llOwnerSay (release_persisted_locks)
              before llResetScript, so they don't orphan if kmod_rlv
@@ -44,9 +41,14 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              refcount-coordinated with any other plugin claiming the
              same behav. Per-action ACL gating mirrors plugin_folders:
              ACL 1/2 get Add/Wear/Remove; ACL 3/4/5 also get
-             Lock/Unlock. plugin_strip detects locked items live via
-             @getstatusall:detach + @getpath at picker render time;
-             this plugin does NOT maintain a shadow lock vector.
+             Lock/Unlock. plugin_strip enumerates worn items via
+             llGetAttachedList + @getoutfit and filters per-slot locks
+             at build time; folder-scoped locks (incl. our
+             outfits/.base claim) block @remattach / @remoutfit at
+             force time, and plugin_strip's verify_attempted_strip →
+             DiscoveredLocked pair catches the silent fail on first
+             click and hides those items for the rest of the session.
+             No shared shadow lock vector between plugins.
 CHANGES:
 - v1.10 rev 19: Defensive cleanup of stale @detachallthis claims at scan
   time. Legacy paths "outfits/base" (rev 22 paradigm) and "outfits/~base"
@@ -190,8 +192,8 @@ integer LastMaxPage = 0;
 // is ACL-gated. ACL 1 (no Disable): action_count=1 → page_size=8. ACL 2+:
 // action_count=2 → page_size=7. LastMaxPage stashed for prev/next wrap.
 
-// Default OFF so fresh wearers can build #RLV/~outfits/~base without
-// fighting a ~base lock. LastActive = -1 forces first sync to emit.
+// Default OFF so fresh wearers can build #RLV/outfits/.base without
+// fighting a .base lock. LastActive = -1 forces first sync to emit.
 integer OutfitsActive = 0;
 integer LastActive    = -1;
 
@@ -586,8 +588,8 @@ apply_add(string outfit_name) {
     llRegionSayTo(CurrentUser, 0, "Adding: " + outfit_name);
 }
 
-// Three-phase strip (~outfits subtree, then attachments, then layers) then
-// attach. All three strip phases respect existing locks (~base survives).
+// Three-phase strip (outfits subtree, then attachments, then layers) then
+// attach. All three strip phases respect existing locks (.base survives).
 apply_wear(string outfit_name) {
     rlv_force("@detachallthis:" + OUTFITS_ROOT + "=force");
     rlv_force("@remattach=force");
@@ -724,11 +726,12 @@ handle_rlv_response(string message) {
     if (CurrentUser == NULL_KEY) return;
     if (MenuContext != "scanning") return;
 
-    // @getinv only hides dot-prefixed; we skip both dot- and tilde-prefixed
-    // so ~base stays out of the picker. Also detect base/~base in the scan
-    // — if either is visible, the wearer is on a non-canonical paradigm
-    // (current convention is dot-prefixed .base) and our .base lock has
-    // nothing to apply to.
+    // @getinv hides dot-prefixed entries on its own (so .base never
+    // appears here); we additionally skip tilde-prefixed entries to
+    // keep legacy ~base layouts off the picker. Also detect "base" /
+    // "~base" in the scan — if either is visible, the wearer is on a
+    // non-canonical paradigm (current convention is dot-prefixed .base)
+    // and our .base lock has nothing to apply to.
     Outfits = [];
     integer has_alt_base = FALSE;
     if (message != "") {

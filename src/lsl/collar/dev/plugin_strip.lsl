@@ -1,31 +1,36 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Available to every ACL level (public / owned wearer / trustee /
          self-owned wearer / primary owner). Items worn from
-         #RLV/.outfits/.base are protected against strip whenever
+         #RLV/outfits/.base are protected against strip whenever
          plugin_outfits is in its active state (its @detachallthis lock
-         on .outfits/.base blocks the strip command at force time).
-         Pairs with plugin_outfits (#RLV/.outfits/ as the outfits library;
+         on outfits/.base blocks the strip command at force time).
+         Pairs with plugin_outfits (#RLV/outfits/ as the outfits library;
          the .base subfolder is the protected "non-strippable" set).
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              visibility. Enumerates worn items live via @getoutfit +
              llGetAttachedList; reads lock state via @getstatusall on
              three keyspaces (remoutfit, remattach, detach). Per-slot
              locks filter at build time; folder-scoped locks (e.g.
-             @detachallthis:.outfits/.base) block the strip itself but
+             @detachallthis:outfits/.base) block the strip itself but
              cannot be pre-filtered — RLV's @getpath ignores
-             dot-prefixed folders, and the entire .outfits/.base subtree
+             dot-prefixed folders, and the entire outfits/.base subtree
              is invisible to path resolution. Items in such folders
              appear in the picker on first session entry; the
              verify_attempted_strip → DiscoveredLocked discovery pair
              catches them on the first click and hides them for the
              rest of the session. No @detachallthis claim is issued
-             here — plugin_outfits owns the .outfits/.base lock (it
+             here — plugin_outfits owns the outfits/.base lock (it
              needs to be releasable via the outfits on/off toggle).
 CHANGES:
+- v1.10 rev 15: Align path references in PURPOSE/ARCHITECTURE to
+  plugin_outfits's current convention: outfits/.base (plain "outfits"
+  parent, dot-prefixed ".base" subfolder). Historical CHANGES entries
+  below reference the older ".outfits/.base" convention from earlier
+  paradigms and are left as-is. No code change.
 - v1.10 rev 14: Fix "no attachments visible" — two distinct bugs. (a) Rev 10's GlobalDetachLocked filter in build_worn_attach was based on a wrong reading of the RLV spec: bare @detach=n locks ONLY the object that issued it (the collar), not all attachments, but the filter was hiding every attached item whenever plugin_lock was locked (which is the default state). Drop the GlobalDetachLocked skip; per-slot @detach:<slot>=n locks still filter via LockedAttach. (b) ATTACH_NAMES stopped at index 40, so anything attached to a Bento mesh point (LHAND_RING1=41 through HIND_RFOOT=55) failed the attach_pt < attach_names_n bounds check and never appeared. Extend to 56 entries covering all current LSL ATTACH_* constants.
 - v1.10 rev 13: Drop the @detachallthis:.outfits/.base claim from
   register_self — plugin_outfits rev 9 now owns the .base lock so it
@@ -212,7 +217,7 @@ string  SessionId      = "";
 //       itself (RLV honors them against @remattach:<pt>=force), but
 //       pre-filtering by folder is impossible because @getpath omits
 //       dot-prefixed paths and our convention puts the protected
-//       subtree under #RLV/.outfits/.base. Such items are caught on
+//       subtree under #RLV/outfits/.base. Such items are caught on
 //       first strip attempt by verify_attempted_strip and hidden via
 //       DiscoveredLocked for the rest of the session.
 //   0 = idle (results assembled, category menu rendered)
@@ -310,7 +315,7 @@ write_plugin_reg(string label) {
 register_self() {
     // Open policy: every ACL level sees Strip. The wearer's core
     // attachments are protected by plugin_outfits's @detachallthis:
-    // .outfits/.base claim (when its toggle is on), so wearer access
+    // outfits/.base claim (when its toggle is on), so wearer access
     // here only exposes strippable items — the strip command silently
     // no-ops on locked items.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
