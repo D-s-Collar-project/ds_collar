@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 24
+REVISION: 25
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
          multi-step flows (Pass/Offer/Coffle, Post) to hidden sub-plugins.
@@ -13,6 +13,7 @@ ARCHITECTURE: Renderer for the leash module. Picker flows now live in
               subpath; the sub-plugin returns to us via ui.menu.start
               with our context.
 CHANGES:
+- v1.1 rev 25: Enhanced mode now applies its RLV restrictions LOCALLY (like plugin_lock's @detach toggle) instead of round-tripping through kmod_leash_engine. Clicking the toggle flips EnhancedMode in-script and issues @sittp,tploc,tplm,tplure=n (on) / =y (off) directly via llOwnerSay; no plugin.leash.action is sent and the engine "enhanced" broadcast field is no longer read. Was non-functional because the engine path required engine rev 34's toggle_enhanced handler. Toggle button relabeled "Enhance: Y" / "Enhance: N" (was "Enhanced: On/Off"); settings body reads "Enhanced mode: Enabled|Disabled" (was "Enhanced: 0|1"). NOTE: in-memory only this pass — not persisted across relog (RLV clears on relog anyway); full plugin_lock-style persistence + retiring the engine's now-dormant enhanced subsystem is a planned follow-up. Texture routing (chain/silk/invisible) unchanged and confirmed working via button_data context. Settings body also relabels the Turn line: "Turn to face: 0|1" -> "Turn to leasher: Enabled|Disabled" (button stays "Turn: On/Off"); the toggle still routes to the engine, which owns the @setrot follow-rotation.
 - v1.1 rev 24: Settings menu surfaces Enhanced (ACL 3+ only) and the texture sub-menu gains Invisible. Enhanced button reflects the engine's persisted EnhancedMode (synced via new "enhanced" field on plugin.leash.state); click sends toggle_enhanced through the standard plugin.leash.action path. Texture menu now offers Chain / Silk / Invisible; settings body labels the current selection accordingly.
 - v1.1 rev 23: Expose Coffle to ACL 1 (public). Previous policy listed
   Coffle for ACL 3/4/5 only; public touchers can now coffle the wearer
@@ -113,7 +114,7 @@ key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
 string LeashTexture = "chain"; // "chain" / "silk" / "invisible"
-integer EnhancedMode = FALSE;  // ACL 3+ wearer-side toggle (engine-owned state)
+integer EnhancedMode = FALSE;  // ACL 3+ toggle, applied locally (see apply_enhanced_restrictions)
 integer LeashMode = 0;       // 0=avatar, 1=coffle, 2=post
 key LeashTarget = NULL_KEY;  // Target for coffle/post
 
@@ -341,19 +342,24 @@ showSettingsMenu() {
     // the same floor on the action; this just hides the button for
     // lower ACLs so they don't get a deny notice.
     if (UserAcl >= 3) {
-        if (EnhancedMode) item_buttons += [btn("Enhanced: On",  "toggle_enhanced")];
-        else              item_buttons += [btn("Enhanced: Off", "toggle_enhanced")];
+        if (EnhancedMode) item_buttons += [btn("Enhance: Y", "toggle_enhanced")];
+        else              item_buttons += [btn("Enhance: N", "toggle_enhanced")];
     }
 
     string texture_label = "Chain";
     if      (LeashTexture == "silk")      texture_label = "Silk";
     else if (LeashTexture == "invisible") texture_label = "Invisible";
 
+    string turn_state = "Disabled";
+    if (TurnToFace) turn_state = "Enabled";
+
     string body = "Leash Settings\nLength: " + (string)LeashLength
-                + "m\nTurn to face: " + (string)TurnToFace
+                + "m\nTurn to leasher: " + turn_state
                 + "\nTexture: " + texture_label;
     if (UserAcl >= 3) {
-        body += "\nEnhanced: " + (string)EnhancedMode;
+        string enh_state = "Disabled";
+        if (EnhancedMode) enh_state = "Enabled";
+        body += "\nEnhanced mode: " + enh_state;
     }
     list button_data = reorder_item_buttons(nav_buttons, item_buttons);
     showMenu("settings", "Settings", body, button_data);
@@ -451,6 +457,14 @@ sendLeashAction(string action) {
         "type", "plugin.leash.action",
         "action", action
     ]), CurrentUser);
+}
+
+// Enhanced mode is applied LOCALLY here, like plugin_lock's @detach toggle —
+// no leash-engine round-trip. When on, issue the TP/sit lockdown; when off,
+// lift it. ACL >= 3 is enforced at the call site (button only shown to 3+).
+apply_enhanced_restrictions() {
+    if (EnhancedMode) llOwnerSay("@sittp=n,tploc=n,tplm=n,tplure=n");
+    else              llOwnerSay("@sittp=y,tploc=y,tplm=y,tplure=y");
 }
 
 sendLeashActionWithTarget(string action, key target) {
@@ -585,8 +599,12 @@ handleButtonClick(string ctx) {
             scheduleStateQuery("settings");
         }
         else if (ctx == "toggle_enhanced") {
-            sendLeashAction("toggle_enhanced");
-            scheduleStateQuery("settings");
+            // Local toggle — flip, apply RLV directly, redraw. No engine.
+            if (UserAcl >= 3) {
+                EnhancedMode = !EnhancedMode;
+                apply_enhanced_restrictions();
+            }
+            showSettingsMenu();
         }
         else if (ctx == "texture") {
             showTextureMenu();
@@ -760,8 +778,8 @@ default
                 if (tmp != JSON_INVALID) TurnToFace = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["texture"]);
                 if (tmp != JSON_INVALID) LeashTexture = tmp;
-                tmp = llJsonGetValue(msg, ["enhanced"]);
-                if (tmp != JSON_INVALID) EnhancedMode = (integer)tmp;
+                // EnhancedMode is now owned locally (applied like plugin_lock),
+                // so we intentionally do NOT read it from the engine broadcast.
                 tmp = llJsonGetValue(msg, ["mode"]);
                 if (tmp != JSON_INVALID) LeashMode = (integer)tmp;
                 tmp = llJsonGetValue(msg, ["target"]);

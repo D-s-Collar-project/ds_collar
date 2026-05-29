@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl
 VERSION: 1.10
-REVISION: 34
+REVISION: 35
 PURPOSE: Leashing engine — state, ACL, claim/release/pass/yank, follow
          mechanics, settings persistence, broadcasts. Holder-discovery
          handshake protocol lives in sibling kmod_leash_proto.lsl.
@@ -11,6 +11,7 @@ ARCHITECTURE: Engine + sibling proto. Engine owns leash state and the
               machine. IPC reuses SETTINGS_BUS so no new bus number is
               consumed (proto filters on type prefix "leash.proto.*").
 CHANGES:
+- v1.1 rev 35: Remove the enhanced-mode subsystem — it now lives in plugin_leash (rev 25), applied locally like plugin_lock with no engine round-trip. Deleted: EnhancedMode / EnhancedActive / LeasherAcl / AuthorizedLmControllerAcl globals, KEY_LEASH_ENHANCED, applyEnhancedRestrictions / clearEnhancedRestrictions / toggleEnhancedInternal, the toggle_enhanced ACL branch, the "enhanced" broadcast field, and the applySettingsSync read. setLeashState drops its 5th param (leasher_acl) and passLeashInternal its 2nd (new_leasher_acl) — both existed only to feed enhanced; callers (claimLeash, handleLmGrabbed, pass_target_check) updated. claimLeash keeps its own acl_level (still gates take-over). The "invisible" texture whitelist added in rev 34 stays.
 - v1.1 rev 34: Add enhanced mode (persisted wearer toggle) + "invisible" texture style. Enhanced issues @sittp,tploc,tplm,tplure=n on every connect path when EnhancedMode is on AND leasher ACL >= 3; cleared inside clearLeashState (unleash / offsim auto-release / wearer-detach / region-change / Runaway / factory reset). Restrictions follow the leash, not the leasher's presence — post-only mode (avatar offline, holder present) keeps them active. Toggle gated to ACL >= 3 in handleAclResult (hard floor, not policy-driven). LeasherAcl is captured at setLeashState (new 5th param); passes thread the target's ACL from pass_target_check; LM grab reuses cached AuthorizedLmControllerAcl to avoid a second auth round-trip. broadcastState now exposes enhanced for the UI. Texture whitelist (applySettingsSync + setTextureInternal) accepts "invisible".
 - v1.1 rev 33: Strip the temporary DEBUG_LEASH scaffolding (constant +
   logd helper + every logd call site) added during the avatar-center
@@ -229,7 +230,6 @@ string KEY_LEASHER = "leash.leasherkey";
 string KEY_LEASH_LENGTH = "leash.length";
 string KEY_LEASH_TURNTO = "leash.turnto";
 string KEY_LEASH_TEXTURE = "leash.texture";
-string KEY_LEASH_ENHANCED = "leash.enhanced";
 
 /* -------------------- STATE -------------------- */
 
@@ -241,16 +241,6 @@ integer TurnToFace = FALSE;
 string LeashTexture = "chain";    // Particle style — "chain" / "silk" / "invisible"
 key FollowTarget = NULL_KEY;       // Who/what the wearer follows physically
 integer FollowIsAvatar = TRUE;     // TRUE → avatar (RLV @follow + attachment validation); FALSE → object (root validation)
-
-// Enhanced mode — persisted wearer setting; when ON and the active leasher
-// holds ACL >= 3 at connect time, the engine issues @sittp,tploc,tplm,tplure=n
-// for the duration of the leash. Cleared on every release path inside
-// clearLeashState. Runtime activation tracked by EnhancedActive (idempotence
-// guard + state for clear path). LeasherAcl is captured at setLeashState and
-// used by applyEnhancedRestrictions; it is in-memory only and not persisted.
-integer EnhancedMode = FALSE;
-integer EnhancedActive = FALSE;
-integer LeasherAcl = 0;
 
 // Original claim mode (MODE_AVATAR / MODE_COFFLE / MODE_POST). Set in
 // setLeashState from the action the user actually clicked, persisted
@@ -303,10 +293,6 @@ integer PendingIsOffer = FALSE;          // TRUE if this is an offer, not a pass
 
 // Lockmeister authorization
 key AuthorizedLmController = NULL_KEY;
-// Cached ACL of AuthorizedLmController so handleLmGrabbed can pass it to
-// setLeashState (LM grab fires asynchronously to the original claim, and
-// auth queries are async — caching avoids a second round trip).
-integer AuthorizedLmControllerAcl = 0;
 
 // Yank rate limiting
 integer LastYankTime = 0;
@@ -417,8 +403,6 @@ applySettingsSync() {
     if (tmp != "") TurnToFace = (integer)tmp;
     tmp = llLinksetDataRead(KEY_LEASH_TEXTURE);
     if (tmp == "chain" || tmp == "silk" || tmp == "invisible") LeashTexture = tmp;
-    tmp = llLinksetDataRead(KEY_LEASH_ENHANCED);
-    if (tmp != "") EnhancedMode = (integer)tmp;
 
     // FollowTarget / FollowIsAvatar / LeashClaimMode aren't persisted
     // — mode survives only in-memory; coffle/post sessions don't
@@ -437,37 +421,6 @@ applySettingsSync() {
         FollowTarget = Leasher;
         FollowIsAvatar = TRUE;
     }
-}
-
-/* -------------------- ENHANCED MODE -------------------- */
-// Restrictions follow the leash: applied on every connect path (re-evaluated
-// against the current leasher's ACL), cleared inside clearLeashState. The
-// ACL >= 3 floor is a hard rule from the wearer-facing spec, not a policy
-// lookup — a low-ACL leasher who grabs a leash on an enhanced-toggled collar
-// gets a non-restrictive leash. EnhancedActive is the idempotence + clear
-// guard; toggling EnhancedMode mid-session applies/clears live.
-applyEnhancedRestrictions() {
-    if (EnhancedActive) return;
-    if (!EnhancedMode) return;
-    if (LeasherAcl < 3) return;
-    llOwnerSay("@sittp=n,tploc=n,tplm=n,tplure=n");
-    EnhancedActive = TRUE;
-}
-
-clearEnhancedRestrictions() {
-    if (!EnhancedActive) return;
-    llOwnerSay("@sittp=y,tploc=y,tplm=y,tplure=y");
-    EnhancedActive = FALSE;
-}
-
-toggleEnhancedInternal() {
-    EnhancedMode = !EnhancedMode;
-    persistSetting(KEY_LEASH_ENHANCED, (string)EnhancedMode);
-    if (Leashed) {
-        if (EnhancedMode) applyEnhancedRestrictions();
-        else              clearEnhancedRestrictions();
-    }
-    broadcastState();
 }
 
 /* -------------------- STATE MANAGEMENT -------------------- */
@@ -492,40 +445,27 @@ integer clampLeashLength(integer len) {
 // restart (per applySettingsSync's documented fallback), so
 // persisting the tag would only protect a session that's already
 // collapsing into avatar/grab semantics anyway.
-setLeashState(key user, key follow_target, integer follow_is_avatar, integer claim_mode, integer leasher_acl) {
+setLeashState(key user, key follow_target, integer follow_is_avatar, integer claim_mode) {
     Leashed = TRUE;
     Leasher = user;
     LastLeasher = user;
     FollowTarget = follow_target;
     FollowIsAvatar = follow_is_avatar;
     LeashClaimMode = claim_mode;
-    LeasherAcl = leasher_acl;
     persistLeashState(TRUE, user);
-    // Re-evaluate enhanced restrictions for the new leasher. Clear any
-    // stale ones first so a low-ACL leasher inheriting via pass doesn't
-    // keep the previous leasher's restrictions live.
-    clearEnhancedRestrictions();
-    applyEnhancedRestrictions();
     broadcastState();
 }
 
 // Clear all leash state (used by release and auto-release)
 clearLeashState(integer clear_reclip) {
-    // Lift enhanced restrictions BEFORE we wipe LeasherAcl — the helper
-    // is guarded by EnhancedActive (idempotent), so issuing @...=y unconditionally
-    // here is safe across every release path: unleash, offsim auto-release,
-    // wearer-detach (state_entry on attach), region-change, Runaway, factory reset.
-    clearEnhancedRestrictions();
     Leashed = FALSE;
     Leasher = NULL_KEY;
-    LeasherAcl = 0;
     FollowTarget = NULL_KEY;
     FollowIsAvatar = TRUE;
     LeashClaimMode = 0;
     persistLeashState(FALSE, NULL_KEY);
     HolderTarget = NULL_KEY;
     AuthorizedLmController = NULL_KEY;
-    AuthorizedLmControllerAcl = 0;
     sendProtoShutdown();
 
     if (clear_reclip) clearReclipState();
@@ -671,13 +611,11 @@ handleAclResult(string msg) {
     else if (PendingAction == "pass_target_check") {
         if (acl_level >= 1) {
             // Offer sends message to plugin for dialog, pass directly transfers.
-            // acl_level is the incoming leasher's ACL — thread it into
-            // passLeashInternal so enhanced restrictions re-evaluate for them.
             if (PendingIsOffer) {
                 sendOfferPending(PendingPassTarget, PendingPassOriginalUser);
             }
             else {
-                passLeashInternal(PendingPassTarget, acl_level);
+                passLeashInternal(PendingPassTarget);
             }
         } else {
             string action_name = "pass";
@@ -718,14 +656,8 @@ handleAclResult(string msg) {
         if (policy_allows(POL_SETTINGS, acl_level)) setTextureInternal((string)PendingPassTarget);
         else denyAccess(PendingActionUser, "insufficient permissions");
     }
-    // Hard ACL >= 3 floor (trustees/owners) per the wearer-facing spec —
-    // intentionally not policy-driven. The toggle itself persists, but a
-    // low-ACL leasher will get a non-restrictive leash because
-    // applyEnhancedRestrictions also gates on LeasherAcl >= 3.
-    else if (PendingAction == "toggle_enhanced") {
-        if (acl_level >= 3) toggleEnhancedInternal();
-        else denyAccess(PendingActionUser, "enhanced mode requires ACL 3+");
-    }
+    // Enhanced mode is applied locally by plugin_leash now — the engine has
+    // no toggle_enhanced handler; an unknown action just falls through here.
 
     clearPendingAction();
 }
@@ -975,7 +907,6 @@ broadcastState() {
         "length", LeashLength,
         "turnto", TurnToFace,
         "texture", LeashTexture,
-        "enhanced", EnhancedMode,
         "mode", mode_out,
         "target", (string)target_out
     ]);
@@ -1099,13 +1030,12 @@ claimLeash(key user, integer mode, key target_key, integer acl_level) {
     // Common claim sequence. Tag claim mode so sendProtoStart can emit
     // the right wire mode (the user's action intent is otherwise lost
     // once state collapses to (Leasher, FollowTarget, FollowIsAvatar)).
-    setLeashState(user, follow_target, follow_is_avatar, mode, acl_level);
+    setLeashState(user, follow_target, follow_is_avatar, mode);
     sendProtoStart(user);
     // LM authorization only when wearer follows the controller (regular
     // leash). Coffle and post don't enable LM.
     if (follow_target == user && follow_is_avatar) {
         AuthorizedLmController = user;
-        AuthorizedLmControllerAcl = acl_level;
         setLockmeisterState(TRUE, user);
     }
     startFollow();
@@ -1131,23 +1061,20 @@ releaseLeashInternal(key user) {
     llRegionSayTo(user, 0, "Leash released");
 }
 
-passLeashInternal(key new_leasher, integer new_leasher_acl) {
+passLeashInternal(key new_leasher) {
     if (!Leashed) return;
 
     key old_leasher = Leasher;
 
     // Reset to avatar mode (if was in coffle/post, revert to standard
     // leashing). Pass = full transfer of both controller and follow target.
-    // new_leasher_acl is captured at pass_target_check so enhanced
-    // restrictions re-evaluate against the incoming leasher's ACL.
-    setLeashState(new_leasher, new_leasher, TRUE, MODE_AVATAR, new_leasher_acl);
+    setLeashState(new_leasher, new_leasher, TRUE, MODE_AVATAR);
 
     // Start holder handshake for new leasher
     sendProtoStart(new_leasher);
 
     // Update Lockmeister authorization
     AuthorizedLmController = new_leasher;
-    AuthorizedLmControllerAcl = new_leasher_acl;
     setLockmeisterState(TRUE, new_leasher);
 
     // Re-issue RLV @follow against the new leasher. setLeashState updates
@@ -1191,12 +1118,10 @@ yankToLeasher() {
 // Lockmeister grab notification from particles module. LM is avatar-only,
 // so accepting a controller flips us into MODE_AVATAR with that controller
 // as the new leasher. Authorization is verified in the link_message handler
-// before this is called. The controller's ACL was captured at the original
-// claim (AuthorizedLmControllerAcl) so enhanced restrictions re-evaluate
-// without an extra async auth round-trip.
+// before this is called.
 handleLmGrabbed(key controller) {
     if (Leashed) return;
-    setLeashState(controller, controller, TRUE, MODE_AVATAR, AuthorizedLmControllerAcl);
+    setLeashState(controller, controller, TRUE, MODE_AVATAR);
     startFollow();
     llRegionSayTo(llGetOwner(), 0, "Leashed by " + llKey2Name(controller) + " (Lockmeister)");
 }
