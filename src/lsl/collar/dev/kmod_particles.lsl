@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 18
+REVISION: 19
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.1 rev 19: "invisible" style now emits NO particles instead of rendering a transparent-texture stream. render_leash_particles short-circuits invisible (and NULL target) to llLinkParticleSystem([]) and drops INVISIBLE_TEXTURE entirely. The leash tether (RLV @follow + llMoveToTarget length enforcement) lives in kmod_leash_engine and is independent of this module, so an invisible leash still follows/yanks/limits/turns exactly like chain/silk — it just draws nothing. Removes the library-asset-fetch + blend-mode fragility of the transparent-texture approach (SL's default particle blend shows a texture's RGB unless it is truly alpha-0 in every viewer). The holder handshake is unaffected, so leasher-side OC/LM "grabbed" feedback still fires.
 - v1.1 rev 18: Add INVISIBLE_TEXTURE (fully-transparent library texture) as a third ParticleStyle. render_leash_particles routes "invisible" to that UUID; particle system still emits (FOLLOW_SRC + TARGET_POS keep tethering math live), just renders nothing. Picked over alpha=0 to avoid any residual ribbon/sprite trail artifacts at very small alpha thresholds.
 - v1.1 rev 17: Add SILK_TEXTURE alongside CHAIN_TEXTURE; render_leash_particles (renamed from render_chain_particles) now picks the texture from ParticleStyle ("chain" / "silk", default "chain"). handle_particles_start parses the requested style up-front so the idempotence guard can detect a style change and re-render on chain↔silk swap. All other particle knobs remain shared across styles.
 - v1.1 rev 16: Swap CHAIN_*_SCALE X/Y. FOLLOW_VELOCITY aligns the
@@ -113,10 +114,10 @@ integer LM_PING_INTERVAL = 8;  // Ping every 8 seconds
 // Texture is style-selected at render time (CHAIN_TEXTURE / SILK_TEXTURE);
 // all other knobs are shared. If a future style needs different scale /
 // accel / age, fork the relevant constant into a per-style pair and
-// branch in render_leash_particles.
+// branch in render_leash_particles. The "invisible" style draws no
+// particles at all (handled in render_leash_particles), so it has no texture.
 string   CHAIN_TEXTURE     = "ebe48305-8955-2b27-7656-3c39cee2cc1b";
 string   SILK_TEXTURE      = "78ce70e9-b10d-3650-a54c-aca6bdc9cddb";
-string   INVISIBLE_TEXTURE = "8dcd4a48-2d37-4909-9f78-f7a9eb4ef903";
 float    CHAIN_BURST_RATE  = 0.02;                  // ~50 sprites/sec
 integer  CHAIN_PART_COUNT  = 1;
 float    CHAIN_MAX_AGE     = 2.0;                   // travel time src->target
@@ -315,8 +316,15 @@ render_leash_particles(key target) {
         LeashpointLink = find_leashpoint_link();
     }
 
-    if (target == NULL_KEY) {
-        // Clear particles
+    // No target, OR the "invisible" style: emit nothing. The leash's tether
+    // (RLV @follow + llMoveToTarget length enforcement) lives entirely in
+    // kmod_leash_engine and is independent of this particle stream, so an
+    // invisible leash still follows/yanks/limits exactly like a visible one —
+    // it just draws no particles. This is cheaper and more reliable than a
+    // transparent-texture particle (no library-asset fetch, no blend-mode
+    // edge cases: SL's default particle blend shows a texture's RGB unless it
+    // is truly alpha-0 in every viewer).
+    if (target == NULL_KEY || ParticleStyle == "invisible") {
         llLinkParticleSystem(LeashpointLink, []);
         ParticlesActive = FALSE;
         return;
@@ -324,11 +332,8 @@ render_leash_particles(key target) {
 
     // Pick the texture for the current style. Unknown styles fall back
     // to chain so a stale settings value doesn't blank the leash visual.
-    // "invisible" uses a fully-transparent library texture so the particle
-    // system still emits (tethering math stays live) but renders nothing.
     string texture = CHAIN_TEXTURE;
-    if (ParticleStyle == "silk")           texture = SILK_TEXTURE;
-    else if (ParticleStyle == "invisible") texture = INVISIBLE_TEXTURE;
+    if (ParticleStyle == "silk") texture = SILK_TEXTURE;
 
     llLinkParticleSystem(LeashpointLink, [
         PSYS_SRC_PATTERN, PSYS_SRC_PATTERN_DROP,
@@ -408,7 +413,11 @@ handle_particles_start(string msg) {
     ParticleStyle = new_style;
 
     render_leash_particles(TargetKey);
-    llSetTimerEvent(PARTICLE_UPDATE_RATE);
+    // The invisible style renders nothing (ParticlesActive stays FALSE), so
+    // there's no stream to validate each tick — only arm the timer when work
+    // remains (live particles or a Lockmeister ping). Avoids a 0.25s no-op spin.
+    if (needs_timer()) llSetTimerEvent(PARTICLE_UPDATE_RATE);
+    else               llSetTimerEvent(0.0);
 }
 
 handle_particles_stop(string msg) {
