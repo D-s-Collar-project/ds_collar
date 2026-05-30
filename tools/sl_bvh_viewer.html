@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SL Skeleton / BVH Viewer</title>
+<style>
+  :root { --bg:#15171c; --panel:#1e222b; --panel2:#262b36; --line:#333a47;
+          --txt:#dfe4ee; --dim:#8b94a6; --accent:#54b9ff; --accent2:#ffb454; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
+              font:13px/1.4 system-ui, "Segoe UI", sans-serif; overflow:hidden; }
+  #app { display:flex; height:100%; }
+  #stage { position:relative; flex:1; min-width:0; }
+  #stage canvas { display:block; }
+  #labels { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+  .blabel { color:#cfe8ff; font-size:10px; text-shadow:0 0 3px #000,0 0 3px #000;
+            white-space:nowrap; transform:translate(-50%,-50%); }
+
+  #panel { width:300px; background:var(--panel); border-left:1px solid var(--line);
+           display:flex; flex-direction:column; }
+  #panel h1 { font-size:14px; margin:0; padding:14px 16px; border-bottom:1px solid var(--line);
+              letter-spacing:.3px; }
+  #panel h1 small { display:block; color:var(--dim); font-weight:400; font-size:11px; margin-top:3px; }
+  .sec { padding:12px 16px; border-bottom:1px solid var(--line); }
+  .sec h2 { font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim);
+            margin:0 0 9px; }
+  button, .btn { background:var(--panel2); color:var(--txt); border:1px solid var(--line);
+                 border-radius:6px; padding:7px 10px; cursor:pointer; font-size:12px; }
+  button:hover, .btn:hover { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; border-color:var(--line); }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row + .row { margin-top:8px; }
+  label.ck { display:flex; gap:7px; align-items:center; cursor:pointer; color:var(--dim); }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  input[type=file] { display:none; }
+
+  #list { flex:1; overflow:auto; }
+  #filter { width:100%; background:var(--panel2); border:1px solid var(--line); color:var(--txt);
+            border-radius:6px; padding:6px 9px; margin-bottom:8px; }
+  .item { padding:6px 16px; cursor:pointer; color:var(--dim); border-left:3px solid transparent;
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .item:hover { background:var(--panel2); color:var(--txt); }
+  .item.active { color:var(--accent); border-left-color:var(--accent); background:#222834; }
+
+  #drop { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+          background:rgba(20,24,32,.85); border:2px dashed var(--accent); z-index:5;
+          font-size:16px; color:var(--accent); }
+  #drop.on { display:flex; }
+  #hud { position:absolute; left:12px; top:12px; color:var(--dim); font-size:11px;
+         background:rgba(20,24,32,.6); padding:8px 11px; border-radius:7px; pointer-events:none; }
+  #hud b { color:var(--txt); font-weight:600; }
+  #empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+           color:var(--dim); text-align:center; padding:24px; flex-direction:column; gap:10px; }
+  .mono { font-family:ui-monospace, Consolas, monospace; }
+  .t { font-variant-numeric:tabular-nums; }
+  kbd { background:var(--panel2); border:1px solid var(--line); border-radius:4px; padding:1px 5px;
+        font-size:11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="labels"></div>
+    <div id="hud"></div>
+    <div id="empty">
+      <div style="font-size:15px;color:var(--txt)">SL Skeleton / BVH Viewer</div>
+      <div>Load a <b>.bvh</b> file, or pick your <b>anims</b> folder &rarr;<br>
+           then drag to orbit, scroll to zoom.</div>
+    </div>
+    <div id="drop">Drop a .bvh file to load</div>
+  </div>
+
+  <div id="panel">
+    <h1>SL Skeleton / BVH Viewer
+      <small>renders the SL avatar rig from a BVH and plays it back</small></h1>
+
+    <div class="sec">
+      <h2>Load</h2>
+      <div class="row">
+        <label class="btn" for="fileOne" style="flex:1;text-align:center">Open .bvh…</label>
+        <label class="btn" for="fileDir" style="flex:1;text-align:center">Pick folder…</label>
+      </div>
+      <input type="file" id="fileOne" accept=".bvh">
+      <input type="file" id="fileDir" webkitdirectory directory multiple>
+    </div>
+
+    <div class="sec">
+      <h2>Playback</h2>
+      <div class="row">
+        <button id="play" style="flex:1" disabled>▶ Play</button>
+        <button id="rew" disabled title="Go to first frame">⏮</button>
+        <label class="ck"><input type="checkbox" id="loop" checked> loop</label>
+      </div>
+      <div class="row"><input type="range" id="seek" min="0" max="1" step="0.001" value="0" disabled></div>
+      <div class="row t mono" style="justify-content:space-between;color:var(--dim)">
+        <span id="tcur">0.00s</span><span id="tframe">– / –</span><span id="tdur">0.00s</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <span style="color:var(--dim);width:46px">Speed</span>
+        <input type="range" id="speed" min="0.05" max="2" step="0.05" value="1">
+        <span id="speedv" class="t mono" style="width:38px;text-align:right">1.00×</span>
+      </div>
+    </div>
+
+    <div class="sec">
+      <h2>Display</h2>
+      <div class="row"><label class="ck"><input type="checkbox" id="ckJoints" checked> joint markers</label></div>
+      <div class="row"><label class="ck"><input type="checkbox" id="ckLabels"> bone names</label></div>
+      <div class="row"><label class="ck"><input type="checkbox" id="ckGrid" checked> ground grid</label></div>
+      <div class="row"><label class="ck"><input type="checkbox" id="ckAxes" checked> axes</label></div>
+    </div>
+
+    <div class="sec" style="padding-bottom:6px">
+      <h2>Animations</h2>
+      <input id="filter" placeholder="filter…" style="display:none">
+    </div>
+    <div id="list"></div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { BVHLoader } from 'three/addons/loaders/BVHLoader.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+const stage = document.getElementById('stage');
+
+// ---- renderer / scene / camera ----
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+stage.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer({ element: document.getElementById('labels') });
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x15171c);
+
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 5000);
+camera.position.set(40, 30, 60);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xbcd2ff, 0x202028, 1.2));
+
+let grid = new THREE.GridHelper(60, 24, 0x3a4253, 0x2a2f3a);
+scene.add(grid);
+let axes = new THREE.AxesHelper(12);
+scene.add(axes);
+
+// ---- state ----
+const loader = new BVHLoader();
+let mixer = null, clip = null, skeleton = null, skelRoot = null, skelHelper = null;
+let jointMeshes = [], jointLabels = [];   // parented onto bones, tracked for cleanup
+let currentTime = 0, playing = false, speed = 1, loopOn = true;
+let frameTime = null, numFrames = null;
+const clock = new THREE.Clock();
+
+// ---- load a BVH from text ----
+function loadBVHText(text, name) {
+  // metadata straight from the file (BVHLoader doesn't expose frame count)
+  const mf = text.match(/Frames:\s*(\d+)/i);
+  const mt = text.match(/Frame Time:\s*([\d.eE+-]+)/i);
+  numFrames = mf ? +mf[1] : null;
+  frameTime = mt ? +mt[1] : null;
+
+  let result;
+  try { result = loader.parse(text); }
+  catch (e) { alert('Could not parse "' + name + '":\n' + e.message); return; }
+
+  disposeSkeleton();
+
+  skeleton = result.skeleton;
+  clip = result.clip;
+  skelRoot = skeleton.bones[0];
+
+  // Bone lines (auto-updates from the skeleton each frame)
+  skelHelper = new THREE.SkeletonHelper(skelRoot);
+  skelHelper.material.linewidth = 2;
+  scene.add(skelHelper);
+
+  // The bone tree itself must be in the scene graph so world matrices update.
+  const container = new THREE.Group();
+  container.add(skelRoot);
+  container.name = '__bones__';
+  scene.add(container);
+
+  buildJointVisuals();
+
+  mixer = new THREE.AnimationMixer(skelHelper);
+  mixer.clipAction(clip).play();
+
+  currentTime = 0; playing = false; speed = +speedEl.value;
+  mixer.timeScale = 1;             // we drive time manually via setTime
+  mixer.setTime(0);
+
+  frameSkeleton();
+  enableUI(true);
+  updateHud(name);
+  updateTimeUI();
+  setActiveItem(name);
+  document.getElementById('empty').style.display = 'none';
+}
+
+function disposeSkeleton() {
+  if (skelHelper) { scene.remove(skelHelper); skelHelper.geometry.dispose(); skelHelper.material.dispose(); }
+  const c = scene.getObjectByName('__bones__'); if (c) scene.remove(c);
+  // Remove per-bone visuals. The sphere geo/materials are shared module-level
+  // singletons — detach the meshes but DON'T dispose those, or reloads break.
+  jointMeshes.forEach(m => { if (m.parent) m.parent.remove(m); });
+  jointLabels.forEach(l => { if (l.parent) l.parent.remove(l);
+                             if (l.element && l.element.parentNode) l.element.parentNode.removeChild(l.element); });
+  jointMeshes = []; jointLabels = [];
+  mixer = null; clip = null; skeleton = null; skelHelper = null;
+}
+
+// spheres + name labels, parented to each bone so they ride the animation.
+// Geometry/materials are shared singletons (one set for every joint, reused
+// across reloads) — never disposed in disposeSkeleton.
+const sphereGeo = new THREE.SphereGeometry(0.6, 12, 10);
+const jointMat = new THREE.MeshBasicMaterial({ color:0xffb454 });
+const rootMat  = new THREE.MeshBasicMaterial({ color:0x54b9ff });
+function buildJointVisuals() {
+  jointMeshes = []; jointLabels = [];
+  skeleton.bones.forEach((bone, i) => {
+    const s = new THREE.Mesh(sphereGeo, i === 0 ? rootMat : jointMat);
+    bone.add(s); jointMeshes.push(s);
+
+    const div = document.createElement('div');
+    div.className = 'blabel';
+    div.textContent = bone.name;
+    const lab = new CSS2DObject(div);
+    bone.add(lab); jointLabels.push(lab);
+  });
+  applyJointVisibility();
+}
+function applyJointVisibility() {
+  jointMeshes.forEach(m => m.visible = ckJoints.checked);
+  jointLabels.forEach(l => l.visible = ckLabels.checked);
+}
+
+// frame the camera + size grid to the skeleton at its current pose
+function frameSkeleton() {
+  scene.updateMatrixWorld(true);
+  const box = new THREE.Box3(), v = new THREE.Vector3();
+  skeleton.bones.forEach(b => { b.getWorldPosition(v); box.expandByPoint(v); });
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 30;
+
+  scene.remove(grid);
+  const g = Math.ceil(maxDim * 2.2);
+  grid = new THREE.GridHelper(g, Math.max(10, Math.round(g/2.5)), 0x3a4253, 0x2a2f3a);
+  grid.visible = ckGrid.checked;
+  scene.add(grid);
+  axes.scale.setScalar(maxDim / 12);
+
+  const dist = maxDim * 2.1;
+  controls.target.copy(center);
+  camera.position.set(center.x + dist*0.55, center.y + dist*0.25, center.z + dist);
+  camera.near = maxDim/100; camera.far = maxDim*40; camera.updateProjectionMatrix();
+  controls.update();
+}
+
+// ---- playback loop ----
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+  if (mixer && clip) {
+    if (playing) {
+      currentTime += delta * speed;
+      if (currentTime >= clip.duration) {
+        if (loopOn) currentTime %= clip.duration;
+        else { currentTime = clip.duration; playing = false; reflectPlay(); }
+      }
+    }
+    mixer.setTime(currentTime);
+    // mixer only sets local bone transforms; refresh world matrices now so the
+    // bone-parented spheres/labels and the SkeletonHelper lines are in sync
+    // this frame (no 1-frame lag).
+    if (skelRoot) skelRoot.updateMatrixWorld(true);
+    updateTimeUI();
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+
+// ---- UI wiring ----
+const playEl = document.getElementById('play');
+const rewEl  = document.getElementById('rew');
+const seekEl = document.getElementById('seek');
+const speedEl= document.getElementById('speed');
+const speedV = document.getElementById('speedv');
+const loopEl = document.getElementById('loop');
+const ckJoints = document.getElementById('ckJoints');
+const ckLabels = document.getElementById('ckLabels');
+const ckGrid = document.getElementById('ckGrid');
+const ckAxes = document.getElementById('ckAxes');
+const tcur = document.getElementById('tcur'), tdur = document.getElementById('tdur'), tframe = document.getElementById('tframe');
+
+function enableUI(on){ [playEl,rewEl,seekEl].forEach(e=>e.disabled=!on); }
+function reflectPlay(){ playEl.textContent = playing ? '❚❚ Pause' : '▶ Play'; }
+
+playEl.onclick = () => {
+  if (!clip) return;
+  if (!playing && currentTime >= clip.duration) currentTime = 0;
+  playing = !playing; reflectPlay();
+};
+rewEl.onclick = () => { currentTime = 0; if (mixer) mixer.setTime(0); updateTimeUI(); };
+seekEl.oninput = () => { playing = false; reflectPlay(); currentTime = (+seekEl.value) * (clip ? clip.duration : 0); };
+speedEl.oninput = () => { speed = +speedEl.value; speedV.textContent = speed.toFixed(2)+'×'; };
+loopEl.onchange = () => loopOn = loopEl.checked;
+ckJoints.onchange = applyJointVisibility;
+ckLabels.onchange = applyJointVisibility;
+ckGrid.onchange = () => grid.visible = ckGrid.checked;
+ckAxes.onchange = () => axes.visible = ckAxes.checked;
+
+function updateTimeUI(){
+  if (!clip) return;
+  const d = clip.duration || 0;
+  seekEl.value = d ? currentTime / d : 0;
+  tcur.textContent = currentTime.toFixed(2)+'s';
+  tdur.textContent = d.toFixed(2)+'s';
+  if (frameTime && numFrames){
+    const f = Math.min(numFrames, Math.round(currentTime / frameTime) + 1);
+    tframe.textContent = f + ' / ' + numFrames;
+  } else tframe.textContent = '–';
+}
+function updateHud(name){
+  const fps = frameTime ? (1/frameTime).toFixed(1) : '?';
+  document.getElementById('hud').innerHTML =
+    '<b>'+name+'</b><br>'+ (skeleton?skeleton.bones.length:0)+' bones &middot; '+
+    (numFrames||'?')+' frames &middot; '+fps+' fps';
+}
+
+// keyboard: space = play/pause, arrows = step a frame
+addEventListener('keydown', e => {
+  if (e.code === 'Space'){ e.preventDefault(); playEl.onclick(); }
+  else if ((e.code==='ArrowRight'||e.code==='ArrowLeft') && clip && frameTime){
+    playing=false; reflectPlay();
+    currentTime = Math.max(0, Math.min(clip.duration, currentTime + (e.code==='ArrowRight'?1:-1)*frameTime));
+    if (mixer) mixer.setTime(currentTime); updateTimeUI();
+  }
+});
+
+// ---- file loading ----
+function readFile(file){
+  const r = new FileReader();
+  r.onload = () => loadBVHText(r.result, file.name);
+  r.readAsText(file);
+}
+document.getElementById('fileOne').onchange = e => { if (e.target.files[0]) readFile(e.target.files[0]); };
+
+let dirFiles = [];
+document.getElementById('fileDir').onchange = e => {
+  dirFiles = [...e.target.files].filter(f => f.name.toLowerCase().endsWith('.bvh'))
+                                .sort((a,b)=>a.name.localeCompare(b.name));
+  buildList();
+  if (dirFiles.length) readFile(dirFiles[0]);
+};
+
+const listEl = document.getElementById('list');
+const filterEl = document.getElementById('filter');
+function buildList(){
+  filterEl.style.display = dirFiles.length ? 'block' : 'none';
+  const q = filterEl.value.toLowerCase();
+  listEl.innerHTML = '';
+  dirFiles.filter(f => f.name.toLowerCase().includes(q)).forEach(f => {
+    const d = document.createElement('div');
+    d.className = 'item'; d.textContent = f.name; d.dataset.name = f.name;
+    d.onclick = () => readFile(f);
+    listEl.appendChild(d);
+  });
+}
+filterEl.oninput = buildList;
+function setActiveItem(name){
+  [...listEl.children].forEach(c => c.classList.toggle('active', c.dataset.name === name));
+}
+
+// drag & drop
+const drop = document.getElementById('drop');
+['dragenter','dragover'].forEach(ev => stage.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('on'); }));
+['dragleave','drop'].forEach(ev => stage.addEventListener(ev, e => { e.preventDefault(); if (ev==='drop'||e.target===drop) drop.classList.remove('on'); }));
+stage.addEventListener('drop', e => {
+  const f = [...e.dataTransfer.files].find(f => f.name.toLowerCase().endsWith('.bvh'));
+  if (f) readFile(f);
+});
+
+// ---- resize ----
+function resize(){
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h); labelRenderer.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+animate();
+</script>
+</body>
+</html>
