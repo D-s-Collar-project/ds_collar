@@ -185,6 +185,10 @@ function loadBVHText(text, name) {
 
   // Bone lines (auto-updates from the skeleton each frame)
   skelHelper = new THREE.SkeletonHelper(skelRoot);
+  // CRITICAL: the AnimationMixer resolves each track's target bone by name via
+  // PropertyBinding, which looks at root.skeleton.getBoneByName(). Without this
+  // the tracks bind to nothing and the skeleton stays frozen while "playing".
+  skelHelper.skeleton = skeleton;
   skelHelper.material.linewidth = 2;
   scene.add(skelHelper);
 
