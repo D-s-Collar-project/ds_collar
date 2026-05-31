@@ -1,6 +1,9 @@
 # Development tools
 lslint
+
+# .NET build output (regenerated every build — never tracked)
 bin/
+obj/
 
 # OS files
 .DS_Store
