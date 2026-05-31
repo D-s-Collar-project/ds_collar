@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl
 VERSION: 1.10
-REVISION: 33
+REVISION: 35
 PURPOSE: Leashing engine — state, ACL, claim/release/pass/yank, follow
          mechanics, settings persistence, broadcasts. Holder-discovery
          handshake protocol lives in sibling kmod_leash_proto.lsl.
@@ -11,6 +11,8 @@ ARCHITECTURE: Engine + sibling proto. Engine owns leash state and the
               machine. IPC reuses SETTINGS_BUS so no new bus number is
               consumed (proto filters on type prefix "leash.proto.*").
 CHANGES:
+- v1.1 rev 35: Remove the enhanced-mode subsystem — it now lives in plugin_leash (rev 25), applied locally like plugin_lock with no engine round-trip. Deleted: EnhancedMode / EnhancedActive / LeasherAcl / AuthorizedLmControllerAcl globals, KEY_LEASH_ENHANCED, applyEnhancedRestrictions / clearEnhancedRestrictions / toggleEnhancedInternal, the toggle_enhanced ACL branch, the "enhanced" broadcast field, and the applySettingsSync read. setLeashState drops its 5th param (leasher_acl) and passLeashInternal its 2nd (new_leasher_acl) — both existed only to feed enhanced; callers (claimLeash, handleLmGrabbed, pass_target_check) updated. claimLeash keeps its own acl_level (still gates take-over). The "invisible" texture whitelist added in rev 34 stays.
+- v1.1 rev 34: Add enhanced mode (persisted wearer toggle) + "invisible" texture style. Enhanced issues @sittp,tploc,tplm,tplure=n on every connect path when EnhancedMode is on AND leasher ACL >= 3; cleared inside clearLeashState (unleash / offsim auto-release / wearer-detach / region-change / Runaway / factory reset). Restrictions follow the leash, not the leasher's presence — post-only mode (avatar offline, holder present) keeps them active. Toggle gated to ACL >= 3 in handleAclResult (hard floor, not policy-driven). LeasherAcl is captured at setLeashState (new 5th param); passes thread the target's ACL from pass_target_check; LM grab reuses cached AuthorizedLmControllerAcl to avoid a second auth round-trip. broadcastState now exposes enhanced for the UI. Texture whitelist (applySettingsSync + setTextureInternal) accepts "invisible".
 - v1.1 rev 33: Strip the temporary DEBUG_LEASH scaffolding (constant +
   logd helper + every logd call site) added during the avatar-center
   fallback diagnosis. Underlying bugs are fixed in rev 32 + proto rev
@@ -236,7 +238,7 @@ integer Leashed = FALSE;
 key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
-string LeashTexture = "chain";    // Particle style — "chain" (default) or "silk"
+string LeashTexture = "chain";    // Particle style — "chain" / "silk" / "invisible"
 key FollowTarget = NULL_KEY;       // Who/what the wearer follows physically
 integer FollowIsAvatar = TRUE;     // TRUE → avatar (RLV @follow + attachment validation); FALSE → object (root validation)
 
@@ -400,7 +402,7 @@ applySettingsSync() {
     tmp = llLinksetDataRead(KEY_LEASH_TURNTO);
     if (tmp != "") TurnToFace = (integer)tmp;
     tmp = llLinksetDataRead(KEY_LEASH_TEXTURE);
-    if (tmp == "chain" || tmp == "silk") LeashTexture = tmp;
+    if (tmp == "chain" || tmp == "silk" || tmp == "invisible") LeashTexture = tmp;
 
     // FollowTarget / FollowIsAvatar / LeashClaimMode aren't persisted
     // — mode survives only in-memory; coffle/post sessions don't
@@ -608,7 +610,7 @@ handleAclResult(string msg) {
     // Target must be level 1+ (public or higher) to receive leash.
     else if (PendingAction == "pass_target_check") {
         if (acl_level >= 1) {
-            // Offer sends message to plugin for dialog, pass directly transfers
+            // Offer sends message to plugin for dialog, pass directly transfers.
             if (PendingIsOffer) {
                 sendOfferPending(PendingPassTarget, PendingPassOriginalUser);
             }
@@ -654,6 +656,8 @@ handleAclResult(string msg) {
         if (policy_allows(POL_SETTINGS, acl_level)) setTextureInternal((string)PendingPassTarget);
         else denyAccess(PendingActionUser, "insufficient permissions");
     }
+    // Enhanced mode is applied locally by plugin_leash now — the engine has
+    // no toggle_enhanced handler; an unknown action just falls through here.
 
     clearPendingAction();
 }
@@ -927,10 +931,10 @@ toggleTurnInternal() {
 }
 
 setTextureInternal(string texture) {
-    // Whitelist: anything outside chain/silk is dropped silently so a
-    // garbage value can't break particles. kmod_particles also falls back
-    // to chain on unknown styles as a second layer of defence.
-    if (texture != "chain" && texture != "silk") return;
+    // Whitelist: anything outside chain/silk/invisible is dropped silently
+    // so a garbage value can't break particles. kmod_particles also falls
+    // back to chain on unknown styles as a second layer of defence.
+    if (texture != "chain" && texture != "silk" && texture != "invisible") return;
     if (texture == LeashTexture) {
         broadcastState();
         return;

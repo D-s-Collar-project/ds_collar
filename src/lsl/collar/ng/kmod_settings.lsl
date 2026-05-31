@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 18
+REVISION: 21
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -17,11 +17,15 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               notecard reload; consumers fall back to in-script defaults
               via lsd_int(key, fallback) when the notecard omits a key.
 CHANGES:
+- v1.1 rev 21: Register leash.enhanced in MANAGED_SETTINGS_KEYS — plugin_leash's enhanced-mode toggle now persists via the settings.delta CSV path (delta-native, not the engine's legacy settings.set), wipes with the managed family on factory reset/notecard reload, and is settable from the settings notecard as "leash.enhanced = 0|1" (lands via the existing generic dotted-key write-through in parse_notecard_line). One-line whitelist addition; no parser change needed.
+- v1.1 rev 20: Revert rev 19. worn.registry.locked + worn.registry.paths removed from MANAGED_SETTINGS_KEYS. The shared bit-vector approach caused a Mono stack-heap collision in plugin_outfits and was unnecessary — plugin_strip now reads lock state live via @getstatusall:detach + @getpath at picker render time (see plugin_strip rev 18, plugin_outfits rev 17, plugin_folders rev 34).
+- v1.1 rev 19: Register worn.registry.locked + worn.registry.paths in MANAGED_SETTINGS_KEYS. Shared attach-point lock bit vector: position i = ATTACH_* integer i, value "1" = the item currently at that attach point was attached from a folder under a locked subtree. plugin_outfits / plugin_folders write bits at attach/detach/lock/unlock time; plugin_strip reads the vector to filter the picker. Paths key is an audit-only CSV of source paths the writers have referenced. Both keys wipe on factory reset alongside the rest of the managed family.
 - v1.1 rev 18: Register plugin.outfit.active in MANAGED_SETTINGS_KEYS
   for plugin_outfits's runtime on/off toggle (0 = disabled +
-  .outfits/.base unlocked, 1 = enabled). Settings key follows the
-  user-specified name verbatim (deviates from the existing
-  <short>.<key> convention).
+  ~outfits/~base unlocked, 1 = enabled; folder names retconned in
+  plugin_outfits rev 13 — were .outfits/.base at the time of this
+  rev). Settings key follows the user-specified name verbatim
+  (deviates from the existing <short>.<key> convention).
 - v1.1 rev 17: Register outfits.locked in MANAGED_SETTINGS_KEYS for
   plugin_outfits rev 5 (persistent per-outfit @detachallthis locks,
   same pattern as folders.locked / lock.locked).
@@ -244,6 +248,7 @@ list MANAGED_SETTINGS_KEYS = [
     "rlvex.trusteeim",        // plugin_rlvex
     "restrict.list",          // plugin_restrict
     "access.enablerunaway",   // plugin_access
+    "leash.enhanced",         // plugin_leash (enhanced mode; delta-native + notecard "leash.enhanced = 0|1")
     // Keys still on the old settings.set JSON path (handle_set, dynamic key)
     // but conceptually owned by kmod_settings just the same. Listed here for
     // correct cross-script attribution; migrate these emitters to settings.delta

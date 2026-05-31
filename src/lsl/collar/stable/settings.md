@@ -39,6 +39,7 @@ first uuid pairs with the first honorific, and so on. Same for trustees.
 | `blacklist.blklistuuid` | CSV of UUIDs | |
 | `public.mode` | 0/1 | |
 | `lock.locked` | 0/1 | |
+| `leash.enhanced` | 0/1 | Enhanced leash — blocks sit-tp/teleport (`@sittp,tploc,tplm,tplure`) while leashed. **Default ON** (omit the key to restrain by default; set `0` to disable). Restrictions apply only when leashed; the toggle persists. |
 | `tpe.mode` | 0/1 | Requires an external owner already set. |
 | `access.enablerunaway` | 0/1 | |
 | `rlvex.ownertp` | 0/1 | |

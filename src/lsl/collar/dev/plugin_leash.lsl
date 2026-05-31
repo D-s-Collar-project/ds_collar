@@ -13,7 +13,7 @@ ARCHITECTURE: Renderer for the leash module. Picker flows now live in
               subpath; the sub-plugin returns to us via ui.menu.start
               with our context.
 CHANGES:
-- v1.1 rev 25: Enhanced mode is now applied LOCALLY via llOwnerSay (no kmod_leash_engine round-trip; the engine path needed rev 34's toggle_enhanced handler and never fired). The restrictions FOLLOW THE LEASH, matching the original engine semantics: sync_enhanced() issues @sittp,tploc,tplm,tplure=n only while EnhancedMode is on AND the wearer is leashed, and =y to clear — so they lift automatically when the leash unclips and re-arm on the next clip. EnhancedMode (intent) is owned in-script; the toggle (ACL 3+) flips it and calls sync_enhanced(); the plugin.leash.state handler also calls sync_enhanced() on every Leashed change. Idempotent via EnhancedApplied, which defaults TRUE so the first sync at boot (state_entry calls sync_enhanced()) forces a clean clear — enforcing the invariant "not leashed => no leash RLV restrictions" even after a bare reset-while-worn that would otherwise strand a stale @sittp. Toggle button "Enhance: Y" / "Enhance: N" (was "Enhanced: On/Off"); body "Enhanced mode: Enabled|Disabled" (was "Enhanced: 0|1"). NOTE: EnhancedMode intent is in-memory only this pass (a reset turns it off rather than restoring it on); persisting the intent is a planned follow-up. Texture routing (chain/silk/invisible) unchanged, working via button_data context. Turn line relabeled "Turn to face: 0|1" -> "Turn to leasher: Enabled|Disabled" (button stays "Turn: On/Off"); Turn toggle still routes to the engine, which owns the @setrot follow-rotation.
+- v1.1 rev 25: Enhanced mode is now applied LOCALLY via llOwnerSay (no kmod_leash_engine round-trip; the engine path needed rev 34's toggle_enhanced handler and never fired). The restrictions FOLLOW THE LEASH, matching the original engine semantics: sync_enhanced() issues @sittp,tploc,tplm,tplure=n only while EnhancedMode is on AND the wearer is leashed, and =y to clear — so they lift automatically when the leash unclips and re-arm on the next clip. EnhancedMode (intent) is owned in-script; the toggle (ACL 3+) flips it and calls sync_enhanced(); the plugin.leash.state handler also calls sync_enhanced() on every Leashed change. SOS emergency Unleash (sos.leash.release on UI_BUS) is caught directly here and clears the restriction immediately — not relying on the engine's Leashed=FALSE broadcast round-trip — guarded to the wearer (id == owner) like the engine's own handler. Idempotent via EnhancedApplied, which defaults TRUE so the first sync at boot (state_entry calls load_enhanced()) forces a clean clear — enforcing the invariant "not leashed => no leash RLV restrictions" even after a bare reset-while-worn that would otherwise strand a stale @sittp. PERSISTED + ON BY DEFAULT: the intent survives via kmod_settings (settings.delta:leash.enhanced) — persist_enhanced() writes on toggle, load_enhanced() restores from LSD at state_entry (LSD survives script reset) and on every settings.sync, defaulting ON when the key is absent (a leash should restrain; notecard "leash.enhanced = 0" or the ACL3+ toggle disables it). Also settable from the settings notecard as "leash.enhanced = 0|1" (kmod_settings rev 21 whitelists the key). Toggle button "Enhance: Y" / "Enhance: N" (was "Enhanced: On/Off"); body "Enhanced mode: Enabled|Disabled" (was "Enhanced: 0|1"). Texture routing (chain/silk/invisible) unchanged, working via button_data context. Turn line relabeled "Turn to face: 0|1" -> "Turn to leasher: Enabled|Disabled" (button stays "Turn: On/Off"); Turn toggle still routes to the engine, which owns the @setrot follow-rotation.
 - v1.1 rev 24: Settings menu surfaces Enhanced (ACL 3+ only) and the texture sub-menu gains Invisible. Enhanced button reflects the engine's persisted EnhancedMode (synced via new "enhanced" field on plugin.leash.state); click sends toggle_enhanced through the standard plugin.leash.action path. Texture menu now offers Chain / Silk / Invisible; settings body labels the current selection accordingly.
 - v1.1 rev 23: Expose Coffle to ACL 1 (public). Previous policy listed
   Coffle for ACL 3/4/5 only; public touchers can now coffle the wearer
@@ -97,6 +97,7 @@ CHANGES:
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
+integer SETTINGS_BUS = 800;
 integer UI_BUS = 900;
 integer DIALOG_BUS = 950;
 
@@ -114,7 +115,7 @@ key Leasher = NULL_KEY;
 integer LeashLength = 3;
 integer TurnToFace = FALSE;
 string LeashTexture = "chain"; // "chain" / "silk" / "invisible"
-integer EnhancedMode = FALSE;     // ACL 3+ intent toggle, applied locally (see sync_enhanced)
+integer EnhancedMode = TRUE;      // ACL 3+ intent toggle, applied locally (see sync_enhanced). ON by default — a leash should restrain.
 integer EnhancedApplied = TRUE;   // whether @sittp,... is currently issued (idempotence guard).
                                   // Defaults TRUE so the first sync at boot forces a clean clear,
                                   // wiping any stale restriction left by a reset-while-worn.
@@ -480,6 +481,28 @@ sync_enhanced() {
     }
 }
 
+// Persist the enhanced INTENT through kmod_settings' single-writer CSV protocol.
+// leash.enhanced is whitelisted in MANAGED_SETTINGS_KEYS and is also settable
+// from the settings notecard as "leash.enhanced = 0|1". kmod_settings writes LSD
+// and echoes settings.sync; our handler re-reads it (a no-op since EnhancedMode
+// already matches).
+persist_enhanced() {
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:leash.enhanced:" + (string)EnhancedMode, NULL_KEY);
+}
+
+// Pull the persisted intent from LSD into EnhancedMode (absent -> off), then
+// re-sync the restriction against the current leash state. LSD survives a script
+// reset, so this restores the toggle across reset-while-worn; on a cold boot the
+// notecard value arrives via the settings.sync that fires once kmod_settings
+// finishes parsing.
+load_enhanced() {
+    string v = llLinksetDataRead("leash.enhanced");
+    EnhancedMode = TRUE;   // default ON when the key is absent — restrain by default
+    if (v != "") EnhancedMode = (integer)v;
+    sync_enhanced();
+}
+
 sendLeashActionWithTarget(string action, key target) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.action",
@@ -612,10 +635,11 @@ handleButtonClick(string ctx) {
             scheduleStateQuery("settings");
         }
         else if (ctx == "toggle_enhanced") {
-            // Local toggle — flip intent, then sync against leash state. No engine.
+            // Local toggle — flip intent, apply against leash state, persist. No engine.
             if (UserAcl >= 3) {
                 EnhancedMode = !EnhancedMode;
                 sync_enhanced();
+                persist_enhanced();
             }
             showSettingsMenu();
         }
@@ -707,10 +731,11 @@ default
 
         cleanupSession();
         register_self();
-        // Baseline: not leashed at boot, so guarantee enhanced restrictions
-        // are cleared. EnhancedApplied defaults TRUE so this first sync issues
-        // a clean @...=y, wiping anything a reset-while-worn left behind.
-        sync_enhanced();
+        // Restore the persisted enhanced intent from LSD (survives script reset)
+        // and sync it. EnhancedApplied defaults TRUE so this first sync issues a
+        // clean baseline @...=y when not (yet) leashed, wiping anything a
+        // reset-while-worn left behind; queryState() then re-arms it if leashed.
+        load_enhanced();
         queryState();
     }
     
@@ -758,9 +783,31 @@ default
             return;
         }
 
+        if (num == SETTINGS_BUS) {
+            // settings.sync fires after notecard load and after any settings.delta
+            // write (including our own). Re-read leash.enhanced and re-sync — the
+            // notecard ("leash.enhanced = 0|1") and persisted toggle both arrive here.
+            if (llJsonGetValue(msg, ["type"]) == "settings.sync") load_enhanced();
+            return;
+        }
+
         if (num == UI_BUS) {
             string msg_type = llJsonGetValue(msg, ["type"]);
             if (msg_type == JSON_INVALID) return;
+
+            // Emergency leash release (SOS Unleash). The engine also handles this
+            // and will broadcast Leashed=FALSE, but an emergency escape must not
+            // depend on that round-trip completing — clear the enhanced restriction
+            // immediately and directly. Guarded to the wearer like the engine's own
+            // handler. EnhancedMode (persisted intent) is preserved; re-leashing
+            // re-arms it.
+            if (msg_type == "sos.leash.release") {
+                if (id == llGetOwner()) {
+                    Leashed = FALSE;
+                    sync_enhanced();
+                }
+                return;
+            }
 
             if (msg_type == "ui.menu.start") {
                 if (llJsonGetValue(msg, ["acl"]) == JSON_INVALID) return;

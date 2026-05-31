@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 31
+REVISION: 34
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -9,7 +9,17 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              Folder locks (@detachallthis:<folder>=n/y) and force-actions are
              routed through kmod_rlv on UI_BUS so refcount coordinates with
              any relay-source that asks for the same folder lock.
+             plugin_strip detects locked items live via @getstatusall:detach +
+             @getpath at picker render; this plugin does NOT maintain any
+             shadow lock vector.
 CHANGES:
+- v1.1 rev 34: Revert revs 32+33 (worn.registry.locked bit-vector writer
+  and @getpath probe sweep). The shadow lock vector caused a Mono stack-heap
+  collision in plugin_outfits and was unnecessary: plugin_strip can ask the
+  viewer directly via @getstatusall:detach + @getpath at picker time. Drops
+  snapshot_attached / queue_registry_update / apply_registry_update,
+  begin_path_sweep / handle_path_response, the ProbeActive / Registry
+  globals, and the bit-vector writes on attach / detach / lock / unlock.
 - v1.1 rev 31: persist_locked switches to `settings.delete:folders.locked` when LockedNames becomes empty (last unlock), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix: previously the empty-CSV `settings.delta` was silently dropped, folders.locked stayed populated with the last-removed entry, and the next settings.sync re-emitted @detachallthis:<folder>=n — visible as the "folder reactivates whenever any RLV restriction is toggled" bug.
 - v1.1 rev 30: Sort the parsed folder list alphabetically (case-sensitive) before render. Viewer returns @getinvworn in inventory-internal order; pick dialog was unbrowsable on large outfit trees.
 - v1.1 rev 29: Wrap-around paging on `<<` / `>>` matching plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. LastMaxPage global stashed by show_folder_pick so the dispatcher avoids recomputing action_count for the wrap branches.
