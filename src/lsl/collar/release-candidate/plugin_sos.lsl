@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_sos.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Emergency wearer-accessible actions (OOC safety hatch)
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 13: "Clear RLV" is now a STRUCTURED clear, not a catch-all. Dropped the blanket llOwnerSay("@clear") and added sos.relay.clear alongside the existing sos.restrict.clear. Both downstream clears are consumer-scoped via kmod_rlv (plugin_restrict -> remove_all_restrictions -> rlv_clear_all -> rlv.clear consumer=restrict; relay safeword clear scopes to relay sources), so they drop only the bad-actor-reachable restrictions while the CONSENTED collar lock (a separate @detach consumer) stands. Rationale: @clear stripped the consented lock too, and could not reach a bad actor's own object regardless (RLV @clear is per-issuing-object). Leash unchanged (its own Unleash button + consumer).
 - v1.1 rev 12: Rename the user-facing "Runaway" label to "Escape" in the SOS menu and confirmation dialog. Button: "Escape"; bullet: "Escape an abusive setting. Resets the collar to factory settings."; confirm header "EMERGENCY ESCAPE"; confirm title "Escape"; initiation notice "Escape initiated…". Wire protocol unchanged — routing context stays "runaway", policy CSV key stays "Runaway", message type stays settings.runaway, comments / cross-reference to plugin_access's own "Runaway" path untouched. UI label only.
 - v1.1 rev 11: Drop "[SOS]" source prefix from the four user-facing
   notices. Brings this plugin into line with the project convention.
@@ -280,15 +281,22 @@ action_unleash() {
 }
 
 action_clear_rlv() {
-    // Send emergency restrict clear on UI_BUS (bypasses ACL)
+    // Structured clear (consumer-scoped via kmod_rlv), NOT a blanket @clear.
+    // Drops the bad-actor-reachable restriction sources -- plugin_restrict's
+    // families and any relay-routed restrictions -- while leaving the
+    // CONSENTED foundational restrictions in place, chiefly the collar lock
+    // (@detach is a separate consumer). A raw @clear is wrong twice over: it
+    // would strip the consented lock, and it cannot reach a bad actor's own
+    // object anyway (RLV @clear is scoped to the issuing object). The leash
+    // is its own consumer with its own Unleash button.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "sos.restrict.clear"
     ]), CurrentUser);
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "sos.relay.clear"
+    ]), CurrentUser);
 
-    // Also send @clear directly to viewer as fallback
-    llOwnerSay("@clear");
-
-    llRegionSayTo(CurrentUser, 0, "All RLV restrictions cleared.");
+    llRegionSayTo(CurrentUser, 0, "Imposed restrictions cleared -- the collar lock stands.");
 }
 
 action_clear_relay() {

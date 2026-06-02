@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 20
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.10 rev 20: Fix runtime "llDialog: message too long" (>512 chars) on the strip picker. Two unbounded contributors capped: locked_folders_line() dumped every locked-folder name uncapped (now ellipsized to 48), and the attachment rows appended an UN-bounded "@slot" after the 30-char name (now the whole "name @slot" display is ellipsized to 30; layer rows capped at 28). Nine attachment rows plus a long locked-folders line were exceeding 512; worst case is now ~434.
 - v1.10 rev 19: Revert the rev 16-18 @getpath/@getpathnew path-filter
   architecture. Verified empirically with both slot-form and UUID-form
   sweeps — every worn item returned empty path, because for the
@@ -450,7 +451,9 @@ verify_attempted_strip() {
 string locked_folders_line() {
     integer n = llGetListLength(LockedFolders);
     if (n == 0) return "";
-    return "Locked folders: " + llDumpList2String(LockedFolders, ", ") + "\n";
+    // Bound the joined names: many/long locked folders could otherwise push
+    // the picker body past llDialog's 512-char ceiling.
+    return "Locked folders: " + ellipsize(llDumpList2String(LockedFolders, ", "), 48) + "\n";
 }
 
 show_category_menu() {
@@ -523,12 +526,15 @@ show_picker(string category, integer page) {
             if (category == "L") {
                 string layer_name = llList2String(WornLayers, item_idx);
                 if (llListFindList(DiscoveredLocked, ["L:" + layer_name]) != -1) mark = " *";
-                body += (string)(k + 1) + ". " + layer_name + mark + "\n";
+                body += (string)(k + 1) + ". " + ellipsize(layer_name, 28) + mark + "\n";
             } else {
                 string slot_name = llList2String(WornAttach, item_idx * 2);
-                string item_name = ellipsize(llList2String(WornAttach, item_idx * 2 + 1), 30);
                 if (llListFindList(DiscoveredLocked, ["A:" + slot_name]) != -1) mark = " *";
-                body += (string)(k + 1) + ". " + item_name + " @" + slot_name + mark + "\n";
+                // Bound the whole "name @slot" display, not just the name -- the
+                // slot suffix was un-capped, so 9 long rows could exceed 512.
+                string disp = ellipsize(llList2String(WornAttach, item_idx * 2 + 1)
+                              + " @" + slot_name, 30);
+                body += (string)(k + 1) + ". " + disp + mark + "\n";
             }
             k += 1;
         }
