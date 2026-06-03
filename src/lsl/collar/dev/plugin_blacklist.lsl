@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 13: Fix add/remove picks doing nothing — numbered_list responses carry an empty (not JSON_INVALID) context, so fall back to the button number when context is "" as well as invalid.
 - v1.1 rev 12: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
 - v1.1 rev 11: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
@@ -366,7 +367,7 @@ handle_dialog_response(string msg) {
     if (session != SessionId) return;
 
     string cmd = llJsonGetValue(msg, ["context"]);
-    if (cmd == JSON_INVALID) cmd = llJsonGetValue(msg, ["button"]);
+    if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
 
     // Handle Back button (context-routed or numbered_list Back)
     if (cmd == "back" || cmd == BTN_BACK) {
