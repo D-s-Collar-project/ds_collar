@@ -1,10 +1,16 @@
 /*--------------------
 PLUGIN: plugin_status.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Read-only collar status display for owners and observers
-ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
+  collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
+  no per-button policy — view-only, the sole button is Back.
 CHANGES:
+- v1.1 rev 13: Remove unused button-policy scaffolding (gPolicyButtons,
+  get_policy_buttons). Never consulted — view-only plugin with no gateable
+  buttons. The acl.policycontext registration stays; kmod_ui enforces access.
+  Less code, less heap.
 - v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
@@ -80,7 +86,6 @@ string KEY_CHAT_CHAN         = "chat.channel";
 /* -------------------- STATE -------------------- */
 // Session management
 key CurrentUser = NULL_KEY;
-list gPolicyButtons = [];
 string SessionId = "";
 
 /* -------------------- HELPERS -------------------- */
@@ -95,15 +100,6 @@ list csv_read(string lsd_key) {
     string raw = llLinksetDataRead(lsd_key);
     if (raw == "") return [];
     return llCSV2List(raw);
-}
-
-/* -------------------- LSD POLICY HELPER -------------------- */
-list get_policy_buttons(string ctx, integer acl) {
-    string policy = llLinksetDataRead("acl.policycontext:" + ctx);
-    if (policy == "") return [];
-    string csv = llJsonGetValue(policy, [(string)acl]);
-    if (csv == JSON_INVALID) return [];
-    return llCSV2List(csv);
 }
 
 /* -------------------- LIFECYCLE MANAGEMENT -------------------- */
@@ -311,7 +307,6 @@ cleanup_session() {
         ]), NULL_KEY);
     }
     CurrentUser = NULL_KEY;
-    gPolicyButtons = [];
     SessionId = "";
 }
 
@@ -385,11 +380,6 @@ default {
                 }
 
                 CurrentUser = id;
-
-                // Load policy buttons (will be empty for view-only plugin)
-                integer user_acl = (integer)llJsonGetValue(msg, ["acl"]);
-                gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, user_acl);
-
                 show_status_menu();
                 return;
             }

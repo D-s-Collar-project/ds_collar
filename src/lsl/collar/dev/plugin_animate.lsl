@@ -1,10 +1,16 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.10
-REVISION: 11
+REVISION: 12
 PURPOSE: Paginated animation menu driven by inventory contents
-ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
+  collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
+  no per-button policy filtering (animation buttons are dynamic content).
 CHANGES:
+- v1.1 rev 12: Remove unused button-policy scaffolding (gPolicyButtons,
+  get_policy_buttons, UserAcl). Never consulted — btn_allowed was never
+  implemented and the buttons are dynamic animation names. The acl.policycontext
+  registration stays; kmod_ui enforces access. Less code, less heap.
 - v1.1 rev 11: Drop AnimationList cache — read inventory live via llGetInventoryName / llGetInventoryNumber. Plugin resets when animation count changes (CHANGED_INVENTORY). Removes refresh_animation_list and ~1.5 KB of heap pressure.
 - v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
@@ -58,8 +64,6 @@ integer MAX_ANIMATIONS = 128;
 /* -------------------- STATE -------------------- */
 // Session management
 key CurrentUser = NULL_KEY;
-integer UserAcl = -999;
-list gPolicyButtons = [];
 string SessionId = "";
 
 // Pagination
@@ -80,15 +84,6 @@ integer HasPermission = FALSE;
 
 string generate_session_id() {
     return PLUGIN_CONTEXT + "_" + (string)llGetUnixTime();
-}
-
-/* -------------------- LSD POLICY HELPER -------------------- */
-list get_policy_buttons(string ctx, integer acl) {
-    string policy = llLinksetDataRead("acl.policycontext:" + ctx);
-    if (policy == "") return [];
-    string csv = llJsonGetValue(policy, [(string)acl]);
-    if (csv == JSON_INVALID) return [];
-    return llCSV2List(csv);
 }
 
 /* -------------------- ANIMATION INVENTORY MANAGEMENT -------------------- */
@@ -213,9 +208,6 @@ send_pong() {
 show_animation_menu(integer page) {
     SessionId = generate_session_id();
     CurrentPage = page;
-
-    // Load policy-allowed buttons for this user's ACL level
-    gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
     integer total_anims = get_animation_count();
 
@@ -434,8 +426,6 @@ cleanup_session() {
         ]), NULL_KEY);
     }
     CurrentUser = NULL_KEY;
-    UserAcl = -999;
-    gPolicyButtons = [];
     SessionId = "";
     CurrentPage = 0;
 }
@@ -528,7 +518,6 @@ default {
                 if (id == NULL_KEY) return;
 
                 CurrentUser = id;
-                UserAcl = (integer)llJsonGetValue(msg, ["acl"]);
 
                 string subpath = "";
                 string sp = llJsonGetValue(msg, ["subpath"]);
