@@ -24,6 +24,14 @@ local SOS_CONTEXT  = "ui.sos.root"
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
 local function get_msg_type(msg: string): string
     local t = ll.JsonGetValue(msg, {"type"})
     if t == JSON_INVALID then return "" end
@@ -141,6 +149,7 @@ local function main()
 end
 
 function LLEvents.link_message(sender_num: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = get_msg_type(msg)
     if msg_type == "" then return end
 

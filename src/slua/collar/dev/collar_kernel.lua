@@ -65,6 +65,24 @@ local function count_scripts(): number
     return ll.GetInventoryNumber(INVENTORY_SCRIPT)
 end
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+-- SLua has no ll.SetTimerEvent and no manually-managed timer event. LLTimers
+-- runs multiple independent timers via callbacks. This shim reproduces the LSL
+-- single-timer contract: set_timer(t>0) starts/replaces the one recurring timer;
+-- set_timer(0) stops it. The old timer() body lives in _on_timer (assigned below
+-- where LLEvents.timer used to be).
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned further down
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 --[[ -------------------- BROADCASTING -------------------- ]]
 
 -- Request all plugins to register (no time window - event-driven).
@@ -148,7 +166,7 @@ local function prune_missing_scripts(): number
     end
 
     -- LSD sweep. kmod_ui's linkset_data handler picks up the deletions.
-    local reg_keys = ll.LinksetDataFindKeys("^plugin\\.reg\\.", 0, -1)
+    local reg_keys = ll.LinksetDataFindKeys("^plugin\\.reg\\.", 1, -1)  -- SLua: start is 1-based
     for _, k in ipairs(reg_keys) do
         local entry = ll.LinksetDataRead(k)
         local scr = ll.JsonGetValue(entry, {"script"})
@@ -169,7 +187,7 @@ local function queue_add(op_type: string, context: string, label: string, script
     Queue[context] = { op = op_type, label = label, script = script, ts = now() }
     if not PendingBatchTimer then
         PendingBatchTimer = true
-        ll.SetTimerEvent(BATCH_WINDOW_SEC)
+        set_timer(BATCH_WINDOW_SEC)
     end
 end
 
@@ -179,7 +197,7 @@ local function process_queue(): boolean
     if next(Queue) == nil then
         if PendingBatchTimer then
             PendingBatchTimer = false
-            ll.SetTimerEvent(PING_INTERVAL_SEC)
+            set_timer(PING_INTERVAL_SEC)
         end
         return false
     end
@@ -195,7 +213,7 @@ local function process_queue(): boolean
 
     Queue = {}
     PendingBatchTimer = false
-    ll.SetTimerEvent(PING_INTERVAL_SEC)
+    set_timer(PING_INTERVAL_SEC)
     return changes_made
 end
 
@@ -210,7 +228,7 @@ local function discover_plugins(): boolean
     local current = {}
     local found_new = false
 
-    for i = 0, inv_count - 1 do
+    for i = 1, inv_count do  -- SLua inventory is 1-based
         local name = ll.GetInventoryName(INVENTORY_SCRIPT, i)
         if name ~= self_name then
             local u = tostring(ll.GetInventoryKey(name))
@@ -282,7 +300,7 @@ local function handle_soft_reset()
     LastPingUnix = now()
     LastInvSweepUnix = now()
     LastDiscoveryUnix = now()
-    ll.SetTimerEvent(PING_INTERVAL_SEC)
+    set_timer(PING_INTERVAL_SEC)
     broadcast_register_now()
 end
 
@@ -316,7 +334,7 @@ local function main()
     LastScriptCount = count_scripts()
 
     broadcast_register_now()
-    ll.SetTimerEvent(PING_INTERVAL_SEC)
+    set_timer(PING_INTERVAL_SEC)
 end
 
 function LLEvents.on_rez(start_param: number)
@@ -324,11 +342,12 @@ function LLEvents.on_rez(start_param: number)
 end
 
 function LLEvents.attach(id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if id == NULL_KEY then return end
     check_owner_changed()
 end
 
-function LLEvents.timer()
+_on_timer = function()
     local t = ll.GetUnixTime()
     if t == 0 then return end  -- overflow protection
 
@@ -362,6 +381,7 @@ function LLEvents.timer()
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = get_msg_type(msg)
     if msg_type == "" then return end
 
@@ -399,7 +419,7 @@ function LLEvents.changed(change: number)
             Queue = {}
             KnownUUIDs = {}
             PendingBatchTimer = false
-            ll.SetTimerEvent(PING_INTERVAL_SEC)
+            set_timer(PING_INTERVAL_SEC)
             broadcast_register_now()
         end
     end

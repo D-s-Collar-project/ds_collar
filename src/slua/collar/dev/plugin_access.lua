@@ -75,6 +75,14 @@ local TRUSTEE_HONORIFICS = {"Sir", "Madame", "Milord", "Milady"}
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
 local function list_find(t, v)
     for i, x in ipairs(t) do
         if x == v then return i end
@@ -656,11 +664,14 @@ function LLEvents.link_message(sender: number, num: number, msg: string, id)
                 local subpath = ""
                 local sp = ll.JsonGetValue(msg, {"subpath"})
                 if sp ~= JSON_INVALID then subpath = sp end
+                -- SLua delivers the link_message id as a string; normalize to a
+                -- uuid so identity checks (CurrentUser == ll.GetOwner(), is_owner) work.
+                local actor = uuid(tostring(id))
                 if subpath ~= "" then
-                    handle_subpath(id, acl, subpath)
+                    handle_subpath(actor, acl, subpath)
                     return
                 end
-                CurrentUser = id
+                CurrentUser = actor
                 UserAcl = acl
                 show_main()
             end
@@ -708,7 +719,7 @@ function LLEvents.no_sensor()
 end
 
 function LLEvents.dataserver(qid, data: string)
-    if qid ~= ActiveNameQuery then return end
+    if tostring(qid) ~= tostring(ActiveNameQuery) then return end  -- SLua: compare keys as strings
     if data ~= "" and data ~= "???" then cache_name(ActiveQueryTarget, data) end
     ActiveNameQuery = NULL_KEY
     ActiveQueryTarget = NULL_KEY

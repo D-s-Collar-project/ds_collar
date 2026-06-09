@@ -54,6 +54,27 @@ local RlvListenHandle = 0
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function list_find(t, v)
     for i, x in ipairs(t) do
         if x == v then return i end
@@ -127,7 +148,7 @@ local function stop_rlv_listen()
         ll.ListenRemove(RlvListenHandle)
         RlvListenHandle = 0
     end
-    ll.SetTimerEvent(0.0)
+    set_timer(0.0)
 end
 
 local function cleanup_session()
@@ -238,7 +259,7 @@ local function scan_outfits()
     MenuContext = "scanning"
     stop_rlv_listen()
     RlvListenHandle = ll.Listen(RLV_CHAN, "", ll.GetOwner(), "")
-    ll.SetTimerEvent(RLV_TIMEOUT)
+    set_timer(RLV_TIMEOUT)
     rlv_force("@getinv:" .. OUTFITS_ROOT .. "=" .. tostring(RLV_CHAN))
     ll.RegionSayTo(CurrentUser, 0, "Reading #RLV/" .. OUTFITS_ROOT .. " ...")
 end
@@ -587,7 +608,7 @@ function LLEvents.changed(change: number)
     if bit32.band(change, CHANGED_OWNER) ~= 0 then ll.ResetScript() end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     stop_rlv_listen()
     if CurrentUser ~= NULL_KEY then
         ll.RegionSayTo(CurrentUser, 0, "RLV not responding. Is RLV mode enabled?")
@@ -596,10 +617,12 @@ function LLEvents.timer()
 end
 
 function LLEvents.listen(channel: number, name: string, id, message: string)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if channel == RLV_CHAN and id == ll.GetOwner() then handle_rlv_response(message) end
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 

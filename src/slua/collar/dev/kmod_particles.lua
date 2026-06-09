@@ -54,6 +54,19 @@ local LmAuthorized = false
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function now(): number
     return ll.GetUnixTime()
 end
@@ -178,7 +191,7 @@ local function handle_lm_message(id, msg: string)
                 SourcePlugin = ""
                 TargetKey = NULL_KEY
             end
-            if not needs_timer() then ll.SetTimerEvent(0.0) end
+            if not needs_timer() then set_timer(0.0) end
         end
         return
     end
@@ -259,7 +272,7 @@ local function handle_particles_start(msg: string)
     render_leash_particles(TargetKey)
     -- invisible renders nothing (no stream to validate), so only arm the timer
     -- when there's real work (live particles or LM ping).
-    if needs_timer() then ll.SetTimerEvent(PARTICLE_UPDATE_RATE) else ll.SetTimerEvent(0.0) end
+    if needs_timer() then set_timer(PARTICLE_UPDATE_RATE) else set_timer(0.0) end
 end
 
 local function handle_particles_stop(msg: string)
@@ -271,7 +284,7 @@ local function handle_particles_stop(msg: string)
     SourcePlugin = ""
     TargetKey = NULL_KEY
 
-    if not needs_timer() then ll.SetTimerEvent(0.0) end
+    if not needs_timer() then set_timer(0.0) end
 end
 
 local function handle_particles_update(msg: string)
@@ -283,7 +296,7 @@ local function handle_particles_update(msg: string)
     if new_target ~= TargetKey then
         TargetKey = new_target
         render_leash_particles(TargetKey)
-        ll.SetTimerEvent(PARTICLE_UPDATE_RATE)
+        set_timer(PARTICLE_UPDATE_RATE)
     end
 end
 
@@ -293,7 +306,7 @@ local function handle_lm_enable(msg: string)
     LmAuthorized = true
     open_lm_listen()
     LmLastPing = now()
-    ll.SetTimerEvent(PARTICLE_UPDATE_RATE)
+    set_timer(PARTICLE_UPDATE_RATE)
 end
 
 local function handle_lm_disable()
@@ -310,7 +323,7 @@ local function handle_lm_disable()
         end
     end
     LmAuthorized = false
-    if not needs_timer() then ll.SetTimerEvent(0.0) end
+    if not needs_timer() then set_timer(0.0) end
 end
 
 --[[ -------------------- EVENTS -------------------- ]]
@@ -357,6 +370,7 @@ function LLEvents.changed(change: number)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 
@@ -383,12 +397,13 @@ function LLEvents.link_message(sender: number, num: number, msg: string, id)
 end
 
 function LLEvents.listen(channel: number, name: string, id, msg: string)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if channel == LEASH_CHAN_LM then
         handle_lm_message(id, msg)
     end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     if LmActive then lm_ping() end
 
     -- Periodic validation: verify target still exists.
@@ -408,7 +423,7 @@ function LLEvents.timer()
             end
 
             TargetKey = NULL_KEY
-            if not needs_timer() then ll.SetTimerEvent(0.0) end
+            if not needs_timer() then set_timer(0.0) end
         end
     end
 end

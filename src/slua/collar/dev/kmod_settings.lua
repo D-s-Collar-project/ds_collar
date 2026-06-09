@@ -93,6 +93,14 @@ local RESET_CONFIG_KEYS = {
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
 local function get_msg_type(msg: string): string
     local t = ll.JsonGetValue(msg, {"type"})
     if t == JSON_INVALID then return "" end
@@ -738,6 +746,7 @@ function LLEvents.on_rez(start_param: number)
 end
 
 function LLEvents.attach(id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if id == NULL_KEY then return end
     maybe_reset_on_owner_change()
 end
@@ -788,6 +797,7 @@ function LLEvents.dataserver(query_id, data: string)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     -- CSV envelope (single-writer protocol) — detect before JSON parsing so
     -- the write path stays JSON-free.
     if num == SETTINGS_BUS then

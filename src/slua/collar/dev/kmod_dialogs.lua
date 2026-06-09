@@ -35,6 +35,27 @@ local ButtonConfigs = {}
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function get_msg_type(msg: string): string
     local t = ll.JsonGetValue(msg, {"type"})
     if t == JSON_INVALID then return "" end
@@ -270,14 +291,15 @@ local function main()
     NextChannelOffset = 1
     ButtonConfigs = {}
 
-    ll.SetTimerEvent(5.0)  -- session cleanup
+    set_timer(5.0)  -- session cleanup
 end
 
-function LLEvents.timer()
+_on_timer = function()
     prune_expired_sessions()
 end
 
 function LLEvents.listen(channel: number, name: string, id, message: string)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local idx = nil
     for i, s in ipairs(Sessions) do
         if s.channel == channel then idx = i; break end
@@ -304,6 +326,7 @@ function LLEvents.listen(channel: number, name: string, id, message: string)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = get_msg_type(msg)
     if msg_type == "" then return end
 

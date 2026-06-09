@@ -66,6 +66,27 @@ local UpdateScanWinnerVer = ""
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function now(): number
     return ll.GetUnixTime()
 end
@@ -273,7 +294,7 @@ local function start_update_scan()
     }))
 
     -- Tighten cadence so the 5s deadline isn't blocked behind the 60s prune.
-    ll.SetTimerEvent(1.0)
+    set_timer(1.0)
 end
 
 local function handle_updater_here(message: string)
@@ -295,7 +316,7 @@ local function handle_updater_here(message: string)
     UpdateScanWinnerVer = ver
 
     report_scan_result(true)
-    ll.SetTimerEvent(60.0)  -- restore default cadence
+    set_timer(60.0)  -- restore default cadence
 end
 
 local function confirm_update_scan()
@@ -325,7 +346,7 @@ end
 local function cancel_update_scan()
     if not UpdateScanActive then return end
     clear_scan_state()
-    ll.SetTimerEvent(60.0)
+    set_timer(60.0)
 end
 
 local function handle_update_discover(message: string)
@@ -412,7 +433,7 @@ local function main()
     AclQueryListenHandle = ll.Listen(EXTERNAL_ACL_QUERY_CHAN, "", NULL_KEY, "")
     MenuRequestListenHandle = ll.Listen(EXTERNAL_MENU_CHAN, "", NULL_KEY, "")
 
-    ll.SetTimerEvent(60.0)
+    set_timer(60.0)
 end
 
 function LLEvents.on_rez(start_param: number)
@@ -425,14 +446,14 @@ function LLEvents.changed(change_mask: number)
     end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     local t = now()
 
     -- Updater-scan deadline (timer tightened to 1s while scanning).
     if UpdateScanActive and UpdateScanWinner == NULL_KEY then
         if (t - UpdateScanStart) >= integer(UPDATER_SCAN_TIMEOUT) then
             report_scan_result(false)
-            ll.SetTimerEvent(60.0)
+            set_timer(60.0)
         end
     end
 
@@ -465,6 +486,7 @@ function LLEvents.listen(channel: number, name: string, speaker_id, message: str
 end
 
 function LLEvents.link_message(sender_num: number, num: number, str: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(str, {"type"})
     if msg_type == JSON_INVALID then return end
 

@@ -40,6 +40,14 @@ local Aliases = {}
 --[[ -------------------- HELPERS -------------------- ]]
 
 -- Default prefix = first two chars of the wearer's username (no spaces).
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
 local function derive_default_prefix(): string
     local username = ll.GetUsername(ll.GetOwner())
     if #username >= 2 then return string.lower(string.sub(username, 1, 2)) end
@@ -191,6 +199,7 @@ function LLEvents.changed(change: number)
 end
 
 function LLEvents.listen(channel: number, name: string, id, message: string)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if id == ll.GetKey() then return end  -- ignore own messages
 
     if channel == 0 and not PublicChat then return end
@@ -208,6 +217,7 @@ function LLEvents.listen(channel: number, name: string, id, message: string)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 

@@ -43,6 +43,27 @@ local InputListen = 0
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function b2i(b: boolean): number
     if b then return 1 end
     return 0
@@ -108,7 +129,7 @@ end
 
 local function cleanup_session()
     if InputListen ~= 0 then ll.ListenRemove(InputListen); InputListen = 0 end
-    ll.SetTimerEvent(0.0)
+    set_timer(0.0)
     if SessionId ~= "" then
         ll.MessageLinked(LINK_SET, DIALOG_BUS, ll.List2Json(JSON_OBJECT, {
             "type", "ui.dialog.close",
@@ -197,7 +218,7 @@ local function open_input(context: string, prompt: string)
     if InputListen ~= 0 then ll.ListenRemove(InputListen) end
     local input_chan = -1 - integer(ll.Frand(2000000))
     InputListen = ll.Listen(input_chan, "", CurrentUser, "")
-    ll.SetTimerEvent(INPUT_TIMEOUT)
+    set_timer(INPUT_TIMEOUT)
     ll.TextBox(CurrentUser, prompt, input_chan)
 end
 
@@ -246,7 +267,7 @@ end
 
 local function handle_channel_input(raw: string)
     if InputListen ~= 0 then ll.ListenRemove(InputListen); InputListen = 0 end
-    ll.SetTimerEvent(0.0)
+    set_timer(0.0)
 
     raw = ll.StringTrim(raw, STRING_TRIM)
     if raw == "cancel" or raw == "" then
@@ -269,7 +290,7 @@ end
 
 local function handle_prefix_input(new_prefix: string)
     if InputListen ~= 0 then ll.ListenRemove(InputListen); InputListen = 0 end
-    ll.SetTimerEvent(0.0)
+    set_timer(0.0)
 
     new_prefix = ll.StringTrim(new_prefix, STRING_TRIM)
     if new_prefix == "cancel" or new_prefix == "" then
@@ -308,20 +329,22 @@ function LLEvents.changed(change: number)
     if bit32.band(change, CHANGED_OWNER) ~= 0 then ll.ResetScript() end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     if InputListen ~= 0 then ll.ListenRemove(InputListen); InputListen = 0 end
-    ll.SetTimerEvent(0.0)
+    set_timer(0.0)
     if CurrentUser ~= NULL_KEY then ll.RegionSayTo(CurrentUser, 0, "Input timed out.") end
     show_main()
 end
 
 function LLEvents.listen(channel: number, name: string, id, message: string)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if id ~= CurrentUser then return end
     if MenuContext == "input_prefix" then handle_prefix_input(message)
     elseif MenuContext == "input_channel" then handle_channel_input(message) end
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 

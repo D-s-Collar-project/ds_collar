@@ -47,6 +47,27 @@ local PendingQueryContext = ""
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function b2i(b: boolean): number
     if b then return 1 end
     return 0
@@ -273,7 +294,7 @@ local function giveHolderObject()
     local wanted = "leash holder"
     local holder_name = ""
     local count = ll.GetInventoryNumber(INVENTORY_OBJECT)
-    for i = 0, count - 1 do
+    for i = 1, count do  -- SLua inventory is 1-based
         local nm = ll.GetInventoryName(INVENTORY_OBJECT, i)
         if string.lower(ll.StringTrim(nm, STRING_TRIM)) == wanted then holder_name = nm; break end
     end
@@ -351,7 +372,7 @@ end
 local function scheduleStateQuery(next_menu_context: string)
     PendingStateQuery = true
     PendingQueryContext = next_menu_context
-    ll.SetTimerEvent(STATE_QUERY_DELAY)
+    set_timer(STATE_QUERY_DELAY)
 end
 
 --[[ -------------------- CHAT SUBCOMMANDS -------------------- ]]
@@ -460,15 +481,16 @@ function LLEvents.changed(change: number)
     if bit32.band(change, CHANGED_OWNER) ~= 0 then ll.ResetScript() end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     if PendingStateQuery then
         PendingStateQuery = false
-        ll.SetTimerEvent(0.0)
+        set_timer(0.0)
         queryState()
     end
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if num == KERNEL_LIFECYCLE then
         local msg_type = ll.JsonGetValue(msg, {"type"})
         if msg_type == JSON_INVALID then return end

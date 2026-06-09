@@ -113,6 +113,27 @@ local broadcastState, setLengthInternal, toggleTurnInternal, setTextureInternal
 local claimLeash, releaseLeashInternal, passLeashInternal, yankToLeasher
 local handleLmGrabbed, handleLmReleased
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function list_find(t, v)
     for i, x in ipairs(t) do
         if x == v then return i end
@@ -777,7 +798,7 @@ local function main()
     sendProtoShutdown()  -- proto owns the handshake listeners; start it clean
 
     applySettingsSync()
-    ll.SetTimerEvent(FOLLOW_TICK)
+    set_timer(FOLLOW_TICK)
     ll.RequestPermissions(ll.GetOwner(), PERMISSION_TAKE_CONTROLS)
 end
 
@@ -825,6 +846,7 @@ function LLEvents.control(id, level: number, edge: number)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 
@@ -915,7 +937,7 @@ function LLEvents.link_message(sender: number, num: number, msg: string, id)
     end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     TickCount += 1
 
     -- Offsim/auto-release (~4s cadence at 1.0s FOLLOW_TICK).

@@ -52,6 +52,27 @@ local PendingReconcile = false
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function b2i(b: boolean): number
     if b then return 1 end
     return 0
@@ -252,7 +273,7 @@ local function apply_settings_sync()
 
     if need_reconcile then
         PendingReconcile = true
-        ll.SetTimerEvent(1.0)
+        set_timer(1.0)
     end
 end
 
@@ -333,7 +354,7 @@ local function cleanup()
             "session_id", SessionId,
         }), NULL_KEY)
     end
-    ll.SetTimerEvent(0.0)
+    set_timer(0.0)
     PendingReconcile = false
     CurrentUser = NULL_KEY
     UserAcl = -999
@@ -418,7 +439,7 @@ local function main()
     -- On cold start, reconcile immediately (don't wait on the debounce timer).
     if PendingReconcile then
         PendingReconcile = false
-        ll.SetTimerEvent(0.0)
+        set_timer(0.0)
         reconcile_all()
     end
 end
@@ -431,8 +452,8 @@ function LLEvents.changed(c: number)
     if bit32.band(c, CHANGED_OWNER) ~= 0 then ll.ResetScript() end
 end
 
-function LLEvents.timer()
-    ll.SetTimerEvent(0.0)
+_on_timer = function()
+    set_timer(0.0)
     if PendingReconcile then
         PendingReconcile = false
         reconcile_all()
@@ -440,6 +461,7 @@ function LLEvents.timer()
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local mtype = ll.JsonGetValue(msg, {"type"})
     if mtype == JSON_INVALID then return end
 

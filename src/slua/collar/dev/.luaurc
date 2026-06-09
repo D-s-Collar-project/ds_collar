@@ -5,8 +5,8 @@
     "MultiLineStatement": false
   },
   "globals": [
-    "ll", "LLEvents",
-    "integer", "uuid", "vector", "rotation", "quaternion",
+    "ll", "LLEvents", "LLTimers",
+    "uuid", "vector", "rotation", "quaternion",
     "tovector", "torotation",
     "NULL_KEY", "JSON_INVALID", "JSON_OBJECT", "JSON_ARRAY",
     "JSON_NULL", "JSON_TRUE", "JSON_FALSE", "JSON_NUMBER", "JSON_STRING",

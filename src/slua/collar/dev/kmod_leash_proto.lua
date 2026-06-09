@@ -45,6 +45,27 @@ local OCPingTarget     = NULL_KEY
 --[[ -------------------- GENERIC HELPERS -------------------- ]]
 
 -- This collar's LeashPoint prim (child named "leashpoint"), or root.
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function findLeashpointPrim()
     local n = ll.GetNumberOfPrims()
     for i = 2, n do
@@ -103,7 +124,7 @@ local function restartNativeProbe()
         "origin", "leashpoint",
         "mode", ModeStr,
     }))
-    ll.SetTimerEvent(NATIVE_PHASE_DURATION)
+    set_timer(NATIVE_PHASE_DURATION)
 end
 
 --[[ -------------------- NATIVE RESPONDER -------------------- ]]
@@ -181,7 +202,7 @@ local function enter_default()
     HolderSession = 0
     -- Persistent responder listener (answers other collars' coffle requests).
     HolderListen = ll.Listen(LEASH_CHAN_NATIVE, "", NULL_KEY, "")
-    ll.SetTimerEvent(0.0)
+    set_timer(0.0)
 end
 
 local function enter_proto_native()
@@ -202,7 +223,7 @@ local function enter_proto_oc_lm()
         ll.RegionSayTo(OCPingTarget, LEASH_CHAN_LM, tostring(OCPingTarget) .. "collar")
         ll.RegionSayTo(OCPingTarget, LEASH_CHAN_LM, tostring(OCPingTarget) .. "handle")
     end
-    ll.SetTimerEvent(OC_PHASE_DURATION)
+    set_timer(OC_PHASE_DURATION)
 end
 
 --[[ -------------------- EVENTS -------------------- ]]
@@ -223,7 +244,7 @@ function LLEvents.changed(change: number)
     if bit32.band(change, CHANGED_OWNER) ~= 0 then ll.ResetScript() end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     if State == "proto_native" then
         enter_proto_oc_lm()  -- native phase timed out
     elseif State == "proto_oc_lm" then
@@ -233,6 +254,7 @@ function LLEvents.timer()
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 
@@ -273,6 +295,7 @@ function LLEvents.link_message(sender: number, num: number, msg: string, id)
 end
 
 function LLEvents.listen(channel: number, name: string, id, msg: string)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if channel == LEASH_CHAN_NATIVE then
         local mtype = ll.JsonGetValue(msg, {"type"})
         if mtype == "plugin.leash.request" then

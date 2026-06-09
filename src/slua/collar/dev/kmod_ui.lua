@@ -70,6 +70,27 @@ local handle_dialog_response, handle_dialog_timeout
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function get_msg_type(msg: string): string
     local t = ll.JsonGetValue(msg, {"type"})
     if t == JSON_INVALID then return "" end
@@ -180,7 +201,7 @@ end
 -- label (what the wearer reads), not by context key.
 function rebuild_plugin_list_from_lsd()
     Plugins = {}
-    local keys = ll.LinksetDataFindKeys("^plugin\\.reg\\.", 0, -1)
+    local keys = ll.LinksetDataFindKeys("^plugin\\.reg\\.", 1, -1)  -- SLua: start is 1-based
     local prefix_len = #LSD_PLUGIN_REG_PREFIX
 
     local temp = {}
@@ -202,7 +223,7 @@ end
 function schedule_rebuild()
     if not ViewsStale then
         ViewsStale = true
-        ll.SetTimerEvent(REBUILD_DEBOUNCE)
+        set_timer(REBUILD_DEBOUNCE)
     end
 end
 
@@ -625,6 +646,7 @@ function LLEvents.touch_end(detected)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = get_msg_type(msg)
     if msg_type == "" then return end
 
@@ -677,10 +699,10 @@ function LLEvents.linkset_data(action: number, name: string, value: string)
     end
 end
 
-function LLEvents.timer()
+_on_timer = function()
     if ViewsStale then
         ViewsStale = false
-        ll.SetTimerEvent(0.0)
+        set_timer(0.0)
         rebuild_plugin_list_from_lsd()
         invalidate_all_sessions()
     end

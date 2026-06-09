@@ -95,6 +95,27 @@ local say_to_source, ack_source
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ -------------------- TIMER SHIM (LSL single-timer over SLua LLTimers) -------------------- ]]
+local _timerHandle = nil
+local _on_timer  -- forward declaration; assigned where the timer body lives
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
+local function set_timer(interval: number)
+    if _timerHandle then
+        LLTimers:off(_timerHandle)
+        _timerHandle = nil
+    end
+    if interval > 0 then
+        _timerHandle = LLTimers:every(interval, _on_timer)
+    end
+end
+
 local function lsd_int(lsd_key: string, fallback: number): number
     local v = ll.LinksetDataRead(lsd_key)
     if v == "" then return fallback end
@@ -158,9 +179,9 @@ end
 
 function rearm_timer()
     if #Sources > 0 or AskExpireAt ~= 0 then
-        ll.SetTimerEvent(GC_INTERVAL)
+        set_timer(GC_INTERVAL)
     else
-        ll.SetTimerEvent(0.0)
+        set_timer(0.0)
     end
 end
 
@@ -673,7 +694,7 @@ function LLEvents.on_rez(start_param: number)
     ll.ResetScript()
 end
 
-function LLEvents.timer()
+_on_timer = function()
     if AskExpireAt ~= 0 and ll.GetUnixTime() >= AskExpireAt then
         ll.RegionSayTo(WearerKey, 0, "Auth request timed out")
         decline_ask()
@@ -683,6 +704,7 @@ function LLEvents.timer()
 end
 
 function LLEvents.attach(id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if id == NULL_KEY then
         clear_pending_ask()
         drop_queue()
@@ -700,6 +722,7 @@ function LLEvents.attach(id)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 
@@ -757,6 +780,7 @@ function LLEvents.link_message(sender: number, num: number, msg: string, id)
 end
 
 function LLEvents.listen(chan: number, name: string, id, msg: string)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if chan == RELAY_CHANNEL then
         handle_relay_message(id, msg)
         return

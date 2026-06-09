@@ -87,6 +87,14 @@ local ACL_META = {
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
 local function list_find(t, v)
     for i, x in ipairs(t) do
         if x == v then return i end
@@ -159,7 +167,7 @@ end
 
 -- Clear all cached ACL query results (regex search runs in the simulator).
 local function clear_acl_query_cache()
-    for _, k in ipairs(ll.LinksetDataFindKeys("^acl\\.[0-9a-f-]+\\.cache$", 0, 0)) do
+    for _, k in ipairs(ll.LinksetDataFindKeys("^acl\\.[0-9a-f-]+\\.cache$", 1, -1)) do  -- SLua: start 1-based, count -1 = all
         ll.LinksetDataDelete(k)
     end
 end
@@ -451,6 +459,7 @@ local function main()
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     local msg_type = ll.JsonGetValue(msg, {"type"})
     if msg_type == JSON_INVALID then return end
 

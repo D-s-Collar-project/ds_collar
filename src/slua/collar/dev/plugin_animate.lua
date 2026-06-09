@@ -39,6 +39,14 @@ local gPolicyButtons = {}
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
 local function generate_session_id(): string
     return PLUGIN_CONTEXT .. "_" .. tostring(ll.GetUnixTime())
 end
@@ -178,7 +186,7 @@ local function show_animation_menu(page: number)
     -- Page animations (0-based inventory indices).
     local page_anims = {}
     for i = start_idx, end_idx do
-        page_anims[#page_anims + 1] = ll.GetInventoryName(INVENTORY_ANIMATION, i)
+        page_anims[#page_anims + 1] = ll.GetInventoryName(INVENTORY_ANIMATION, i + 1)  -- SLua inventory is 1-based; i stays 0-based for paging math
     end
 
     local count = #page_anims
@@ -333,6 +341,7 @@ function LLEvents.run_time_permissions(perm: number)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if num == KERNEL_LIFECYCLE then
         local msg_type = ll.JsonGetValue(msg, {"type"})
         if msg_type == JSON_INVALID then return end

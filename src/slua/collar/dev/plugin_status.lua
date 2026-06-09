@@ -49,6 +49,14 @@ local gPolicyButtons = {}
 
 --[[ -------------------- HELPERS -------------------- ]]
 
+--[[ integer(): SLua has no LSL-style (integer) cast; emulate it (truncate toward zero; non-numeric -> 0). ]]
+local function integer(v): number
+    local n = tonumber(v)
+    if n == nil then return 0 end
+    if n < 0 then return math.ceil(n) end
+    return math.floor(n)
+end
+
 local function generate_session_id(): string
     return PLUGIN_CONTEXT .. "_" .. tostring(ll.GetUnixTime())
 end
@@ -249,6 +257,7 @@ function LLEvents.changed(change: number)
 end
 
 function LLEvents.link_message(sender: number, num: number, msg: string, id)
+    id = uuid(tostring(id))  -- SLua delivers key event params as strings; normalize to uuid
     if num == KERNEL_LIFECYCLE then
         local msg_type = ll.JsonGetValue(msg, {"type"})
         if msg_type == JSON_INVALID then return end
