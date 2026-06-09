@@ -10,9 +10,15 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys and is
               are resolved asynchronously via ll.RequestDisplayName. This module
               is the SOLE LSD WRITER for MANAGED_SETTINGS_KEYS — plugins request
               writes via the CSV-envelope settings.delta / settings.delete
-              protocol on SETTINGS_BUS.
+              protocol on SETTINGS_BUS. The notecard is authoritative only for
+              keys it itself provides: a card-ownership manifest clears only what
+              the card dropped, so runtime-set keys survive (last-writer-wins
+              between reloads; the card re-asserts its keys on reload).
 
 SLUA PORT NOTES:
+- Card-ownership manifest ported from kmod_settings.lsl rev 22: KEY_CARDMANIFEST
+  + apply_card_manifest_clear / finalize_card_manifest replace the blanket
+  clear-then-reapply (clear_managed_settings is gone); parse records provenance.
 - Ported from kmod_settings.lsl rev 21. Wire protocol (SETTINGS_BUS 800 +
   KERNEL_LIFECYCLE 500), LSD key names, and storage formats (flat scalars /
   CSVs, never JSON) are unchanged so it interoperates with LSL plugins.
@@ -58,6 +64,12 @@ local KEY_LOCKED        = "lock.locked"
 -- start_notecard_reading so script restarts don't re-arm a hostile notecard.
 local KEY_SENTINEL = "settings.bootstrapped"
 
+-- Card-ownership manifest — CSV of tokens the notecard provided on its last
+-- parse ("@owner"/"@trustees"/"@blacklist" units + per-key tokens). On reparse
+-- we clear only what the card managed last time, so a dropped key is removed
+-- while runtime-set keys the card never listed survive.
+local KEY_CARDMANIFEST = "settings.cardmanifest"
+
 local NAME_LOADING = "(loading...)"
 
 --[[ -------------------- NOTECARD CONFIG -------------------- ]]
@@ -72,6 +84,9 @@ local NotecardQuery = NULL_KEY
 local NotecardLine = 0
 local IsLoadingNotecard = false
 local NotecardKey = NULL_KEY
+
+-- Tokens recorded during the in-progress notecard parse (see KEY_CARDMANIFEST).
+local CardProvided = {}
 
 -- Reset Config in-flight state.
 local InResetConfig = false
@@ -179,12 +194,6 @@ local function is_writable_key(lsd_key: string): boolean
     return list_find(MANAGED_SETTINGS_KEYS, lsd_key) ~= nil
 end
 
-local function clear_managed_settings()
-    for _, k in ipairs(MANAGED_SETTINGS_KEYS) do
-        ll.LinksetDataDelete(k)
-    end
-end
-
 local function handle_settings_delta_csv(msg: string)
     -- KeepNulls preserves a trailing empty token so `settings.delta:foo:`
     -- correctly writes foo="" (rev-16 fix).
@@ -222,6 +231,31 @@ local function clear_trustee_keys()
     ll.LinksetDataDelete(KEY_TRUSTEE_UUIDS)
     ll.LinksetDataDelete(KEY_TRUSTEE_NAMES)
     ll.LinksetDataDelete(KEY_TRUSTEE_HONORIFICS)
+end
+
+--[[ -------------------- CARD-OWNERSHIP MANIFEST -------------------- ]]
+
+-- Record a manifest token the current parse provided (deduped).
+local function record_card_key(tok: string)
+    if list_find(CardProvided, tok) == nil then CardProvided[#CardProvided + 1] = tok end
+end
+
+-- Pre-parse clear: remove only what the card managed on its last parse. Units
+-- map to the family-clear helpers; every other token is a single LSD key.
+-- Card-present keys are re-written by the parse; dropped ones stay cleared;
+-- runtime-set keys the card never listed are never touched.
+local function apply_card_manifest_clear()
+    for _, tok in ipairs(csv_read(KEY_CARDMANIFEST)) do
+        if tok == "@owner" then clear_owner_keys()
+        elseif tok == "@trustees" then clear_trustee_keys()
+        elseif tok == "@blacklist" then ll.LinksetDataDelete(KEY_BLACKLIST)
+        else ll.LinksetDataDelete(tok) end
+    end
+end
+
+-- Persist the manifest built during this parse (csv_write deletes when empty).
+local function finalize_card_manifest()
+    csv_write(KEY_CARDMANIFEST, CardProvided)
 end
 
 -- Full wipe + notecard removal (zero-trust: an abusive owner could have baked
@@ -458,6 +492,21 @@ local function parse_notecard_line(line: string)
     local key_name = ll.StringTrim(string.sub(line, 1, sep - 1), STRING_TRIM)
     local value    = ll.StringTrim(string.sub(line, sep + 1), STRING_TRIM)
 
+    -- Provenance: record which manifest token this card line contributes, so a
+    -- later reload that drops the line clears it (runtime-only keys survive).
+    if key_name == KEY_OWNER or key_name == KEY_OWNER_HONORIFIC
+        or key_name == KEY_OWNER_UUIDS or key_name == KEY_OWNER_NAMES
+        or key_name == KEY_OWNER_HONORIFICS then
+        record_card_key("@owner")
+    elseif key_name == KEY_TRUSTEE_UUIDS or key_name == KEY_TRUSTEE_NAMES
+        or key_name == KEY_TRUSTEE_HONORIFICS then
+        record_card_key("@trustees")
+    elseif key_name == KEY_BLACKLIST then
+        record_card_key("@blacklist")
+    elseif string.find(key_name, ".", 1, true) ~= nil then
+        record_card_key(key_name)
+    end
+
     if key_name == KEY_MULTI_OWNER_MODE then
         ll.LinksetDataWrite(KEY_MULTI_OWNER_MODE, normalize_bool(value))
         return
@@ -545,15 +594,14 @@ end
 local function start_notecard_reading(): boolean
     -- Sentinel-gated: explicit re-parse paths must clear the sentinel first so
     -- a hostile notecard cannot self-arm a wiped collar on restart.
+    CardProvided = {}   -- reset provenance accumulator for this parse
     if ll.LinksetDataRead(KEY_SENTINEL) ~= "" then return false end
     if ll.GetInventoryType(NOTECARD_NAME) ~= INVENTORY_NOTECARD then return false end
 
-    -- Notecard is canonical: clear managed data first so removed entries don't
-    -- linger, then let consumers fall back to defaults for card-silent keys.
-    clear_owner_keys()
-    clear_trustee_keys()
-    ll.LinksetDataDelete(KEY_BLACKLIST)
-    clear_managed_settings()
+    -- Clear only what the card itself managed on its last parse (the manifest),
+    -- so a key the card has since dropped is removed, while runtime-set keys the
+    -- card never listed survive. Card-present keys are re-asserted by the parse.
+    apply_card_manifest_clear()
 
     IsLoadingNotecard = true
     NotecardLine = 0
@@ -571,6 +619,7 @@ local function finalize_reset_config()
         end
     end
 
+    finalize_card_manifest()
     ll.LinksetDataWrite(KEY_SENTINEL, "1")
     InResetConfig = false
     ResetConfigSaved = {}
@@ -783,6 +832,7 @@ function LLEvents.dataserver(query_id, data: string)
                 finalize_reset_config()
             else
                 -- Normal bootstrap completion.
+                finalize_card_manifest()
                 ll.LinksetDataWrite(KEY_SENTINEL, "1")
                 broadcast_settings_changed()
                 ll.MessageLinked(LINK_SET, KERNEL_LIFECYCLE,

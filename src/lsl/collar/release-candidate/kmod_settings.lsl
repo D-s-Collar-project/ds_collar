@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 21
+REVISION: 22
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -13,10 +13,19 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               kmod_settings is the SOLE LSD WRITER for keys listed in
               MANAGED_SETTINGS_KEYS — plugins request writes via the
               CSV-envelope settings.delta / settings.delete protocol on
-              SETTINGS_BUS. Managed keys are also reset to absent on
-              notecard reload; consumers fall back to in-script defaults
-              via lsd_int(key, fallback) when the notecard omits a key.
+              SETTINGS_BUS. The notecard is authoritative only for keys it
+              itself provides: a card-ownership manifest records what the card
+              set last parse, so on reload the card re-asserts its current keys
+              and clears ones it has dropped, while runtime-set keys the card
+              never listed survive (last-writer-wins between reloads).
 CHANGES:
+- v1.1 rev 22: Notecard parse is a manifest diff, not clear-all-then-reapply.
+  settings.cardmanifest (CSV of @owner/@trustees/@blacklist units + per-key
+  tokens) records what the card provided. On reparse, apply_card_manifest_clear
+  removes only keys the card managed last time; card-present keys are re-asserted
+  by the parse; runtime-set keys the card never listed are preserved. Fixes a
+  sparse card wiping menu-set owner/settings. clear_managed_settings removed
+  (superseded). Restart still skips parse via the sentinel.
 - v1.1 rev 21: Register leash.enhanced in MANAGED_SETTINGS_KEYS — plugin_leash's enhanced-mode toggle now persists via the settings.delta CSV path (delta-native, not the engine's legacy settings.set), wipes with the managed family on factory reset/notecard reload, and is settable from the settings notecard as "leash.enhanced = 0|1" (lands via the existing generic dotted-key write-through in parse_notecard_line). One-line whitelist addition; no parser change needed.
 - v1.1 rev 20: Revert rev 19. worn.registry.locked + worn.registry.paths removed from MANAGED_SETTINGS_KEYS. The shared bit-vector approach caused a Mono stack-heap collision in plugin_outfits and was unnecessary — plugin_strip now reads lock state live via @getstatusall:detach + @getpath at picker render time (see plugin_strip rev 18, plugin_outfits rev 17, plugin_folders rev 34).
 - v1.1 rev 19: Register worn.registry.locked + worn.registry.paths in MANAGED_SETTINGS_KEYS. Shared attach-point lock bit vector: position i = ATTACH_* integer i, value "1" = the item currently at that attach point was attached from a folder under a locked subtree. plugin_outfits / plugin_folders write bits at attach/detach/lock/unlock time; plugin_strip reads the vector to filter the picker. Paths key is an audit-only CSV of source paths the writers have referenced. Both keys wipe on factory reset alongside the rest of the managed family.
@@ -128,6 +137,13 @@ string KEY_LOCKED        = "lock.locked";
 // CHANGED_INVENTORY notecard-changed, or llLinksetDataReset().
 string KEY_SENTINEL = "settings.bootstrapped";
 
+// Card-ownership manifest — CSV of tokens the settings notecard provided on its
+// last parse: "@owner"/"@trustees"/"@blacklist" units plus individual managed/
+// generic LSD keys. On reparse we clear only what the card managed last time, so
+// a key the card has dropped is removed while runtime-set keys the card never
+// listed survive. Rebuilt into CardProvided each parse; persisted at finalize.
+string KEY_CARDMANIFEST = "settings.cardmanifest";
+
 // Placeholder used while a display name is being resolved
 string NAME_LOADING = "(loading...)";
 
@@ -143,6 +159,9 @@ key NotecardQuery = NULL_KEY;
 integer NotecardLine = 0;
 integer IsLoadingNotecard = FALSE;
 key NotecardKey = NULL_KEY;
+
+// Tokens recorded during the in-progress notecard parse (see KEY_CARDMANIFEST).
+list CardProvided = [];
 
 // Reset Config in-flight state. When TRUE, dataserver EOF routes to
 // finalize_reset_config() instead of the normal bootstrap broadcast.
@@ -220,10 +239,11 @@ delete, broadcast_settings_changed fires settings.sync so consumers re-read.
 -------------------- */
 
 // Canonical list of LSD keys that kmod_settings manages on behalf of consumer
-// plugins. These keys are:
-//   (1) writable via the settings.delta CSV protocol (is_writable_key gate)
-//   (2) reset to absent on notecard reload (clear_managed_settings) so consumers
-//       fall back to in-script defaults via lsd_int(key, fallback).
+// plugins, writable via the settings.delta CSV protocol (is_writable_key gate).
+// Notecard reload no longer blanket-clears this list; the card-ownership
+// manifest (apply_card_manifest_clear) clears only keys the card itself
+// provided, and consumers fall back to in-script defaults via
+// lsd_int(key, fallback) when a key is absent.
 // Grow this list as more plugins migrate to the single-writer protocol.
 // @lsl-ide lsd-owner
 list MANAGED_SETTINGS_KEYS = [
@@ -262,14 +282,6 @@ list MANAGED_SETTINGS_KEYS = [
 
 integer is_writable_key(string lsd_key) {
     return llListFindList(MANAGED_SETTINGS_KEYS, [lsd_key]) != -1;
-}
-
-clear_managed_settings() {
-    integer i;
-    integer n = llGetListLength(MANAGED_SETTINGS_KEYS);
-    for (i = 0; i < n; i++) {
-        llLinksetDataDelete(llList2String(MANAGED_SETTINGS_KEYS, i));
-    }
 }
 
 handle_settings_delta_csv(string msg) {
@@ -313,6 +325,35 @@ clear_trustee_keys() {
     llLinksetDataDelete(KEY_TRUSTEE_UUIDS);
     llLinksetDataDelete(KEY_TRUSTEE_NAMES);
     llLinksetDataDelete(KEY_TRUSTEE_HONORIFICS);
+}
+
+/* -------------------- CARD-OWNERSHIP MANIFEST -------------------- */
+
+// Record a manifest token the current parse provided (deduped).
+record_card_key(string tok) {
+    if (llListFindList(CardProvided, [tok]) == -1) CardProvided += [tok];
+}
+
+// Pre-parse clear: remove only what the card managed on its last parse. Units
+// map to the family-clear helpers; every other token is a single LSD key.
+// Card-present keys are re-written by the parse; dropped ones stay cleared;
+// runtime-set keys the card never listed are never touched.
+apply_card_manifest_clear() {
+    list old_manifest = csv_read(KEY_CARDMANIFEST);
+    integer i;
+    integer n = llGetListLength(old_manifest);
+    for (i = 0; i < n; i++) {
+        string tok = llList2String(old_manifest, i);
+        if      (tok == "@owner")     clear_owner_keys();
+        else if (tok == "@trustees")  clear_trustee_keys();
+        else if (tok == "@blacklist") llLinksetDataDelete(KEY_BLACKLIST);
+        else                          llLinksetDataDelete(tok);
+    }
+}
+
+// Persist the manifest built during this parse (csv_write deletes when empty).
+finalize_card_manifest() {
+    csv_write(KEY_CARDMANIFEST, CardProvided);
 }
 
 factory_reset() {
@@ -555,6 +596,25 @@ parse_notecard_line(string line) {
     string key_name = llStringTrim(llGetSubString(line, 0, sep_pos - 1), STRING_TRIM);
     string value    = llStringTrim(llGetSubString(line, sep_pos + 1, -1), STRING_TRIM);
 
+    // Provenance: record which manifest token this card line contributes, so a
+    // later reload that drops the line clears it (runtime-only keys, never
+    // recorded here, survive). Owner/trustee/blacklist collapse to family units.
+    if (key_name == KEY_OWNER || key_name == KEY_OWNER_HONORIFIC
+        || key_name == KEY_OWNER_UUIDS || key_name == KEY_OWNER_NAMES
+        || key_name == KEY_OWNER_HONORIFICS) {
+        record_card_key("@owner");
+    }
+    else if (key_name == KEY_TRUSTEE_UUIDS || key_name == KEY_TRUSTEE_NAMES
+        || key_name == KEY_TRUSTEE_HONORIFICS) {
+        record_card_key("@trustees");
+    }
+    else if (key_name == KEY_BLACKLIST) {
+        record_card_key("@blacklist");
+    }
+    else if (llSubStringIndex(key_name, ".") != -1) {
+        record_card_key(key_name);
+    }
+
     // Multi-owner mode flag
     if (key_name == KEY_MULTI_OWNER_MODE) {
         llLinksetDataWrite(KEY_MULTI_OWNER_MODE, normalize_bool(value));
@@ -702,20 +762,16 @@ integer start_notecard_reading() {
     // Reset Config, CHANGED_INVENTORY notecard-changed) must clear the
     // sentinel first. Boot/restart paths fall through this guard so a
     // hostile notecard cannot self-arm a wiped collar.
+    CardProvided = [];   // reset provenance accumulator for this parse
     if (llLinksetDataRead(KEY_SENTINEL) != "") return FALSE;
 
     if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) {
         return FALSE;
     }
-    // Notecard is canonical for ownership data — clear it before reading
-    // so removed entries don't persist as stale data.
-    clear_owner_keys();
-    clear_trustee_keys();
-    llLinksetDataDelete(KEY_BLACKLIST);
-    // Same rule for the managed-settings family: any key absent from the new
-    // notecard reverts to its in-script default (consumer plugins read with
-    // lsd_int(key, fallback) so an empty LSD value resolves to the default).
-    clear_managed_settings();
+    // Clear only what the card itself managed on its last parse (the manifest),
+    // so a key the card has since dropped is removed, while runtime-set keys the
+    // card never listed survive. Card-present keys are re-asserted by the parse.
+    apply_card_manifest_clear();
 
     IsLoadingNotecard = TRUE;
     NotecardLine = 0;
@@ -912,7 +968,9 @@ finalize_reset_config() {
         }
     }
 
-    // Mark bootstrap complete; subsequent restarts skip notecard parse.
+    // Persist the card manifest (the restored owner/lock keys are runtime-owned
+    // and intentionally not in it), then mark bootstrap complete.
+    finalize_card_manifest();
     llLinksetDataWrite(KEY_SENTINEL, "1");
 
     InResetConfig = FALSE;
@@ -1012,8 +1070,9 @@ default
                     finalize_reset_config();
                 }
                 else {
-                    // Normal bootstrap completion. Mark sentinel so the next
-                    // script restart doesn't re-parse the card automatically.
+                    // Normal bootstrap completion. Persist the card manifest,
+                    // then mark sentinel so the next restart doesn't re-parse.
+                    finalize_card_manifest();
                     llLinksetDataWrite(KEY_SENTINEL, "1");
                     broadcast_settings_changed();
 

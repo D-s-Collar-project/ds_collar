@@ -1,10 +1,14 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Maintenance and utility functions for collar management
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.1 rev 15: View Settings now shows the owning plugins' effective defaults for
+  unpersisted keys: runaway defaults ON (fmt_bool_def, matches plugin_access) and
+  relay.mode absent = ASK (matches plugin_relay), instead of reporting OFF. Fixes
+  the report disagreeing with the actual configuration when those were never toggled.
 - v1.1 rev 14: Add Update Collar entry. Wearer/primary-owner ACLs (2/4/5)
   only; trustees and TPE wearer (ACL 0) locked out by policy. Tapping it
   asks kmod_remote to broadcast remote.updateravailable for 5s; first
@@ -232,8 +236,22 @@ string fmt_bool(string raw) {
     return "OFF";
 }
 
-// Format relay.mode integer as label
+// fmt_bool with an explicit default for an absent key. Some settings default ON
+// in their owning plugin and aren't persisted to LSD until toggled, so the raw
+// read is "" — show the owning plugin's effective default, not OFF.
+string fmt_bool_def(string raw, integer def_on) {
+    if (raw == "") {
+        if (def_on) return "ON";
+        return "OFF";
+    }
+    if ((integer)raw) return "ON";
+    return "OFF";
+}
+
+// Format relay.mode integer as label. Absent key = plugin_relay's effective
+// default (ASK), not OFF.
 string fmt_relay_mode(string raw) {
+    if (raw == "") return "ASK";
     integer m = (integer)raw;
     if (m == 1) return "ON";
     if (m == 2) return "ASK";
@@ -328,7 +346,7 @@ do_view_settings() {
 
     // --- Behavioural settings ---
     output += "Access: multi-owner " + fmt_bool(llLinksetDataRead("access.multiowner"));
-    output += " | runaway " + fmt_bool(llLinksetDataRead("access.enablerunaway")) + "\n";
+    output += " | runaway " + fmt_bool_def(llLinksetDataRead("access.enablerunaway"), TRUE) + "\n";
     output += "Lock: " + lock_str;
     output += " | public " + fmt_bool(llLinksetDataRead("public.mode"));
     output += " | TPE " + fmt_bool(llLinksetDataRead("tpe.mode")) + "\n";

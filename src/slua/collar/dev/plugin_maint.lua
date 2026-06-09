@@ -84,9 +84,23 @@ local function fmt_bool(raw: string): string
 end
 
 local function fmt_relay_mode(raw: string): string
+    -- Absent key = plugin_relay's effective default (ASK), not OFF.
+    if raw == "" then return "ASK" end
     local m = integer(raw)
     if m == 1 then return "ON" end
     if m == 2 then return "ASK" end
+    return "OFF"
+end
+
+-- fmt_bool with an explicit default for an absent key. Some settings default ON
+-- in their owning plugin and aren't persisted to LSD until toggled, so the raw
+-- read is "" — show the owning plugin's effective default, not OFF.
+local function fmt_bool_def(raw: string, def_on: boolean): string
+    if raw == "" then
+        if def_on then return "ON" end
+        return "OFF"
+    end
+    if integer(raw) ~= 0 then return "ON" end
     return "OFF"
 end
 
@@ -238,7 +252,7 @@ local function do_view_settings()
     else output = output .. "Trustees:\n" .. trustee_block end
 
     output = output .. "Access: multi-owner " .. fmt_bool(ll.LinksetDataRead("access.multiowner"))
-        .. " | runaway " .. fmt_bool(ll.LinksetDataRead("access.enablerunaway")) .. "\n"
+        .. " | runaway " .. fmt_bool_def(ll.LinksetDataRead("access.enablerunaway"), true) .. "\n"
     output = output .. "Lock: " .. lock_str
         .. " | public " .. fmt_bool(ll.LinksetDataRead("public.mode"))
         .. " | TPE " .. fmt_bool(ll.LinksetDataRead("tpe.mode")) .. "\n"
