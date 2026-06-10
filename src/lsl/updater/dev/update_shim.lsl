@@ -27,7 +27,7 @@ ARCHITECTURE: Mirrors install_shim's dormancy-marker bracket: state_entry
   the shim does not touch LSD beyond the desc-backup key.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
-- v1.1 rev 8: Read the secure-channel start param BEFORE the marker dormancy guard. A legitimate PIN load (non-zero channel) now proceeds even when the prim still carries UPDATER_MARKER from a prior aborted update — previously the shim self-parked before whispering READY ("Shim did not start"), so one interrupted update bricked every subsequent one (and left the collar's own scripts parked). The marker self-park now only applies to orphaned copies (no start param); a stuck collar self-heals on the next update.
+- v1.1 rev 8: Add a SETTLE_DELAY (5s) between DONE and teardown. llRemoteLoadScriptPin / llGiveInventory are async, so the bundler's last script give(s) could still be landing when DONE arrived — the old immediate activate_collar_scripts + self-delete tore down against a half-populated prim. DONE now arms the settle timer (reusing the single timer); a Finishing flag ignores late traffic so it can't reset the delay; timer() does the restore + teardown once the prim is complete.
 - v1.1 rev 7: Bracket the update with the install_shim dormancy pattern. state_entry now saves the prim description to LSD (key `updater.original_desc`), stamps UPDATER_MARKER, and parks every collar-namespace script via park_collar_scripts. New activate_collar_scripts helper restores the desc from LSD, clears the LSD entry, and re-enables + llResetOtherScript-s each collar script so its state_entry runs again with the new bundle live. Replaces the previous remote.update.complete broadcast (rev 5) — kmod_bootstrap's startup orchestration now fires naturally as part of its own reset. Failure paths (inactivity timeout, CHANGED_OWNER) also activate so the wearer doesn't end up with a silent-locked collar. REMOTE_BUS constant removed.
 - v1.1 rev 6: INACTIVITY_TIMEOUT 120s → 600s. The install-against-existing-collar flow parks the bundler in scripts_await while the driver shows the feature picker; if the wearer took longer than 120s reading, the shim disarmed the PIN before they confirmed, then llRemoteLoadScriptPin failed with "trying to illegally load script onto task" on the next dispatch. 600s covers any plausible decision time + BUNDLE_TIMEOUT.
 - v1.1 rev 5: Broadcast `remote.update.complete` on REMOTE_BUS in the DONE handler before self-deletion. kmod_bootstrap listens for it and llResetScripts so the startup orchestration (RLV probe, register.refresh, status announcement) re-runs with the new script set live. Only the success path emits — inactivity timeout / CHANGED_OWNER cleanups don't, since those leave the collar half-updated and a "we're done" signal would be misleading.
@@ -79,6 +79,12 @@ string UPDATER_DESC_BACKUP_KEY = "updater.original_desc";
 // stalled session.
 float INACTIVITY_TIMEOUT = 600.0;
 
+// Grace period between DONE and teardown. llRemoteLoadScriptPin / llGiveInventory
+// are asynchronous, so when the driver says DONE the last scripts may still be
+// landing. We wait this long before activate_collar_scripts + self-delete so the
+// prim is fully populated before we restore the desc, reset the scripts, and go.
+float SETTLE_DELAY = 5.0;
+
 // Wearer-specific config; never managed by the updater. Excluded from
 // LIST_NC reporting and from QUERY_NC wipe (returns EXCLUDE verdict so
 // the bundler also drops it from its give batch).
@@ -88,6 +94,7 @@ string SETTINGS_NOTECARD = "settings";
 /* -------------------- STATE -------------------- */
 integer SecureChannel = 0;
 integer ListenHandle = 0;
+integer Finishing = FALSE;   // DONE received; settling before teardown (SETTLE_DELAY)
 
 
 /* -------------------- PROTOCOL -------------------- */
@@ -284,25 +291,19 @@ cleanup_and_die() {
 
 default {
     state_entry() {
-        SecureChannel = llGetStartParameter();
+        // Dormancy guard — if this script got dragged into the updater
+        // prim's inventory during packaging, state_entry parks it so it
+        // doesn't try to run update logic in the wrong context.
+        if (llGetObjectDesc() == UPDATER_MARKER) {
+            llSetScriptState(llGetScriptName(), FALSE);
+            return;
+        }
 
-        // Orphan guard. A copy NOT loaded via llRemoteLoadScriptPin has no
-        // session channel. If the prim still carries the marker (a prior
-        // update aborted before activate_collar_scripts ran), park; otherwise
-        // remove ourselves rather than leaving a dormant payload behind.
-        //
-        // A LEGITIMATE update load always passes a non-zero channel and MUST
-        // proceed even when the marker is stale — otherwise the shim self-parks
-        // before whispering READY ("Shim did not start") and a single
-        // interrupted update bricks every future one. Proceeding lets a stuck
-        // collar self-heal: the re-entry guard below preserves the real
-        // original desc backed up by the aborted run, and the DONE path
-        // restores it.
+        SecureChannel = llGetStartParameter();
         if (SecureChannel == 0) {
-            if (llGetObjectDesc() == UPDATER_MARKER) {
-                llSetScriptState(llGetScriptName(), FALSE);
-                return;
-            }
+            // No session channel passed — this script was placed without
+            // going through the proper llRemoteLoadScriptPin path. Remove
+            // ourselves to avoid leaving a dormant payload in inventory.
             llRemoveInventory(llGetScriptName());
             return;
         }
@@ -359,6 +360,10 @@ default {
         if (channel != SecureChannel) return;
         if (llGetOwnerKey(id) != llGetOwner()) return;
 
+        // Settling after DONE — ignore any late traffic so it can't reset the
+        // settle timer back to the inactivity window.
+        if (Finishing) return;
+
         // Any activity resets the inactivity watchdog.
         llSetTimerEvent(INACTIVITY_TIMEOUT);
 
@@ -366,15 +371,12 @@ default {
         string verb = llList2String(parts, 0);
 
         if (verb == "DONE") {
-            // Update applied successfully. Restore the original prim
-            // description from LSD and re-enable + reset every collar
-            // script — each script's state_entry re-runs and runs its
-            // own startup logic. kmod_bootstrap's state_entry is where
-            // the RLV probe / register.refresh / status announcement
-            // live, so resetting it directly obsoletes the previous
-            // remote.update.complete broadcast hook.
-            activate_collar_scripts();
-            cleanup_and_die();
+            // Update applied. Don't tear down yet: the bundler's last script
+            // give(s) may still be landing (async). Arm the settle delay and
+            // let timer() restore the desc, reset the scripts, and self-delete
+            // once the prim is fully populated.
+            Finishing = TRUE;
+            llSetTimerEvent(SETTLE_DELAY);
             return;
         }
 
@@ -457,11 +459,12 @@ default {
     }
 
     timer() {
-        // Inactivity watchdog: bundler has gone silent. Activate the
-        // parked scripts so the wearer gets a working collar back (the
-        // half-applied bundle may be inconsistent, but a silent-locked
-        // collar is worse — they can retry the update or factory-reset
-        // from there).
+        // Two paths converge here, both ending in restore + teardown:
+        //   - SETTLE_DELAY after DONE (Finishing): the bundle is complete and
+        //     in-flight scripts have had time to land; finish cleanly.
+        //   - INACTIVITY_TIMEOUT of silence: the session died; activate anyway
+        //     so the wearer gets a working collar back (a half-applied bundle
+        //     beats a silent-locked collar — they can retry or factory-reset).
         activate_collar_scripts();
         cleanup_and_die();
     }

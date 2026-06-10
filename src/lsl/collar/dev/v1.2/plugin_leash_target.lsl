@@ -1,22 +1,25 @@
 /*--------------------
-PLUGIN: plugin_leash_avatar.lsl
+PLUGIN: plugin_leash_target.lsl
 VERSION: 1.2
 REVISION: 0
-PURPOSE: Sub-plugin for avatar-target leash flows — Clip / Pass / Offer /
-         Coffle. Also receives plugin.leash.offer.pending and shows the
-         accept/decline dialog to the offer target.
-ARCHITECTURE: Hidden helper of plugin_leash. Does NOT register
-              plugin.reg.* (so kmod_ui doesn't list it in the top menu).
-              Receives ui.menu.start with context="ui.core.leash.avatar"
-              + subpath ("clip" | "pass" | "offer" | "coffle"); dispatches
-              the corresponding plugin.leash.action to kmod_leash_engine.
-              For pickers (pass/offer/coffle) shows an avatar selector and
-              sends the action with target. After completion routes back
-              to plugin_leash's main menu via ui.menu.start (context
-              "ui.core.leash"). All four flows ultimately collapse to the
-              same engine action — only the action verb and notice differ.
-              Coffle and Pass differ in the engine: Pass swaps Controller,
-              Coffle keeps Controller and changes FollowTarget only.
+PURPOSE: Unified hidden target-picker for all targeted leash flows. Merges the
+         former plugin_leash_avatar (Clip/Pass/Offer/Coffle + offer reception)
+         and plugin_leash_object (Post). One picker, two sources.
+ARCHITECTURE: Hidden helper of plugin_leash (no plugin.reg.*, so kmod_ui never
+              lists it). Receives ui.menu.start with context
+              "ui.core.leash.target" + subpath:
+                clip               -> grab immediately (no picker)
+                pass/offer/coffle  -> AVATAR picker (llGetAgentList — avatars
+                                      only by definition)
+                post               -> OBJECT picker (llSensor PASSIVE|SCRIPTED —
+                                      avatars are the AGENT sensor type and are
+                                      excluded; a defensive llGetAgentSize check
+                                      drops any stray agent too)
+              The mode is implied by MenuContext (post => object; otherwise
+              avatar), so the two sources are strictly mode-gated and can never
+              cross-list. Dispatches plugin.leash.action to kmod_leash_engine,
+              then returns to plugin_leash's menu via ui.menu.start. Also
+              handles plugin.leash.offer.pending (offer-reception dialog).
 --------------------*/
 
 
@@ -26,24 +29,21 @@ integer UI_BUS = 900;
 integer DIALOG_BUS = 950;
 
 /* -------------------- PLUGIN IDENTITY -------------------- */
-string PLUGIN_CONTEXT       = "ui.core.leash.avatar";
+string PLUGIN_CONTEXT       = "ui.core.leash.target";
 string PARENT_PLUGIN_CONTEXT = "ui.core.leash";
 
 /* -------------------- STATE -------------------- */
-// Active session (for picker flows).
 key CurrentUser = NULL_KEY;
 integer UserAcl = -999;
 string SessionId = "";
-string MenuContext = "";              // "pass" | "offer" | "coffle" (or "" when idle)
-list SensorCandidates = [];           // [name, key, name, key, ...] strided
-integer SensorPage = 0;               // current page index for paginated picker
+string MenuContext = "";              // "pass" | "offer" | "coffle" | "post" (or "" idle)
+list Candidates = [];                 // [name, key, name, key, ...] strided
+integer PickPage = 0;
 
 // Offer-reception dialog (independent session).
 string OfferDialogSession = "";
 key OfferTarget = NULL_KEY;
 key OfferOriginator = NULL_KEY;
-
-// We don't need Leasher state here — engine validates ACL server-side.
 
 /* -------------------- HELPERS -------------------- */
 string generate_session_id() {
@@ -54,10 +54,32 @@ string btn(string label, string cmd) {
     return llList2Json(JSON_OBJECT, ["label", label, "context", cmd]);
 }
 
+// Object mode => "object", everything else => "avatar".
+integer is_object_mode() {
+    return MenuContext == "post";
+}
+
+// Pass/Offer must not hand the leash to a blacklisted avatar. The engine used
+// to enforce target ACL >= 1; with ACL decisions in the plugins, we check the
+// canonical blacklist CSV directly (one synchronous LSD read). Pass/offer only —
+// coffle/post have their own target validation in the engine.
+integer is_blacklisted(key avatar) {
+    string raw = llLinksetDataRead("blacklist.blklistuuid");
+    if (raw == "") return FALSE;
+    return llListFindList(llCSV2List(raw), [(string)avatar]) != -1;
+}
+
+string dialogTitleForContext(string ctx) {
+    if (ctx == "pass") return "Pass Leash";
+    if (ctx == "offer") return "Offer Leash";
+    if (ctx == "coffle") return "Coffle";
+    if (ctx == "post") return "Post";
+    return "";
+}
+
 // Reorder items so an llDialog rendered from the returned list shows them
-// top-to-bottom, left-to-right (matching the order the wearer reads in
-// the body text). 3 fixed nav buttons at indices 0-2 (bottom row); items
-// fill the three rows above in top-to-bottom order.
+// top-to-bottom, left-to-right (matching the order the wearer reads in the
+// body). 3 fixed nav buttons at indices 0-2 (bottom row); items fill above.
 list reorder_item_buttons(list nav_buttons, list item_buttons) {
     integer item_count = llGetListLength(item_buttons);
     integer total = 3 + item_count;
@@ -85,84 +107,6 @@ list reorder_item_buttons(list nav_buttons, list item_buttons) {
     return final;
 }
 
-/* -------------------- AVATAR PICKER -------------------- */
-// Scan + sort once, then hand off to renderAvatarPickerPage. Pagination
-// fans out arbitrary agent counts across pages of 9; the old 18-cap was a
-// workaround for the single-shot render and is gone.
-showAvatarPicker(string action_name) {
-    MenuContext = action_name;
-
-    list nearby = llGetAgentList(AGENT_LIST_PARCEL, []);
-    key wearer = llGetOwner();
-
-    // Build into local list (refcount 1 → O(n) amortized; appending
-    // directly to a global is O(n²) — see plugin_leash rev 18 fix).
-    list buf = [];
-    integer i = 0;
-    integer n = llGetListLength(nearby);
-    while (i < n) {
-        key detected = llList2Key(nearby, i);
-        if (detected != wearer) {
-            buf += [llKey2Name(detected), detected];
-        }
-        i++;
-    }
-    SensorCandidates = buf;
-
-    if (llGetListLength(SensorCandidates) > 2) {
-        SensorCandidates = llListSortStrided(SensorCandidates, 2, 0, TRUE);
-    }
-
-    if (llGetListLength(SensorCandidates) == 0) {
-        llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
-        cleanupSession();
-        return;
-    }
-
-    renderAvatarPickerPage(0);
-}
-
-// Render a single page of cached SensorCandidates. SensorPage is updated
-// here; prev/next in handlePickerClick supplies the new index (with wrap).
-renderAvatarPickerPage(integer page) {
-    integer total = llGetListLength(SensorCandidates) / 2;
-    integer total_pages = (total + 8) / 9;
-    if (total_pages < 1) total_pages = 1;
-    if (page < 0) page = 0;
-    if (page >= total_pages) page = total_pages - 1;
-    SensorPage = page;
-
-    integer start = page * 9;
-    integer end = start + 9;
-    if (end > total) end = total;
-
-    list nav_buttons = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
-    list item_buttons = [];
-    integer i = start;
-    while (i < end) {
-        string avatar_name = llList2String(SensorCandidates, i * 2);
-        item_buttons += [btn(avatar_name, "sel:" + avatar_name)];
-        i++;
-    }
-    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
-
-    string body = "Select avatar:";
-    if (total_pages > 1) {
-        body += "\n\nPage " + (string)(page + 1) + "/" + (string)total_pages;
-    }
-
-    SessionId = generate_session_id();
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", dialogTitleForContext(MenuContext),
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
-    ]), NULL_KEY);
-}
-
 /* -------------------- ACTIONS -------------------- */
 // The engine no longer re-verifies ACL; it trusts the policy-gated action and
 // the acl level we resolved for this user (passed in via ui.menu.start).
@@ -183,17 +127,85 @@ sendActionWithTarget(string action, key target) {
     ]), CurrentUser);
 }
 
+/* -------------------- PICKER (shared render for both sources) -------------------- */
+// Item buttons carry the absolute candidate index as context ("sel:<i>") while
+// showing the name as label — name UX with unambiguous selection even when two
+// candidates share a name.
+renderPickerPage(integer page) {
+    integer total = llGetListLength(Candidates) / 2;
+    integer total_pages = (total + 8) / 9;
+    if (total_pages < 1) total_pages = 1;
+    if (page < 0) page = 0;
+    if (page >= total_pages) page = total_pages - 1;
+    PickPage = page;
+
+    integer start = page * 9;
+    integer end = start + 9;
+    if (end > total) end = total;
+
+    list nav_buttons = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
+    list item_buttons = [];
+    integer i = start;
+    while (i < end) {
+        string nm = llList2String(Candidates, i * 2);
+        item_buttons += [btn(nm, "sel:" + (string)i)];
+        i++;
+    }
+    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
+
+    string body = "Select ";
+    if (is_object_mode()) body += "object:";
+    else                  body += "avatar:";
+    if (total_pages > 1) {
+        body += "\n\nPage " + (string)(page + 1) + "/" + (string)total_pages;
+    }
+
+    SessionId = generate_session_id();
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "session_id", SessionId,
+        "user", (string)CurrentUser,
+        "title", dialogTitleForContext(MenuContext),
+        "body", body,
+        "button_data", llList2Json(JSON_ARRAY, button_data),
+        "timeout", 60
+    ]), NULL_KEY);
+}
+
+// AVATAR source — parcel agent list is avatars-only by definition.
+populateAvatars() {
+    list nearby = llGetAgentList(AGENT_LIST_PARCEL, []);
+    key wearer = llGetOwner();
+    list buf = [];
+    integer i = 0;
+    integer n = llGetListLength(nearby);
+    while (i < n) {
+        key detected = llList2Key(nearby, i);
+        if (detected != wearer) buf += [llKey2Name(detected), detected];
+        i++;
+    }
+    Candidates = buf;
+    if (llGetListLength(Candidates) > 2) {
+        Candidates = llListSortStrided(Candidates, 2, 0, TRUE);
+    }
+}
+
+// OBJECT source — PASSIVE|SCRIPTED excludes avatars (they are AGENT type);
+// ACTIVE omitted so moving avatars don't slip in.
+startObjectScan() {
+    PickPage = 0;
+    Candidates = [];
+    llSensor("", NULL_KEY, PASSIVE | SCRIPTED, 96.0, PI);
+}
+
 /* -------------------- OFFER RECEPTION DIALOG -------------------- */
-// Engine fires plugin.leash.offer.pending after target ACL passes. We
-// open a dialog directed at the offer target asking accept/decline.
 showOfferDialog(key target, key originator) {
     OfferDialogSession = generate_session_id();
     OfferTarget = target;
     OfferOriginator = originator;
 
     string offerer_name = llKey2Name(originator);
-    key wearer = llGetOwner();
-    string wearer_name = llKey2Name(wearer);
+    string wearer_name = llKey2Name(llGetOwner());
 
     llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.open",
@@ -208,9 +220,9 @@ showOfferDialog(key target, key originator) {
 
 handleOfferResponse(string ctx) {
     if (ctx == "accept") {
-        // Target accepts → they "grab" the leash (engine swaps Leasher). Offer
-        // requires the collar was unleashed, so this is a fresh claim and the
-        // acl tag is unused engine-side; sent for protocol uniformity.
+        // Target accepts → they "grab" (engine swaps Leasher). Offer requires
+        // the collar was unleashed, so this is a fresh claim and the acl tag is
+        // unused engine-side; sent for protocol uniformity.
         llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
             "type", "plugin.leash.action",
             "action", "grab",
@@ -228,10 +240,6 @@ handleOfferResponse(string ctx) {
 }
 
 /* -------------------- NAVIGATION -------------------- */
-// Back to plugin_leash's main menu. Used only for the Back button —
-// an explicit back-navigation gesture. Action completions and error
-// paths just call cleanupSession() directly, per the project
-// convention that a finished process leaves no dialog behind.
 returnToParent() {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.menu.start",
@@ -252,86 +260,76 @@ cleanupSession() {
     UserAcl = -999;
     SessionId = "";
     MenuContext = "";
-    SensorCandidates = [];
-    SensorPage = 0;
+    Candidates = [];
+    PickPage = 0;
 }
 
 /* -------------------- SUBPATH DISPATCH -------------------- */
-// Called when ui.menu.start arrives with our context. subpath selects
-// the action: "clip" sends grab immediately (no picker); pass/offer/
-// coffle open the avatar picker.
 handleSubpath(string subpath) {
     if (subpath == "clip") {
         sendAction("grab");
         cleanupSession();
     }
-    else if (subpath == "pass") {
-        showAvatarPicker("pass");
+    else if (subpath == "pass" || subpath == "offer" || subpath == "coffle") {
+        MenuContext = subpath;
+        populateAvatars();
+        if (llGetListLength(Candidates) == 0) {
+            llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
+            cleanupSession();
+            return;
+        }
+        renderPickerPage(0);
     }
-    else if (subpath == "offer") {
-        showAvatarPicker("offer");
-    }
-    else if (subpath == "coffle") {
-        showAvatarPicker("coffle");
+    else if (subpath == "post") {
+        MenuContext = "post";
+        startObjectScan();   // render deferred to sensor()/no_sensor()
     }
     else {
-        // Unknown subpath — nothing to do, just clean up.
         cleanupSession();
     }
 }
 
-/* -------------------- BUTTON CLICK HANDLING -------------------- */
-handlePickerClick(string ctx, string clicked_btn) {
+/* -------------------- BUTTON CLICK -------------------- */
+handlePickerClick(string ctx) {
     if (ctx == "back") {
         returnToParent();
         return;
     }
 
     // Page math hoisted once — sibling-scope redeclaration is the LSL Mono
-    // nested-scope trap (lslint misses it). Wrap-around paging matches
-    // plugin_folders / plugin_animate.
-    integer total_pages = (llGetListLength(SensorCandidates) / 2 + 8) / 9;
+    // nested-scope trap (lslint misses it).
+    integer total_pages = (llGetListLength(Candidates) / 2 + 8) / 9;
     if (total_pages < 1) total_pages = 1;
 
     if (ctx == "prev") {
-        if (SensorPage == 0) renderAvatarPickerPage(total_pages - 1);
-        else                 renderAvatarPickerPage(SensorPage - 1);
+        if (PickPage == 0) renderPickerPage(total_pages - 1);
+        else               renderPickerPage(PickPage - 1);
         return;
     }
     if (ctx == "next") {
-        if (SensorPage >= total_pages - 1) renderAvatarPickerPage(0);
-        else                               renderAvatarPickerPage(SensorPage + 1);
+        if (PickPage >= total_pages - 1) renderPickerPage(0);
+        else                             renderPickerPage(PickPage + 1);
         return;
     }
-
-    // Avatar selection — match the raw clicked label against SensorCandidates.
-    key selected = NULL_KEY;
-    integer i = 0;
-    integer n = llGetListLength(SensorCandidates);
-    while (i < n) {
-        if (llList2String(SensorCandidates, i) == clicked_btn) {
-            selected = llList2Key(SensorCandidates, i + 1);
-            i = n;
+    if (llSubStringIndex(ctx, "sel:") == 0) {
+        integer idx = (integer)llGetSubString(ctx, 4, -1);
+        integer li = idx * 2;
+        if (li >= 0 && li < llGetListLength(Candidates)) {
+            key selected = llList2Key(Candidates, li + 1);
+            if ((MenuContext == "pass" || MenuContext == "offer")
+                && is_blacklisted(selected)) {
+                llRegionSayTo(CurrentUser, 0,
+                    "Cannot " + MenuContext + " leash: that person is blacklisted.");
+                cleanupSession();
+                return;
+            }
+            sendActionWithTarget(MenuContext, selected);
+            cleanupSession();
+            return;
         }
-        else i = i + 2;
-    }
-
-    if (selected != NULL_KEY) {
-        // MenuContext is the action verb ("pass" / "offer" / "coffle").
-        sendActionWithTarget(MenuContext, selected);
+        llRegionSayTo(CurrentUser, 0, "Invalid selection.");
         cleanupSession();
     }
-    else {
-        llRegionSayTo(CurrentUser, 0, "Avatar not found.");
-        cleanupSession();
-    }
-}
-
-string dialogTitleForContext(string ctx) {
-    if (ctx == "pass") return "Pass Leash";
-    if (ctx == "offer") return "Offer Leash";
-    if (ctx == "coffle") return "Coffle";
-    return "";
 }
 
 /* -------------------- EVENTS -------------------- */
@@ -346,9 +344,8 @@ default
         OfferDialogSession = "";
         OfferTarget = NULL_KEY;
         OfferOriginator = NULL_KEY;
-        // NB: deliberately no plugin.reg.* write — this sub-plugin is
-        // hidden from kmod_ui's top menu; only plugin_leash dispatches
-        // to us via ui.menu.start.
+        // NB: deliberately no plugin.reg.* write — hidden from kmod_ui's top
+        // menu; only plugin_leash dispatches to us via ui.menu.start.
     }
 
     on_rez(integer start_param) {
@@ -399,15 +396,13 @@ default
                 if (resp_session == JSON_INVALID) return;
                 string ctx = llJsonGetValue(msg, ["context"]);
                 if (ctx == JSON_INVALID) ctx = "";
-                string clicked_btn = llJsonGetValue(msg, ["button"]);
-                if (clicked_btn == JSON_INVALID) clicked_btn = "";
 
                 if (resp_session == OfferDialogSession) {
                     handleOfferResponse(ctx);
                     return;
                 }
                 if (resp_session == SessionId) {
-                    handlePickerClick(ctx, clicked_btn);
+                    handlePickerClick(ctx);
                     return;
                 }
                 return;
@@ -431,5 +426,44 @@ default
                 }
             }
         }
+    }
+
+    // OBJECT mode only. PASSIVE|SCRIPTED already excludes avatars; the
+    // llGetAgentSize guard is a defensive backstop so a stray agent can never
+    // appear in the post list.
+    sensor(integer num) {
+        if (MenuContext != "post") return;
+        if (CurrentUser == NULL_KEY) return;
+
+        key wearer = llGetOwner();
+        key my_key = llGetKey();
+        list buf = [];
+        integer i = 0;
+        while (i < num) {
+            key detected = llDetectedKey(i);
+            if (detected != my_key && detected != wearer
+                && llGetAgentSize(detected) == ZERO_VECTOR) {   // not an avatar
+                buf += [llDetectedName(i), detected];
+            }
+            i = i + 1;
+        }
+        Candidates = buf;
+
+        if (llGetListLength(Candidates) > 2) {
+            Candidates = llListSortStrided(Candidates, 2, 0, TRUE);
+        }
+        if (llGetListLength(Candidates) == 0) {
+            llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
+            cleanupSession();
+            return;
+        }
+        renderPickerPage(0);
+    }
+
+    no_sensor() {
+        if (MenuContext != "post") return;
+        if (CurrentUser == NULL_KEY) return;
+        llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
+        cleanupSession();
     }
 }

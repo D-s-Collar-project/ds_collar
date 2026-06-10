@@ -4,14 +4,13 @@ VERSION: 1.2
 REVISION: 0
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
-         multi-step flows (Pass/Offer/Coffle, Post) to hidden sub-plugins.
-ARCHITECTURE: Renderer for the leash module. Picker flows now live in
-              two hidden sub-plugins: plugin_leash_avatar (avatar picker
-              for Pass/Offer/Coffle, plus offer-reception dialog) and
-              plugin_leash_object (object picker for Post). This plugin
-              delegates via ui.menu.start with the sub-plugin's context +
-              subpath; the sub-plugin returns to us via ui.menu.start
-              with our context.
+         multi-step flows (Pass/Offer/Coffle, Post) to the hidden picker.
+ARCHITECTURE: Renderer for the leash module. Picker flows live in a single
+              hidden sub-plugin, plugin_leash_target (avatar picker for
+              Pass/Offer/Coffle + offer-reception dialog; object picker for
+              Post — the source is chosen by subpath). This plugin delegates
+              via ui.menu.start with context "ui.core.leash.target" + subpath;
+              it returns to us via ui.menu.start with our context.
 --------------------*/
 
 
@@ -43,7 +42,7 @@ integer LeashMode = 0;       // 0=avatar, 1=coffle, 2=post
 key LeashTarget = NULL_KEY;  // Target for coffle/post
 
 // Session/menu state. Pass/Offer/Coffle picker + offer-reception dialog
-// were moved to plugin_leash_avatar; Post picker moved to plugin_leash_object.
+// were moved to plugin_leash_target; Post picker moved to plugin_leash_target.
 // What stays here is the top-level menu + Settings (length/turn/texture)
 // + Get Holder, plus direct simple actions (Unclip / Yank).
 key CurrentUser = NULL_KEY;
@@ -102,7 +101,7 @@ showMenu(string context, string title, string body, list button_data) {
 }
 
 // Lays out a dialog in the project's bottom-nav / top-to-bottom-L-R
-// content convention (canonical: plugin_animate, plugin_leash_object).
+// content convention (canonical: plugin_animate, plugin_leash_target).
 // Caller provides 1-3 nav buttons (placed at slots 0..nav_count-1) and
 // 0..N content items, which fill the remaining slots in visual
 // top-to-bottom-L-R reading order. No filler is left in the output —
@@ -314,8 +313,8 @@ showLengthMenu() {
 }
 
 // (Pass/Offer/Coffle avatar picker + offer-reception dialog moved to
-//  plugin_leash_avatar; Post object picker + sensor handling moved to
-//  plugin_leash_object. Main menu delegates to those via ui.menu.start
+//  plugin_leash_target; Post object picker + sensor handling moved to
+//  plugin_leash_target. Main menu delegates to those via ui.menu.start
 //  with the corresponding sub-plugin context.)
 
 /* -------------------- SUB-PLUGIN DELEGATION -------------------- */
@@ -514,8 +513,8 @@ handle_subpath(key user, integer acl_level, string subpath) {
     // coffle/post delegate to sub-plugins (same flow as the dialog
     // buttons). CurrentUser is already set above so the resulting menu
     // goes to the chat user.
-    if (action == "coffle") { delegateTo("ui.core.leash.avatar", "coffle"); return; }
-    if (action == "post")   { delegateTo("ui.core.leash.object", "post"); return; }
+    if (action == "coffle") { delegateTo("ui.core.leash.target", "coffle"); return; }
+    if (action == "post")   { delegateTo("ui.core.leash.target", "post"); return; }
     llRegionSayTo(user, 0, "Unknown leash subcommand: " + action);
 }
 
@@ -535,14 +534,14 @@ handleButtonClick(string ctx) {
             sendLeashAction("release");
             cleanupSession();
         }
-        // Pass / Offer / Coffle delegate to plugin_leash_avatar (avatar
-        // picker). Post delegates to plugin_leash_object (object picker).
-        // Each sub-plugin returns control via ui.menu.start with our
-        // context, re-showing the main menu.
-        else if (ctx == "pass")   delegateTo("ui.core.leash.avatar", "pass");
-        else if (ctx == "offer")  delegateTo("ui.core.leash.avatar", "offer");
-        else if (ctx == "coffle") delegateTo("ui.core.leash.avatar", "coffle");
-        else if (ctx == "post")   delegateTo("ui.core.leash.object", "post");
+        // Pass / Offer / Coffle / Post all delegate to the unified
+        // plugin_leash_target picker (avatar source for pass/offer/coffle,
+        // object source for post). It returns control via ui.menu.start with
+        // our context, re-showing the main menu.
+        else if (ctx == "pass")   delegateTo("ui.core.leash.target", "pass");
+        else if (ctx == "offer")  delegateTo("ui.core.leash.target", "offer");
+        else if (ctx == "coffle") delegateTo("ui.core.leash.target", "coffle");
+        else if (ctx == "post")   delegateTo("ui.core.leash.target", "post");
         else if (ctx == "yank") {
             sendLeashAction("yank");
             cleanupSession();
@@ -621,7 +620,7 @@ handleButtonClick(string ctx) {
         }
     }
     // Note: "pass" / "coffle" / "post" MenuContext branches are gone —
-    // those flows now live in plugin_leash_avatar / plugin_leash_object.
+    // those flows now live in plugin_leash_target.
     // The sub-plugin owns its own SessionId and dialog responses, then
     // returns to us via ui.menu.start with our context (re-entering
     // showMainMenu).
@@ -807,7 +806,7 @@ default
                 return;
             }
 
-            // plugin.leash.offer.pending is handled by plugin_leash_avatar
+            // plugin.leash.offer.pending is handled by plugin_leash_target
             // (it shows the accept/decline dialog to the offer target).
         }
 
@@ -836,6 +835,6 @@ default
         }
     }
 
-    // sensor() / no_sensor() moved to plugin_leash_object (the only
+    // sensor() / no_sensor() moved to plugin_leash_target (the only
     // consumer was the coffle/post object scan, both now in sub-plugins).
 }

@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: install_shim.lsl
 VERSION: 1.10
-REVISION: 5
+REVISION: 6
 PURPOSE: Empty-target receiver for the installer's fresh-install path. Wearer
   drops this single script into an object they want to turn into a collar;
   it sets a remote-load PIN, announces itself on EXTERNAL_ACL_REPLY_CHAN, and
@@ -14,6 +14,7 @@ ARCHITECTURE: Lives alone in the fresh target object. Uses kmod_remote's
   already present (drop into a non-empty target is a user error, not a
   reinstall path; that's what 'Update Collar' is for).
 CHANGES:
+- v1.1 rev 6: Add a SETTLE_DELAY (5s) between install.shim.done and teardown. The bundler ships scripts asynchronously, so the last items could still be landing when DONE arrived — the old immediate activate_collar_scripts + self-delete branded/reset a half-populated prim. DONE now arms the settle timer; a Finishing flag ignores late traffic so it can't reset the delay; timer() does the activate + teardown once the prim is complete.
 - v1.1 rev 5: INSTALL_TIMEOUT 300s → 600s. Bespoke walk + Minimal/Full picker can take longer than the previous 5-minute window; if the wearer overran it, the shim disarmed the PIN and self-deleted, then llRemoteLoadScriptPin failed on the bundler's first dispatch ("trying to illegally load script onto task"). 600s gives ~10 minutes of total margin past the wearer's decision + BUNDLE_TIMEOUT.
 - v1.1 rev 4: Stamp prim description with "D/s Collar v1.1" (BRAND_DESC) on the success path instead of restoring the OriginalDesc — a fresh prim's blank desc was a missed branding opportunity. Failure paths still restore OriginalDesc. Tracked via Activated flag so cleanup_and_die doesn't clobber the brand.
 - v1.1 rev 3: Inhibit the half-installed collar during the bundle phase. state_entry now stamps the prim with UPDATER_MARKER after the safety checks; every collar script's dormancy guard (universal across 33 scripts) sees the marker in their state_entry and parks via llSetScriptState(self, FALSE). install.shim.done now calls activate_collar_scripts before cleanup_and_die: clear the desc, then llSetScriptState(name, TRUE) + llResetOtherScript(name) per script so they re-enter state_entry and init normally. OriginalDesc preserved across the marker stamp and restored on every cleanup path (success and failure).
@@ -63,6 +64,13 @@ float BROADCAST_TIMEOUT = 120.0;
 // 600s gives ~10 minutes of total margin.
 float INSTALL_TIMEOUT = 600.0;
 
+// Grace period between install.shim.done and teardown. The bundler ships scripts
+// asynchronously (llRemoteLoadScriptPin / llGiveInventory), so the last items may
+// still be landing when DONE arrives. We wait this long before
+// activate_collar_scripts + self-delete so the fresh collar is fully populated
+// before we brand the desc, reset the scripts, and go.
+float SETTLE_DELAY = 5.0;
+
 
 /* -------------------- STATE -------------------- */
 integer Pin = 0;
@@ -80,6 +88,9 @@ string  OriginalDesc = "";
 // Set in activate_collar_scripts on the success path so cleanup_and_die
 // knows not to clobber the brand description it just stamped.
 integer Activated = FALSE;
+
+// install.shim.done received; settling before teardown (SETTLE_DELAY).
+integer Finishing = FALSE;
 
 
 /* -------------------- HELPERS -------------------- */
@@ -227,6 +238,10 @@ default {
         // Same-owner filter — only our wearer's installer should reach us.
         if (llGetOwnerKey(id) != llGetOwner()) return;
 
+        // Settling after DONE — ignore late traffic so it can't reset the
+        // settle timer back to the install window.
+        if (Finishing) return;
+
         string mtype = llJsonGetValue(message, ["type"]);
 
         // Installer is acknowledging our ready broadcast. Lock in the
@@ -254,13 +269,24 @@ default {
             // DONE from another updater in the sim shouldn't kill us.
             if (InstallerKey != NULL_KEY && id != InstallerKey) return;
 
-            activate_collar_scripts();
-            cleanup_and_die();
+            // Don't tear down yet: the bundler's last script give(s) may still
+            // be landing (async). Arm the settle delay; timer() does the
+            // activate + self-delete once the prim is fully populated.
+            Finishing = TRUE;
+            llSetTimerEvent(SETTLE_DELAY);
             return;
         }
     }
 
     timer() {
+        // Settle delay after install.shim.done elapsed — the prim is fully
+        // populated; brand the desc, re-enable + reset the scripts, self-delete.
+        if (Finishing) {
+            activate_collar_scripts();
+            cleanup_and_die();
+            return;
+        }
+
         if (Broadcasting) {
             ElapsedBroadcast += BROADCAST_INTERVAL;
             if (ElapsedBroadcast >= BROADCAST_TIMEOUT) {

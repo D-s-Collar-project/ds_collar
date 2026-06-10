@@ -111,7 +111,7 @@ integer btn_allowed(string label) {
 
 /* -------------------- DIALOG LAYOUT HELPER -------------------- */
 // Lays out a dialog in the project's bottom-nav + top-to-bottom-L-R
-// content convention (canonical: plugin_animate, plugin_leash_object).
+// content convention (canonical: plugin_animate, plugin_leash_target).
 // Caller provides 1-3 nav buttons (slots 0..nav_count-1) and 0..N content
 // items, which fill the remaining slots in visual top-to-bottom-L-R
 // order. No filler is left in the output when items consume all

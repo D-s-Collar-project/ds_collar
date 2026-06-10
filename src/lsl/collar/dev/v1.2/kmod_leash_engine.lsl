@@ -848,7 +848,7 @@ routeLinkMessage(integer num, string msg, key id) {
                 return;
             }
 
-            // plugin_leash / plugin_leash_avatar already gate by policy and
+            // plugin_leash / plugin_leash_target already gate by policy and
             // pass the user's acl level; the engine trusts the intra-object
             // request and acts synchronously — no AUTH round-trip, no Pending
             // state. (Engines process, plugins decide.)
