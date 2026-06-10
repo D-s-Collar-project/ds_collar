@@ -30,7 +30,6 @@ ARCHITECTURE: Two LSL states.
 
 /* -------------------- BUS CHANNELS -------------------- */
 integer KERNEL_LIFECYCLE = 500;
-integer AUTH_BUS = 700;
 integer SETTINGS_BUS = 800;
 integer UI_BUS = 900;
 
@@ -43,16 +42,6 @@ float   PROBE_WINDOW = 3.0;   // seconds to wait for a native holder reply
 /* -------------------- PROTOCOL CONSTANTS -------------------- */
 
 string PLUGIN_CONTEXT = "ui.core.leash";
-
-// Policy button labels (must match plugin_leash policy CSV entries)
-string POL_CLIP     = "Clip";
-string POL_TAKE     = "Take";
-string POL_UNCLIP   = "Unclip";
-string POL_PASS     = "Pass";
-string POL_OFFER    = "Offer";
-string POL_COFFLE   = "Coffle";
-string POL_POST     = "Post";
-string POL_SETTINGS = "Settings";
 
 // Claim kinds — parameters to claimLeash() only. NOT stored as state.
 integer MODE_AVATAR = 0;  // Clip: grab leash, wearer follows the clicker
@@ -125,14 +114,6 @@ integer MAX_RECLIP_ATTEMPTS = 3;
 integer RECLIP_SAFETY_WINDOW = 120;
 integer ReclipDeadline = 0;
 
-// ACL verification system
-key PendingActionUser = NULL_KEY;
-string PendingAction = "";
-key PendingPassTarget = NULL_KEY;
-integer AclPending = FALSE;
-key PendingPassOriginalUser = NULL_KEY;  // Tracks original passer for error messages
-integer PendingIsOffer = FALSE;          // TRUE if this is an offer, not a pass
-
 // Lockmeister authorization
 key AuthorizedLmController = NULL_KEY;
 
@@ -154,18 +135,6 @@ string jsonGet(string j, string k, string default_val) {
     if (v == JSON_INVALID) return default_val;
     return v;
 }
-// Check if a button label is allowed at the given ACL level via LSD policy
-integer policy_allows(string btn_label, integer acl_level) {
-    string policy = llLinksetDataRead("acl.policycontext:" + PLUGIN_CONTEXT);
-    if (policy == "") return FALSE;
-    string csv = llJsonGetValue(policy, [(string)acl_level]);
-    if (csv == JSON_INVALID) return FALSE;
-    return (llListFindList(llCSV2List(csv), [btn_label]) != -1);
-}
-denyAccess(key user, string reason) {
-    llRegionSayTo(user, 0, "Access denied: " + reason);
-}
-
 // Clamp leash length to valid range
 integer clampLeashLength(integer len) {
     if (len < 1) return 1;
@@ -433,136 +402,6 @@ handleLeashListen(string msg) {
     }
 }
 
-/* -------------------- ACL VERIFICATION -------------------- */
-clearPendingAction() {
-    AclPending = FALSE;
-    PendingActionUser = NULL_KEY;
-    PendingAction = "";
-    PendingPassTarget = NULL_KEY;
-    PendingPassOriginalUser = NULL_KEY;
-    PendingIsOffer = FALSE;
-}
-
-requestAclForAction(key user, string action, key pass_target) {
-    AclPending = TRUE;
-    PendingActionUser = user;
-    PendingAction = action;
-    PendingPassTarget = pass_target;
-
-    llMessageLinked(LINK_SET, AUTH_BUS, llList2Json(JSON_OBJECT, [
-        "type", "auth.acl.query",
-        "avatar", (string)user
-    ]), user);
-}
-
-requestAclForPassTarget(key target) {
-    PendingPassOriginalUser = PendingActionUser;
-    PendingActionUser = target;
-    PendingAction = "pass_target_check";
-    AclPending = TRUE;
-
-    llMessageLinked(LINK_SET, AUTH_BUS, llList2Json(JSON_OBJECT, [
-        "type", "auth.acl.query",
-        "avatar", (string)target
-    ]), target);
-}
-
-handleAclResult(string msg) {
-    if (!AclPending) return;
-    if (llJsonGetValue(msg, ["avatar"]) == JSON_INVALID || llJsonGetValue(msg, ["level"]) == JSON_INVALID) return;
-
-    key avatar = (key)llJsonGetValue(msg, ["avatar"]);
-    if (avatar != PendingActionUser) return;
-
-    integer acl_level = (integer)llJsonGetValue(msg, ["level"]);
-    AclPending = FALSE;
-
-    // Release: current leasher can always release (safety); otherwise policy-gated
-    if (PendingAction == "release") {
-        if (PendingActionUser == Leasher || policy_allows(POL_UNCLIP, acl_level)) {
-            releaseLeashInternal(PendingActionUser);
-        } else {
-            denyAccess(PendingActionUser, "only leasher or authorized users can release");
-        }
-    }
-    // Force-release: maintenance emergency clear — wearer always allowed; trustees/owners allowed.
-    else if (PendingAction == "force_release") {
-        if (PendingActionUser == llGetOwner() || acl_level >= 3) {
-            releaseLeashInternal(PendingActionUser);
-        } else {
-            denyAccess(PendingActionUser, "only wearer or authorized users can force-clear leash");
-        }
-    }
-    // Pass: current leasher OR policy-allowed can pass, then verify target.
-    else if (PendingAction == "pass") {
-        if (PendingActionUser == Leasher || policy_allows(POL_PASS, acl_level)) {
-            requestAclForPassTarget(PendingPassTarget);
-            return;  // Don't clear pending state yet
-        } else {
-            denyAccess(PendingActionUser, "insufficient permissions to pass leash");
-        }
-    }
-    // Offer: policy-allowed, only when not currently leashed, then verify target.
-    else if (PendingAction == "offer") {
-        if (policy_allows(POL_OFFER, acl_level) && !Leashed) {
-            PendingIsOffer = TRUE;
-            requestAclForPassTarget(PendingPassTarget);
-            return;  // Don't clear pending state yet
-        } else if (Leashed) {
-            llRegionSayTo(PendingActionUser, 0, "Cannot offer leash: already leashed.");
-        } else {
-            denyAccess(PendingActionUser, "insufficient permissions to offer leash");
-        }
-    }
-    // pass_target_check: verifying the target's ACL for pass/offer. Target must
-    // be level 1+ (public or higher) to receive the leash.
-    else if (PendingAction == "pass_target_check") {
-        if (acl_level >= 1) {
-            if (PendingIsOffer) {
-                sendOfferPending(PendingPassTarget, PendingPassOriginalUser);
-            }
-            else {
-                passLeashInternal(PendingPassTarget);
-            }
-        } else {
-            string action_name = "pass";
-            if (PendingIsOffer) action_name = "offer";
-            llRegionSayTo(PendingPassOriginalUser, 0, "Cannot " + action_name + " leash: target has insufficient permissions.");
-        }
-        PendingPassOriginalUser = NULL_KEY;
-        PendingIsOffer = FALSE;
-    }
-    // "grab" is "Take" (take-over) when already leashed, "Clip" otherwise.
-    else if (PendingAction == "grab") {
-        string label = POL_CLIP;
-        if (Leashed) label = POL_TAKE;
-        if (policy_allows(label, acl_level)) claimLeash(PendingActionUser, MODE_AVATAR, NULL_KEY, acl_level);
-        else denyAccess(PendingActionUser, "insufficient permissions");
-    }
-    else if (PendingAction == "coffle") {
-        if (policy_allows(POL_COFFLE, acl_level)) claimLeash(PendingActionUser, MODE_COFFLE, PendingPassTarget, acl_level);
-        else denyAccess(PendingActionUser, "insufficient permissions");
-    }
-    else if (PendingAction == "post") {
-        if (policy_allows(POL_POST, acl_level)) claimLeash(PendingActionUser, MODE_POST, PendingPassTarget, acl_level);
-        else denyAccess(PendingActionUser, "insufficient permissions");
-    }
-    else if (PendingAction == "set_length") {
-        if (policy_allows(POL_SETTINGS, acl_level)) setLengthInternal((integer)((string)PendingPassTarget));
-        else denyAccess(PendingActionUser, "insufficient permissions");
-    }
-    else if (PendingAction == "toggle_turn") {
-        if (policy_allows(POL_SETTINGS, acl_level)) toggleTurnInternal();
-        else denyAccess(PendingActionUser, "insufficient permissions");
-    }
-    else if (PendingAction == "set_texture") {
-        if (policy_allows(POL_SETTINGS, acl_level)) setTextureInternal((string)PendingPassTarget);
-        else denyAccess(PendingActionUser, "insufficient permissions");
-    }
-
-    clearPendingAction();
-}
-
 /* -------------------- OFFSIM DETECTION & AUTO-RECLIP -------------------- */
 clearReclipState() {
     ReclipScheduled = 0;
@@ -625,7 +464,10 @@ checkAutoReclip() {
         return;
     }
     if (LastLeasher != NULL_KEY && llGetAgentInfo(LastLeasher) != 0) {
-        requestAclForAction(LastLeasher, "grab", NULL_KEY);
+        // Re-clip the previously-authorized leasher directly — no ACL re-check.
+        // They were authorized when first leashed; we're unleashed now, so this
+        // is a fresh claim (acl arg unused on the not-leashed path).
+        claimLeash(LastLeasher, MODE_AVATAR, NULL_KEY, 1);
         ReclipAttempts = ReclipAttempts + 1;
         ReclipScheduled = llGetUnixTime() + 2;
     }
@@ -1006,15 +848,25 @@ routeLinkMessage(integer num, string msg, key id) {
                 return;
             }
 
+            // plugin_leash / plugin_leash_avatar already gate by policy and
+            // pass the user's acl level; the engine trusts the intra-object
+            // request and acts synchronously — no AUTH round-trip, no Pending
+            // state. (Engines process, plugins decide.)
+            integer acl = (integer)jsonGet(msg, "acl", "0");
             key target = (key)jsonGet(msg, "target", (string)NULL_KEY);
-            if (action == "set_length") {
-                target = (key)jsonGet(msg, "length", "0");
-            }
-            else if (action == "set_texture") {
-                target = (key)jsonGet(msg, "texture", "chain");
-            }
 
-            requestAclForAction(user, action, target);
+            if (action == "grab")             claimLeash(user, MODE_AVATAR, NULL_KEY, acl);
+            else if (action == "coffle")      claimLeash(user, MODE_COFFLE, target, acl);
+            else if (action == "post")        claimLeash(user, MODE_POST, target, acl);
+            else if (action == "release" || action == "force_release") releaseLeashInternal(user);
+            else if (action == "pass")        passLeashInternal(target);
+            else if (action == "offer") {
+                if (Leashed) llRegionSayTo(user, 0, "Cannot offer leash: already leashed.");
+                else sendOfferPending(target, user);
+            }
+            else if (action == "set_length")  setLengthInternal((integer)jsonGet(msg, "length", "0"));
+            else if (action == "toggle_turn") toggleTurnInternal();
+            else if (action == "set_texture") setTextureInternal(jsonGet(msg, "texture", "chain"));
             return;
         }
 
@@ -1036,13 +888,6 @@ routeLinkMessage(integer num, string msg, key id) {
         if (msg_type == "particles.lm.released") {
             handleLmReleased();
             return;
-        }
-        return;
-    }
-
-    if (num == AUTH_BUS) {
-        if (msg_type == "auth.acl.result") {
-            handleAclResult(msg);
         }
         return;
     }
@@ -1070,7 +915,6 @@ default
 
         HolderTarget = NULL_KEY;
         AwaitingHolder = FALSE;
-        clearPendingAction();
         AuthorizedLmController = NULL_KEY;
 
         applySettingsSync();

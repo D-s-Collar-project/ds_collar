@@ -164,10 +164,13 @@ renderAvatarPickerPage(integer page) {
 }
 
 /* -------------------- ACTIONS -------------------- */
+// The engine no longer re-verifies ACL; it trusts the policy-gated action and
+// the acl level we resolved for this user (passed in via ui.menu.start).
 sendAction(string action) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.action",
-        "action", action
+        "action", action,
+        "acl", (string)UserAcl
     ]), CurrentUser);
 }
 
@@ -175,7 +178,8 @@ sendActionWithTarget(string action, key target) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.action",
         "action", action,
-        "target", (string)target
+        "target", (string)target,
+        "acl", (string)UserAcl
     ]), CurrentUser);
 }
 
@@ -204,10 +208,13 @@ showOfferDialog(key target, key originator) {
 
 handleOfferResponse(string ctx) {
     if (ctx == "accept") {
-        // Target accepts → they "grab" the leash (engine swaps Leasher).
+        // Target accepts → they "grab" the leash (engine swaps Leasher). Offer
+        // requires the collar was unleashed, so this is a fresh claim and the
+        // acl tag is unused engine-side; sent for protocol uniformity.
         llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
             "type", "plugin.leash.action",
-            "action", "grab"
+            "action", "grab",
+            "acl", (string)UserAcl
         ]), OfferTarget);
         llRegionSayTo(OfferOriginator, 0, llKey2Name(OfferTarget) + " accepted your leash offer.");
     }

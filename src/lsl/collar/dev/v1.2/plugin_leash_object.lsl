@@ -123,11 +123,14 @@ startSensorScan() {
 }
 
 /* -------------------- ACTION DISPATCH -------------------- */
+// The engine no longer re-verifies ACL; it trusts the policy-gated action and
+// the acl level we resolved for this user (passed in via ui.menu.start).
 sendActionWithTarget(string action, key target) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.action",
         "action", action,
-        "target", (string)target
+        "target", (string)target,
+        "acl", (string)UserAcl
     ]), CurrentUser);
 }
 

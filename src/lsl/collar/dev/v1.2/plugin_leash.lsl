@@ -376,10 +376,14 @@ giveHolderObject() {
     llRegionSayTo(CurrentUser, 0, "Leash holder given.");
 }
 
+// The engine no longer re-verifies ACL; it trusts the policy-gated action and
+// the acl level we already resolved for this user. (Engines process, plugins
+// decide — same trust model as settings.delta over the intra-object bus.)
 sendLeashAction(string action) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.action",
-        "action", action
+        "action", action,
+        "acl", (string)UserAcl
     ]), CurrentUser);
 }
 
@@ -437,7 +441,8 @@ sendLeashActionWithTarget(string action, key target) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.action",
         "action", action,
-        "target", (string)target
+        "target", (string)target,
+        "acl", (string)UserAcl
     ]), CurrentUser);
 }
 
@@ -445,7 +450,8 @@ sendSetLength(integer length) {
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "plugin.leash.action",
         "action", "set_length",
-        "length", (string)length
+        "length", (string)length,
+        "acl", (string)UserAcl
     ]), CurrentUser);
 }
 
@@ -588,7 +594,8 @@ handleButtonClick(string ctx) {
             llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
                 "type", "plugin.leash.action",
                 "action", "set_texture",
-                "texture", ctx
+                "texture", ctx,
+                "acl", (string)UserAcl
             ]), CurrentUser);
             scheduleStateQuery("settings");
         }
