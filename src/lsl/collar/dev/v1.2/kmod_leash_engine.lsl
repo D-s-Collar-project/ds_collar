@@ -1051,10 +1051,17 @@ state leashed
             checkLeasherPresence();
         }
 
-        // Native discovery timed out — aim particles at the raw mode anchor.
+        // Native discovery timed out — no DS holder answered.
         if (AwaitingHolder && llGetUnixTime() > ProbeDeadline) {
             AwaitingHolder = FALSE;
-            if (FollowTarget != NULL_KEY) setParticlesState(TRUE, FollowTarget);
+            // Only aim particles at the raw anchor for coffle/post (no LM). For
+            // an avatar grab LM is active and kmod_particles owns the OC-holder
+            // render — sending a native fallback here would OVERRIDE it (native
+            // outranks Lockmeister in kmod_particles), snapping the leash to the
+            // avatar centre instead of the OC leash-point prim.
+            if (AuthorizedLmController == NULL_KEY && FollowTarget != NULL_KEY) {
+                setParticlesState(TRUE, FollowTarget);
+            }
         }
 
         // Re-acquire a leashpoint every ~10s if we've fallen through to the
