@@ -524,7 +524,6 @@ handle_subpath(key user, integer acl_level, string subpath) {
 // is unused here now — picker flows that matched on label moved to the
 // sub-plugins.
 handleButtonClick(string ctx) {
-    llOwnerSay("[lmdbg] handleButtonClick ctx=[" + ctx + "] MenuContext=[" + MenuContext + "]");
 
     if (MenuContext == "main") {
         if (ctx == "clip") {

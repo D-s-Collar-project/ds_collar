@@ -128,9 +128,11 @@ sendActionWithTarget(string action, key target) {
 }
 
 /* -------------------- PICKER (shared render for both sources) -------------------- */
-// Item buttons carry the absolute candidate index as context ("sel:<i>") while
-// showing the name as label — name UX with unambiguous selection even when two
-// candidates share a name.
+// Numbered-list convention (cf. plugin_outfits / plugin_animate): names are
+// listed in the dialog BODY and the buttons are short numbers ("1".."9"), so a
+// long avatar/object name can never exceed llDialog's 24-char button limit.
+// Each number button carries the absolute candidate index as context
+// ("sel:<i>") so selection is unambiguous regardless of page.
 renderPickerPage(integer page) {
     integer total = llGetListLength(Candidates) / 2;
     integer total_pages = (total + 8) / 9;
@@ -143,21 +145,25 @@ renderPickerPage(integer page) {
     integer end = start + 9;
     if (end > total) end = total;
 
+    string body = "Select ";
+    if (is_object_mode()) body += "object:\n\n";
+    else                  body += "avatar:\n\n";
+
     list nav_buttons = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
     list item_buttons = [];
     integer i = start;
+    integer display_num = 1;
     while (i < end) {
         string nm = llList2String(Candidates, i * 2);
-        item_buttons += [btn(nm, "sel:" + (string)i)];
+        body += (string)display_num + ". " + nm + "\n";
+        item_buttons += [btn((string)display_num, "sel:" + (string)i)];
+        display_num++;
         i++;
     }
     list button_data = reorder_item_buttons(nav_buttons, item_buttons);
 
-    string body = "Select ";
-    if (is_object_mode()) body += "object:";
-    else                  body += "avatar:";
     if (total_pages > 1) {
-        body += "\n\nPage " + (string)(page + 1) + "/" + (string)total_pages;
+        body += "\nPage " + (string)(page + 1) + "/" + (string)total_pages;
     }
 
     SessionId = generate_session_id();
@@ -196,7 +202,6 @@ startObjectScan() {
     PickPage = 0;
     Candidates = [];
     llSensor("", NULL_KEY, PASSIVE | SCRIPTED, 96.0, PI);
-    llOwnerSay("[ltdbg] startObjectScan: llSensor issued");
 }
 
 /* -------------------- OFFER RECEPTION DIALOG -------------------- */
@@ -283,7 +288,6 @@ handleSubpath(string subpath) {
     }
     else if (subpath == "post") {
         MenuContext = "post";
-        llOwnerSay("[ltdbg] post branch: MenuContext set, calling startObjectScan");
         startObjectScan();   // render deferred to sensor()/no_sensor()
     }
     else {
@@ -434,7 +438,6 @@ default
     // llGetAgentSize guard is a defensive backstop so a stray agent can never
     // appear in the post list.
     sensor(integer num) {
-        llOwnerSay("[ltdbg] sensor fired: num=" + (string)num + " MenuContext=[" + MenuContext + "] CurrentUser=" + (string)CurrentUser);
         if (MenuContext != "post") return;
         if (CurrentUser == NULL_KEY) return;
 
@@ -464,7 +467,6 @@ default
     }
 
     no_sensor() {
-        llOwnerSay("[ltdbg] no_sensor fired: MenuContext=[" + MenuContext + "] CurrentUser=" + (string)CurrentUser);
         if (MenuContext != "post") return;
         if (CurrentUser == NULL_KEY) return;
         llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
