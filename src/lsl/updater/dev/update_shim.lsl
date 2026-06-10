@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: update_shim.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: Transient payload deposited into the collar by updater_driver via
   llRemoteLoadScriptPin. Runs inside the collar, answers inventory and
   ship-decision queries from updater_bundler over the start_param channel,
@@ -27,6 +27,7 @@ ARCHITECTURE: Mirrors install_shim's dormancy-marker bracket: state_entry
   the shim does not touch LSD beyond the desc-backup key.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
+- v1.1 rev 8: Read the secure-channel start param BEFORE the marker dormancy guard. A legitimate PIN load (non-zero channel) now proceeds even when the prim still carries UPDATER_MARKER from a prior aborted update — previously the shim self-parked before whispering READY ("Shim did not start"), so one interrupted update bricked every subsequent one (and left the collar's own scripts parked). The marker self-park now only applies to orphaned copies (no start param); a stuck collar self-heals on the next update.
 - v1.1 rev 7: Bracket the update with the install_shim dormancy pattern. state_entry now saves the prim description to LSD (key `updater.original_desc`), stamps UPDATER_MARKER, and parks every collar-namespace script via park_collar_scripts. New activate_collar_scripts helper restores the desc from LSD, clears the LSD entry, and re-enables + llResetOtherScript-s each collar script so its state_entry runs again with the new bundle live. Replaces the previous remote.update.complete broadcast (rev 5) — kmod_bootstrap's startup orchestration now fires naturally as part of its own reset. Failure paths (inactivity timeout, CHANGED_OWNER) also activate so the wearer doesn't end up with a silent-locked collar. REMOTE_BUS constant removed.
 - v1.1 rev 6: INACTIVITY_TIMEOUT 120s → 600s. The install-against-existing-collar flow parks the bundler in scripts_await while the driver shows the feature picker; if the wearer took longer than 120s reading, the shim disarmed the PIN before they confirmed, then llRemoteLoadScriptPin failed with "trying to illegally load script onto task" on the next dispatch. 600s covers any plausible decision time + BUNDLE_TIMEOUT.
 - v1.1 rev 5: Broadcast `remote.update.complete` on REMOTE_BUS in the DONE handler before self-deletion. kmod_bootstrap listens for it and llResetScripts so the startup orchestration (RLV probe, register.refresh, status announcement) re-runs with the new script set live. Only the success path emits — inactivity timeout / CHANGED_OWNER cleanups don't, since those leave the collar half-updated and a "we're done" signal would be misleading.
@@ -283,19 +284,25 @@ cleanup_and_die() {
 
 default {
     state_entry() {
-        // Dormancy guard — if this script got dragged into the updater
-        // prim's inventory during packaging, state_entry parks it so it
-        // doesn't try to run update logic in the wrong context.
-        if (llGetObjectDesc() == UPDATER_MARKER) {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
-
         SecureChannel = llGetStartParameter();
+
+        // Orphan guard. A copy NOT loaded via llRemoteLoadScriptPin has no
+        // session channel. If the prim still carries the marker (a prior
+        // update aborted before activate_collar_scripts ran), park; otherwise
+        // remove ourselves rather than leaving a dormant payload behind.
+        //
+        // A LEGITIMATE update load always passes a non-zero channel and MUST
+        // proceed even when the marker is stale — otherwise the shim self-parks
+        // before whispering READY ("Shim did not start") and a single
+        // interrupted update bricks every future one. Proceeding lets a stuck
+        // collar self-heal: the re-entry guard below preserves the real
+        // original desc backed up by the aborted run, and the DONE path
+        // restores it.
         if (SecureChannel == 0) {
-            // No session channel passed — this script was placed without
-            // going through the proper llRemoteLoadScriptPin path. Remove
-            // ourselves to avoid leaving a dormant payload in inventory.
+            if (llGetObjectDesc() == UPDATER_MARKER) {
+                llSetScriptState(llGetScriptName(), FALSE);
+                return;
+            }
             llRemoveInventory(llGetScriptName());
             return;
         }
