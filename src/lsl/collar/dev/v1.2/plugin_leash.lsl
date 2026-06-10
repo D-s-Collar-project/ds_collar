@@ -411,12 +411,22 @@ persist_enhanced() {
         "settings.delta:leash.enhanced:" + (string)EnhancedMode, NULL_KEY);
 }
 
-// Pull the persisted intent from LSD into EnhancedMode (absent -> off), then
-// re-sync the restriction against the current leash state. LSD survives a script
-// reset, so this restores the toggle across reset-while-worn; on a cold boot the
-// notecard value arrives via the settings.sync that fires once kmod_settings
-// finishes parsing.
+// v1.2 seed-default: write this plugin's default into LSD only if absent
+// (no broadcast). Makes LSD the complete, self-describing collar state and
+// self-heals if the notecard manifest later drops the key. See kmod_settings
+// settings.seed.
+seed_def(string lsd_key, string value) {
+    if (llLinksetDataRead(lsd_key) == "")
+        llMessageLinked(LINK_SET, SETTINGS_BUS, "settings.seed:" + lsd_key + ":" + value, NULL_KEY);
+}
+
+// Pull the persisted intent from LSD into EnhancedMode (absent -> ON: restrain
+// by default), then re-sync the restriction against the current leash state. LSD
+// survives a script reset, so this restores the toggle across reset-while-worn;
+// on a cold boot the notecard value arrives via the settings.sync that fires
+// once kmod_settings finishes parsing.
 load_enhanced() {
+    seed_def("leash.enhanced", "1");
     string v = llLinksetDataRead("leash.enhanced");
     EnhancedMode = TRUE;   // default ON when the key is absent — restrain by default
     if (v != "") EnhancedMode = (integer)v;

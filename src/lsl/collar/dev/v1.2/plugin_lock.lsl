@@ -145,7 +145,17 @@ send_pong() {
 
 /* -------------------- SETTINGS CONSUMPTION -------------------- */
 
+// v1.2 seed-default: write this plugin's default into LSD only if absent
+// (no broadcast). Makes LSD the complete, self-describing collar state and
+// self-heals if the notecard manifest later drops the key. See kmod_settings
+// settings.seed.
+seed_def(string lsd_key, string value) {
+    if (llLinksetDataRead(lsd_key) == "")
+        llMessageLinked(LINK_SET, SETTINGS_BUS, "settings.seed:" + lsd_key + ":" + value, NULL_KEY);
+}
+
 apply_settings_sync() {
+    seed_def(KEY_LOCKED, "0");
     // Read lock state directly from LSD; compare with previous state
     // and trigger side effects only when the value actually changes.
     // If LSD key is missing/deleted, llLinksetDataRead returns "" which

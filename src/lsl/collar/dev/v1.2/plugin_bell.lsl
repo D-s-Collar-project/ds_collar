@@ -394,7 +394,22 @@ cleanup_session() {
 }
 
 /* -------------------- SETTINGS HANDLING -------------------- */
+
+// v1.2 seed-default: write this plugin's default into LSD only if absent
+// (no broadcast). Makes LSD the complete, self-describing collar state and
+// self-heals if the notecard manifest later drops the key. See kmod_settings
+// settings.seed.
+seed_def(string lsd_key, string value) {
+    if (llLinksetDataRead(lsd_key) == "")
+        llMessageLinked(LINK_SET, SETTINGS_BUS, "settings.seed:" + lsd_key + ":" + value, NULL_KEY);
+}
+
 apply_settings_sync() {
+    seed_def(KEY_BELL_VISIBLE, "0");
+    seed_def(KEY_BELL_SOUND_ENABLED, "0");
+    seed_def(KEY_BELL_VOLUME, "0.3");
+    seed_def(KEY_BELL_SOUND, "16fcf579-82cb-b110-c1a4-5fa5e1385406");
+
     // Read all settings directly from LSD; compare with previous state
     // and trigger side effects only when values actually change.
 

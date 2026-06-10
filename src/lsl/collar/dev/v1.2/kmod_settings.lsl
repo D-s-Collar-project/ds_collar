@@ -152,14 +152,18 @@ broadcast_settings_changed() {
 Single-writer protocol. Plugins send write requests as CSV (no JSON parsing
 needed in kmod_settings — preserves the JSON-free invariant). Envelope:
 
-    settings.delta:<key>:<value>     write/update LSD key
-    settings.delete:<key>            delete LSD key (exactly 2 fields)
+    settings.delta:<key>:<value>     write/update LSD key (broadcasts sync)
+    settings.delete:<key>            delete LSD key (exactly 2 fields; broadcasts)
+    settings.seed:<key>:<value>      write the key's default ONLY IF ABSENT;
+                                     no broadcast (bootstrap, not a change)
 
 Strict arity. Trailing/extra separators are malformed and silently rejected.
 is_writable_key gates which keys this protocol may mutate — plugin
 registration keys (plugin.reg.*) and ACL policy keys (acl.policycontext:*)
-remain plugin-owned and are NOT eligible. After every successful write or
-delete, broadcast_settings_changed fires settings.sync so consumers re-read.
+remain plugin-owned and are NOT eligible. After every successful delta/delete,
+broadcast_settings_changed fires settings.sync so consumers re-read; seed is
+silent so bootstrap seeding (every plugin populating its defaults) does not
+trigger a sync-storm.
 
 -------------------- */
 
@@ -231,6 +235,24 @@ handle_settings_delete_csv(string msg) {
     if (lsd_key == "" || !is_writable_key(lsd_key)) return;
     llLinksetDataDelete(lsd_key);
     broadcast_settings_changed();
+}
+
+handle_settings_seed_csv(string msg) {
+    // Seed a plugin's default: write ONLY IF ABSENT, and do NOT broadcast.
+    // Each plugin seeds its own managed keys at bootstrap (defaults live in the
+    // plugins, not a central table) so LSD becomes a complete, self-describing
+    // picture — no consumer ever has to guess a default at read time. Because a
+    // seeded value equals the default the plugin would have fallen back to, it
+    // is not a "change": broadcasting would only trigger a needless sync-storm
+    // as every plugin seeds during bootstrap. Absent is the only "unset" state,
+    // so an already-present key (even "") is never overwritten.
+    list parts = llParseStringKeepNulls(msg, [":"], []);
+    if (llGetListLength(parts) != 3) return;
+    string lsd_key = llList2String(parts, 1);
+    string value   = llList2String(parts, 2);
+    if (lsd_key == "" || !is_writable_key(lsd_key)) return;
+    if (llLinksetDataRead(lsd_key) != "") return;   // already set — never clobber
+    llLinksetDataWrite(lsd_key, value);
 }
 
 /* -------------------- LSD CLEAR & FACTORY RESET -------------------- */
@@ -1023,6 +1045,10 @@ default
             }
             if (llSubStringIndex(msg, "settings.delete:") == 0) {
                 handle_settings_delete_csv(msg);
+                return;
+            }
+            if (llSubStringIndex(msg, "settings.seed:") == 0) {
+                handle_settings_seed_csv(msg);
                 return;
             }
         }

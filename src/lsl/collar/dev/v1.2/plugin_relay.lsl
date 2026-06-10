@@ -87,7 +87,18 @@ string mode_str() {
     return "ON";
 }
 
+// v1.2 seed-default: write this plugin's default into LSD only if absent
+// (no broadcast). Makes LSD the complete, self-describing collar state and
+// self-heals if the notecard manifest later drops the key. See kmod_settings
+// settings.seed.
+seed_def(string lsd_key, string value) {
+    if (llLinksetDataRead(lsd_key) == "")
+        llMessageLinked(LINK_SET, SETTINGS_BUS, "settings.seed:" + lsd_key + ":" + value, NULL_KEY);
+}
+
 refresh_mode() {
+    seed_def(KEY_RELAY_MODE, (string)MODE_ASK);
+    seed_def(KEY_RELAY_HARDCORE, "0");
     Mode = lsd_int(KEY_RELAY_MODE, MODE_ASK);
     Hardcore = lsd_int(KEY_RELAY_HARDCORE, FALSE);
 }
@@ -512,6 +523,12 @@ default
                 string sources = llJsonGetValue(msg, ["sources"]);
                 if (sources == JSON_INVALID) sources = "";
                 render_object_list(sources);
+            }
+            else if (msg_type == "relay.forceoff") {
+                // The engine (kmod_rlv) forced the relay off (ground-rez/safeword)
+                // and reacted in-memory; we own relay config, so we persist it.
+                persist_mode(MODE_OFF);
+                persist_hardcore(FALSE);
             }
         }
         else if (num == DIALOG_BUS) {

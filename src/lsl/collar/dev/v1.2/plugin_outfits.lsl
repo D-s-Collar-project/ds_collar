@@ -203,10 +203,23 @@ rlv_op(string op, string behav) {
     ]), NULL_KEY);
 }
 
+// v1.2 seed-default: write this plugin's default into LSD only if absent
+// (no broadcast). Makes LSD the complete, self-describing collar state and
+// self-heals if the notecard manifest later drops the key. See kmod_settings
+// settings.seed. outfits.locked is NOT seeded: its default is an empty CSV,
+// and LSL deletes any key written an empty value (llLinksetDataWrite(k,"")
+// removes the pair), so an empty default cannot exist as a present key —
+// absent IS LSD's canonical representation of "empty" here.
+seed_def(string lsd_key, string value) {
+    if (llLinksetDataRead(lsd_key) == "")
+        llMessageLinked(LINK_SET, SETTINGS_BUS, "settings.seed:" + lsd_key + ":" + value, NULL_KEY);
+}
+
 // Diff persisted CSV against LockedOutfits; release dropped, re-apply current.
 // kmod_rlv claim_add is idempotent so re-apply is safe; also re-establishes
 // tracking after a cross-script reset.
 apply_settings_sync() {
+    seed_def(KEY_ACTIVE, "0");
     string csv = llLinksetDataRead(KEY_LOCKED);
     list new_locked = [];
     if (csv != "") new_locked = llParseString2List(csv, [","], []);

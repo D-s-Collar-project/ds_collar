@@ -174,7 +174,24 @@ send_pong() {
 
 /* -------------------- SETTINGS -------------------- */
 
+// v1.2 seed-default: write this plugin's default into LSD only if absent
+// (no broadcast). Makes LSD the complete, self-describing collar state and
+// self-heals if the notecard manifest later drops the key. See kmod_settings
+// settings.seed.
+seed_def(string lsd_key, string value) {
+    if (llLinksetDataRead(lsd_key) == "")
+        llMessageLinked(LINK_SET, SETTINGS_BUS, "settings.seed:" + lsd_key + ":" + value, NULL_KEY);
+}
+
 apply_settings_sync() {
+    // Seed exception defaults: owner TP/IM exempt by default, trustees not.
+    // Supersedes the old owners-exist auto-init (the exception is harmless
+    // until an owner exists to be its subject).
+    seed_def(KEY_EX_OWNER_TP, "1");
+    seed_def(KEY_EX_OWNER_IM, "1");
+    seed_def(KEY_EX_TRUSTEE_TP, "0");
+    seed_def(KEY_EX_TRUSTEE_IM, "0");
+
     // Save previous state for change detection
     key prev_owner = OwnerKey;
     list prev_owners = OwnerKeys;
@@ -216,13 +233,6 @@ apply_settings_sync() {
     string trustees_raw = llLinksetDataRead(KEY_TRUSTEE_UUIDS);
     if (trustees_raw != "") {
         TrusteeKeys = llCSV2List(trustees_raw);
-    }
-
-    // Auto-initialize exception settings if owners exist but LSD keys are absent
-    integer owners_exist = (MultiOwnerMode && llGetListLength(OwnerKeys) > 0) || (!MultiOwnerMode && OwnerKey != NULL_KEY);
-    if (owners_exist) {
-        if (llLinksetDataRead(KEY_EX_OWNER_TP) == "") persist_setting(KEY_EX_OWNER_TP, TRUE);
-        if (llLinksetDataRead(KEY_EX_OWNER_IM) == "") persist_setting(KEY_EX_OWNER_IM, TRUE);
     }
 
     // Detect changes: clear old exceptions for removed owners/trustees

@@ -76,15 +76,17 @@ apply_settings_sync() {
     string stored_prefix = llLinksetDataRead(KEY_PREFIX);
     string stored_public  = llLinksetDataRead(KEY_PUBLIC_CHAT);
 
+    // kmod_chat is a pure consumer of chat config: it READS the values and
+    // processes them (listeners/dispatch) but never WRITES them. plugin_chat
+    // owns and seeds chat.prefix/public/channel. When a key is still absent
+    // (the brief bootstrap window before plugin_chat's seed lands — seeds do
+    // not broadcast, so we are not notified of it), fall back to the same
+    // in-memory default plugin_chat will seed, so listening works immediately.
     if (stored_prefix != "") {
         ChatPrefix = stored_prefix;
     }
     else {
-        // First run: derive from username and request kmod_settings persist it.
-        // Single-writer settings.delta CSV protocol — kmod_settings sole LSD writer.
         ChatPrefix = derive_default_prefix();
-        llMessageLinked(LINK_SET, SETTINGS_BUS,
-            "settings.delta:" + KEY_PREFIX + ":" + ChatPrefix, NULL_KEY);
     }
 
     if (stored_public != "") {
@@ -92,8 +94,6 @@ apply_settings_sync() {
     }
     else {
         PublicChat = TRUE;
-        llMessageLinked(LINK_SET, SETTINGS_BUS,
-            "settings.delta:" + KEY_PUBLIC_CHAT + ":1", NULL_KEY);
     }
 
     string stored_chan = llLinksetDataRead(KEY_CHAT_CHAN);
@@ -103,6 +103,7 @@ apply_settings_sync() {
             ChatChan = parsed_chan;
         }
     }
+    // else: ChatChan keeps its in-script default (1).
 
     reset_listeners();
 }

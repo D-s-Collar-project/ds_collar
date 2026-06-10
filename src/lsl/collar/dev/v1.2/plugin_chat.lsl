@@ -126,7 +126,35 @@ cleanup_session() {
 
 /* -------------------- SETTINGS -------------------- */
 
+// Derive the default prefix from the first two characters of the wearer's
+// username. llGetUsername() returns "firstname.lastname" or "firstname" (no
+// spaces). kmod_chat keeps an identical derive for its own in-memory fallback;
+// duplication across scripts is the LSL norm (no shared code).
+string derive_default_prefix() {
+    string username = llGetUsername(llGetOwner());
+    if (llStringLength(username) >= 2) {
+        return llToLower(llGetSubString(username, 0, 1));
+    }
+    if (llStringLength(username) == 1) {
+        return llToLower(username);
+    }
+    return "c";  // fallback
+}
+
+// v1.2 seed-default: write this plugin's default into LSD only if absent
+// (no broadcast). plugin_chat OWNS chat.* config — the engine kmod_chat only
+// reads and processes it. chat.prefix's default is computed (the wearer's
+// initials), so we derive it here and seed the result.
+seed_def(string lsd_key, string value) {
+    if (llLinksetDataRead(lsd_key) == "")
+        llMessageLinked(LINK_SET, SETTINGS_BUS, "settings.seed:" + lsd_key + ":" + value, NULL_KEY);
+}
+
 apply_settings_sync() {
+    seed_def(KEY_PREFIX, derive_default_prefix());
+    seed_def(KEY_PUBLIC_CHAT, "1");
+    seed_def(KEY_CHAT_CHAN, "1");
+
     string stored_prefix = llLinksetDataRead(KEY_PREFIX);
     string stored_public  = llLinksetDataRead(KEY_PUBLIC_CHAT);
 

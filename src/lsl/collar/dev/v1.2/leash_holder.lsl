@@ -3,11 +3,14 @@ SCRIPT: leash_holder.lsl
 VERSION: 1.2
 REVISION: 0
 PURPOSE: Minimal leash-holder target responder for external objects
-ARCHITECTURE: Direct channel listener with prim discovery fallback, namespaced message protocol
+ARCHITECTURE: Direct channel listener with prim discovery fallback. Bilingual on
+              the unified leash/Lockmeister channel (-8888): answers DS-native
+              JSON plugin.leash.request AND Lockmeister grab pings, so both DS
+              and OpenCollar/Lockmeister collars can leash to this holder.
 --------------------*/
 
 /* -------------------- CONSTANTS -------------------- */
-integer LEASH_HOLDER_CHAN = -192837465;
+integer LEASH_HOLDER_CHAN = -8888;
 
 /* -------------------- STATE -------------------- */
 integer gListen = 0;
@@ -76,30 +79,54 @@ default {
     listen(integer ch, string name, key src, string msg) {
         if (ch != LEASH_HOLDER_CHAN) return;
 
-        // Expect JSON: {"type":"plugin.leash.request","wearer":"...","collar":"...","session":"..."}
-        if (llJsonGetValue(msg, ["type"]) != "plugin.leash.request") return;
+        // ---------- Native JSON grammar (DS collars) ----------
+        // {"type":"plugin.leash.request","wearer":"...","collar":"...","session":"..."}
+        if (llGetSubString(msg, 0, 0) == "{") {
+            if (llJsonGetValue(msg, ["type"]) != "plugin.leash.request") return;
+            // Coffle requests want the peer collar's leashpoint, not a holder.
+            if (llJsonGetValue(msg, ["mode"]) == "coffle") return;
 
-        // Coffle requests want the peer collar's leashpoint, not a holder.
-        // Missing field = old requester, reply as before.
-        if (llJsonGetValue(msg, ["mode"]) == "coffle") return;
+            string collarStr = llJsonGetValue(msg, ["collar"]);
+            string sessionStr = llJsonGetValue(msg, ["session"]);
+            if (collarStr == JSON_INVALID || sessionStr == JSON_INVALID) return;
+            key collar = (key)collarStr;
+            integer session = (integer)sessionStr;
 
-        string collarStr = llJsonGetValue(msg, ["collar"]);
-        string sessionStr = llJsonGetValue(msg, ["session"]);
-        if (collarStr == JSON_INVALID || sessionStr == JSON_INVALID) return;
-        key collar = (key)collarStr;
-        integer session = (integer)sessionStr;
+            key targetPrim = leashPrimKey();
+            string reply = llList2Json(JSON_OBJECT, [
+                "type", "plugin.leash.target",
+                "ok", "1",
+                "holder", (string)targetPrim,
+                "root", (string)llGetLinkKey(1),
+                "name", llGetObjectName(),
+                "session", (string)session
+            ]);
+            llRegionSayTo(collar, LEASH_HOLDER_CHAN, reply);
+            return;
+        }
 
-        key targetPrim = leashPrimKey();
+        // ---------- Lockmeister grammar (OpenCollar / LM collars) ----------
+        // A leashing collar pings the controller (our wearer) with its own
+        // wearer UUID:
+        //   "<uuid>handle"  /  "<uuid>collar"
+        //   "<uuid>|LMV2|RequestPoint|handle"  /  "...|collar"
+        // We answer "<ourOwner>handle ok" / "<ourOwner>collar ok" — the
+        // requester validates the first 36 chars against our owner and docks to
+        // the responding prim. LM can't name a child prim, so the leash docks
+        // at THIS script's prim; for a multi-prim holder put this script in the
+        // leashpoint prim. " ok" / " free" / other suffixes are replies, not
+        // requests — ignored.
+        if (llStringLength(msg) < 36) return;
+        key req = (key)llGetSubString(msg, 0, 35);
+        if (req == NULL_KEY) return;
+        string protocol = llGetSubString(msg, 36, -1);
 
-        string reply = llList2Json(JSON_OBJECT, [
-            "type", "plugin.leash.target",
-            "ok", "1",
-            "holder", (string)targetPrim,
-            "root", (string)llGetLinkKey(1),
-            "name", llGetObjectName(),
-            "session", (string)session
-        ]);
+        integer want_handle = (protocol == "handle" || protocol == "|LMV2|RequestPoint|handle");
+        integer want_collar = (protocol == "collar" || protocol == "|LMV2|RequestPoint|collar");
+        if (!want_handle && !want_collar) return;
 
-        llRegionSayTo(collar, LEASH_HOLDER_CHAN, reply);
+        string me = (string)llGetOwner();
+        if (want_handle) llRegionSayTo(req, LEASH_HOLDER_CHAN, me + "handle ok");
+        if (want_collar) llRegionSayTo(req, LEASH_HOLDER_CHAN, me + "collar ok");
     }
 }

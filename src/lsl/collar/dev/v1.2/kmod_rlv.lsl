@@ -741,18 +741,14 @@ handle_ground_rez(string reason) {
     TempAvWhite = [];
     TempAvBlack = [];
 
+    // React immediately in-memory so the engine stops processing at once, but
+    // do NOT write relay config from here. relay.mode/hardcoremode are owned by
+    // plugin_relay; announce the forced-off and let it persist (engines process,
+    // plugins set). The resulting settings.sync echoes back and confirms these.
     Mode = MODE_OFF;
     Hardcore = FALSE;
-    // Persist via SETTINGS_BUS so kmod_settings owns the LSD writes.
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_RELAY_MODE,
-        "value", (string)MODE_OFF
-    ]), NULL_KEY);
-    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
-        "type", "settings.set",
-        "key", KEY_RELAY_HARDCORE,
-        "value", "0"
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "relay.forceoff"
     ]), NULL_KEY);
 
     if (llGetListLength(Sources) > 0) relay_safeword_clear();
