@@ -72,6 +72,12 @@ integer TR_LEASH = 1;
 integer TR_UNLEASH = 2;
 integer StateChange = 0;
 
+// Deferred broadcast: helpers deep in a call chain set this instead of calling
+// broadcastState() directly; the event handler flushes it at top level so the
+// 16-field JSON list allocates with the stack unwound (lower peak — avoids the
+// stack-heap collision that building it at depth ~6 in the claim path caused).
+integer NeedBroadcast = FALSE;
+
 // Activation cause — selects what activateLeashFromState() does on entry.
 integer CAUSE_NATIVE = 0;  // claim/pass/cold-restart: follow + native probe + (LM for grab)
 integer CAUSE_LM = 1;      // Lockmeister grab-inflow: follow only (particles already rendering LM)
@@ -92,7 +98,6 @@ integer LeashClaimMode = 0;        // user's original action; drives wire mode_s
 // Follow mechanics
 integer FollowActive = FALSE;
 vector LastTargetPos = ZERO_VECTOR;
-float LastDistance = -1.0;
 integer ControlsOk = FALSE;
 integer AtLimit = FALSE;          // distance >= LeashLength
 integer ControlsExpanded = FALSE; // TRUE when directional keys are in our llTakeControls mask
@@ -148,9 +153,6 @@ string jsonGet(string j, string k, string default_val) {
     string v = llJsonGetValue(j, [k]);
     if (v == JSON_INVALID) return default_val;
     return v;
-}
-integer now() {
-    return llGetUnixTime();
 }
 // Check if a button label is allowed at the given ACL level via LSD policy
 integer policy_allows(string btn_label, integer acl_level) {
@@ -272,7 +274,7 @@ setLeashState(key user, key follow_target, integer follow_is_avatar, integer cla
     FollowIsAvatar = follow_is_avatar;
     LeashClaimMode = claim_mode;
     persistLeashState(TRUE, user);
-    broadcastState();
+    NeedBroadcast = TRUE;
     StateChange = TR_LEASH;
 }
 
@@ -292,7 +294,7 @@ clearLeashState(integer clear_reclip) {
 
     if (clear_reclip) clearReclipState();
 
-    broadcastState();
+    NeedBroadcast = TRUE;
     StateChange = TR_UNLEASH;
 }
 
@@ -409,7 +411,7 @@ startProbe() {
     ]);
     llRegionSayTo(FollowTarget, LEASH_CHAN, req);
     AwaitingHolder = TRUE;
-    ProbeDeadline = now() + (integer)PROBE_WINDOW;
+    ProbeDeadline = llGetUnixTime() + (integer)PROBE_WINDOW;
 }
 
 // JSON-only inbound dispatch for LEASH_CHAN. Plain Lockmeister strings on the
@@ -611,10 +613,10 @@ checkLeasherPresence() {
 }
 
 checkAutoReclip() {
-    if (ReclipScheduled == 0 || now() < ReclipScheduled) return;
+    if (ReclipScheduled == 0 || llGetUnixTime() < ReclipScheduled) return;
 
     // Safety window: stop waiting if the leasher hasn't returned in time.
-    if (ReclipDeadline != 0 && now() >= ReclipDeadline) {
+    if (ReclipDeadline != 0 && llGetUnixTime() >= ReclipDeadline) {
         clearReclipState();
         return;
     }
@@ -625,14 +627,11 @@ checkAutoReclip() {
     if (LastLeasher != NULL_KEY && llGetAgentInfo(LastLeasher) != 0) {
         requestAclForAction(LastLeasher, "grab", NULL_KEY);
         ReclipAttempts = ReclipAttempts + 1;
-        ReclipScheduled = now() + 2;
+        ReclipScheduled = llGetUnixTime() + 2;
     }
 }
 
 /* -------------------- FOLLOW MECHANICS -------------------- */
-key leashFollowTarget() {
-    return FollowTarget;
-}
 
 // Directional keys are added to the mask only when leashed AND (at the leash
 // limit OR a yank is in flight). ML_LBUTTON stays for the no-script-parcel
@@ -671,7 +670,6 @@ stopFollow() {
         YankTargetHandle = 0;
     }
     LastTargetPos = ZERO_VECTOR;
-    LastDistance = -1.0;
     LastTurnAngle = -999.0;
 }
 
@@ -689,7 +687,7 @@ turnToTarget(vector target_pos) {
 followTick() {
     if (!FollowActive || !Leashed) return;
 
-    key follow_target = leashFollowTarget();
+    key follow_target = FollowTarget;
     if (follow_target == NULL_KEY) return;
 
     // Prefer the discovered LeashPoint prim over the raw mode target.
@@ -738,8 +736,6 @@ followTick() {
             LastTargetPos = ZERO_VECTOR;
         }
     }
-
-    LastDistance = distance;
 }
 
 // Activate a leash session on entry to (or refresh within) the leashed state.
@@ -785,7 +781,7 @@ broadcastState() {
 setLengthInternal(integer length) {
     LeashLength = clampLeashLength(length);
     persistSetting(KEY_LEASH_LENGTH, (string)LeashLength);
-    broadcastState();
+    NeedBroadcast = TRUE;
 }
 
 toggleTurnInternal() {
@@ -795,22 +791,22 @@ toggleTurnInternal() {
         LastTurnAngle = -999.0;
     }
     persistSetting(KEY_LEASH_TURNTO, (string)TurnToFace);
-    broadcastState();
+    NeedBroadcast = TRUE;
 }
 
 setTextureInternal(string texture) {
     if (texture != "chain" && texture != "silk" && texture != "invisible") return;
     if (texture == LeashTexture) {
-        broadcastState();
+        NeedBroadcast = TRUE;
         return;
     }
     LeashTexture = texture;
     persistSetting(KEY_LEASH_TEXTURE, texture);
-    broadcastState();
+    NeedBroadcast = TRUE;
 
     if (Leashed) {
         key t = HolderTarget;
-        if (t == NULL_KEY) t = leashFollowTarget();
+        if (t == NULL_KEY) t = FollowTarget;
         if (t != NULL_KEY) setParticlesState(TRUE, t);
     }
 }
@@ -1106,6 +1102,7 @@ default
 
     link_message(integer sender, integer num, string msg, key id) {
         routeLinkMessage(num, msg, id);
+        if (NeedBroadcast) { NeedBroadcast = FALSE; broadcastState(); }
         // Only TR_LEASH is reachable here: you can't release when unleashed.
         if (takeStateChange() == TR_LEASH) state leashed;
     }
@@ -1162,6 +1159,7 @@ state leashed
 
     link_message(integer sender, integer num, string msg, key id) {
         routeLinkMessage(num, msg, id);
+        if (NeedBroadcast) { NeedBroadcast = FALSE; broadcastState(); }
         // Only TR_UNLEASH is reachable here: a re-claim/pass while leashed
         // activates in place (claimLeash/passLeashInternal) without re-entering.
         if (takeStateChange() == TR_UNLEASH) state default;
@@ -1180,7 +1178,7 @@ state leashed
                             | CONTROL_ROT_LEFT | CONTROL_ROT_RIGHT;
         if ((pressed & directional) == 0) return;
 
-        key follow_target = leashFollowTarget();
+        key follow_target = FollowTarget;
         if (follow_target == NULL_KEY) return;
 
         key target_key = follow_target;
@@ -1210,7 +1208,7 @@ state leashed
         }
 
         // Native discovery timed out — aim particles at the raw mode anchor.
-        if (AwaitingHolder && now() > ProbeDeadline) {
+        if (AwaitingHolder && llGetUnixTime() > ProbeDeadline) {
             AwaitingHolder = FALSE;
             if (FollowTarget != NULL_KEY) setParticlesState(TRUE, FollowTarget);
         }
@@ -1225,6 +1223,7 @@ state leashed
 
         if (FollowActive && Leashed) followTick();
 
+        if (NeedBroadcast) { NeedBroadcast = FALSE; broadcastState(); }
         integer tr = takeStateChange();
         if (tr == TR_UNLEASH) state default;
     }
