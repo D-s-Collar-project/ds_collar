@@ -196,6 +196,7 @@ startObjectScan() {
     PickPage = 0;
     Candidates = [];
     llSensor("", NULL_KEY, PASSIVE | SCRIPTED, 96.0, PI);
+    llOwnerSay("[ltdbg] startObjectScan: llSensor issued");
 }
 
 /* -------------------- OFFER RECEPTION DIALOG -------------------- */
@@ -282,6 +283,7 @@ handleSubpath(string subpath) {
     }
     else if (subpath == "post") {
         MenuContext = "post";
+        llOwnerSay("[ltdbg] post branch: MenuContext set, calling startObjectScan");
         startObjectScan();   // render deferred to sensor()/no_sensor()
     }
     else {
@@ -432,6 +434,7 @@ default
     // llGetAgentSize guard is a defensive backstop so a stray agent can never
     // appear in the post list.
     sensor(integer num) {
+        llOwnerSay("[ltdbg] sensor fired: num=" + (string)num + " MenuContext=[" + MenuContext + "] CurrentUser=" + (string)CurrentUser);
         if (MenuContext != "post") return;
         if (CurrentUser == NULL_KEY) return;
 
@@ -461,6 +464,7 @@ default
     }
 
     no_sensor() {
+        llOwnerSay("[ltdbg] no_sensor fired: MenuContext=[" + MenuContext + "] CurrentUser=" + (string)CurrentUser);
         if (MenuContext != "post") return;
         if (CurrentUser == NULL_KEY) return;
         llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
