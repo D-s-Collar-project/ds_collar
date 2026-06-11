@@ -1,0 +1,9 @@
+# Normalize line endings to LF across the repo.
+# CRLF/LF mismatches between branches were producing whole-file false diffs
+# (e.g. stable .lsl showing as 1600+ changed lines when byte-identical).
+# Force LF for all text; let git auto-detect binaries and leave them alone.
+* text=auto eol=lf
+
+# Be explicit for the source + tooling that must be LF.
+*.lsl text eol=lf
+*.sh  text eol=lf
