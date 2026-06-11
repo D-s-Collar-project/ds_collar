@@ -5,16 +5,16 @@ REVISION: 4
 PURPOSE: Minimal leash-holder target responder for external objects
 ARCHITECTURE: Direct channel listener with prim discovery fallback, namespaced message protocol
 CHANGES:
-- v1.1 rev 4: Guard JSON_INVALID before casting `collar` / `session` — malformed or spoofed requests now drop silently instead of replying to NULL_KEY with session 0.
-- v1.1 rev 3: Skip reply when plugin.leash.request `mode` is "coffle" —
+- v1.10 rev 4: Guard JSON_INVALID before casting `collar` / `session` — malformed or spoofed requests now drop silently instead of replying to NULL_KEY with session 0.
+- v1.10 rev 3: Skip reply when plugin.leash.request `mode` is "coffle" —
   coffle explicitly targets the peer collar's leashpoint, so any holder
   the wearer happens to also have on must stay out of that handshake.
   Missing field = old requester, reply as before.
-- v1.1 rev 2: Include "root" (linkset root UUID) in plugin.leash.target
+- v1.10 rev 2: Include "root" (linkset root UUID) in plugin.leash.target
   reply so the collar can validate post-mode responses against the
   user-selected target root. Additive field; old collars ignore it.
-- v1.1 rev 1: Namespace native protocol types (plugin.leash.request / plugin.leash.target).
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 1: Namespace native protocol types (plugin.leash.request / plugin.leash.target).
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 /* -------------------- CONSTANTS -------------------- */

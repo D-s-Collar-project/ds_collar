@@ -1,86 +1,87 @@
 /*--------------------
 MODULE: kmod_chat.lsl
 VERSION: 1.10
-REVISION: 20
+REVISION: 21
 PURPOSE: Local chat command receiver. Listens on channel 1 (always) and
          optionally channel 0 (public chat) for prefixed commands from
          authorised speakers. Sends ui.chat.command to UI_BUS so kmod_ui
          can route the request; plugins never receive the raw dispatch.
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
-- v1.1 rev 20: First-run bootstrap of `chat.prefix` and `chat.public` now goes through the settings.delta CSV protocol instead of direct llLinksetDataWrite. kmod_settings stays the sole LSD writer for both keys; the in-memory ChatPrefix / PublicChat values are still set synchronously here so callers in the same event see them immediately.
-- v1.1 rev 19: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 18: speaker_authorised now validates the per-avatar ACL cache
+- v1.10 rev 21: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 20: First-run bootstrap of `chat.prefix` and `chat.public` now goes through the settings.delta CSV protocol instead of direct llLinksetDataWrite. kmod_settings stays the sole LSD writer for both keys; the in-memory ChatPrefix / PublicChat values are still set synchronously here so callers in the same event see them immediately.
+- v1.10 rev 19: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 18: speaker_authorised now validates the per-avatar ACL cache
   against the global acl.timestamp epoch and treats entries older than
   the last settings change as stale. Defends against the touch-vs-chat
   asymmetry observed when public.mode toggled but the cache wipe didn't
   propagate (root cause was the dual-write bug fixed elsewhere; this is
   belt-and-suspenders for any future regression of the wipe chain).
-- v1.1 rev 17: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 17: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 16: Consistency pass — alias-collision notice converted from
+- v1.10 rev 16: Consistency pass — alias-collision notice converted from
   llOwnerSay to llRegionSayTo(llGetOwner(), 0, ...); "[chat]" source
   prefix dropped per project convention.
-- v1.1 rev 15: Lint cleanup. Removed unused AUTH_BUS constant, deleted the
+- v1.10 rev 15: Lint cleanup. Removed unused AUTH_BUS constant, deleted the
   no-op logd() scaffolding and its sole caller, dropped the vestigial
   `channel` parameter from speaker_authorised() (never branched on; ACL
   check applies to both channels by design). No behavior change.
-- v1.1 rev 14: KERNEL_LIFECYCLE rename (Phase 1). kernel.register→
+- v1.10 rev 14: KERNEL_LIFECYCLE rename (Phase 1). kernel.register→
   kernel.register.declare, kernel.registernow→kernel.register.refresh,
   kernel.reset→kernel.reset.soft, kernel.resetall→kernel.reset.factory,
   chat.alias.register→chat.alias.declare.
-- v1.1 rev 13: Namespaced subcommands. "<prefix> pose nadu" splits into
+- v1.10 rev 13: Namespaced subcommands. "<prefix> pose nadu" splits into
   head="pose" + tail="nadu"; head resolves via alias table, tail tokens
   are appended as a dot-path (e.g. ui.core.animate.pose.nadu). kmod_ui
   does longest-prefix plugin routing. Plugins register subcommand roots
   via new chat.alias.register message (invisible to kernel plugin list).
   Alias registration is first-wins with an owner warning on collision.
-- v1.1 rev 12: Change dispatch message type from ui.menu.start to
+- v1.10 rev 12: Change dispatch message type from ui.menu.start to
   ui.chat.command. kmod_ui handles ui.chat.command and routes via
   dispatch_to_plugin (with acl). This eliminates the double-dialog bug
   where plugin_animate received the raw broadcast because its label
   ("Animate") starts with the prefix ("an"), so both the chat dispatch
   AND kmod_ui's routed dispatch could reach it.
-- v1.1 rev 11: Add configurable secondary channel (chat.channel, default 1).
+- v1.10 rev 11: Add configurable secondary channel (chat.channel, default 1).
   plugin_chat can change it via llTextBox; kmod_chat reads the setting and
   rebuilds its listener. Channel 0 (public) remains separate.
-- v1.1 rev 10: Remove pre-seed of "menu" alias. kmod_ui re-emits its
+- v1.10 rev 10: Remove pre-seed of "menu" alias. kmod_ui re-emits its
   kernel.register for ROOT_CONTEXT/"Menu" in response to kernel.registernow
   (rev 7 of kmod_ui), so the alias is populated before any human can type.
   Pre-seeding was incorrect: it allowed command_is_known("menu") to return
   TRUE before the plugin list had loaded, which could produce an empty menu.
-- v1.1 rev 9: Pre-seed "menu" alias to "ui.core.root" at state_entry as a
+- v1.10 rev 9: Pre-seed "menu" alias to "ui.core.root" at state_entry as a
   belt-and-suspenders fallback in case kmod_ui's registernow response races.
-- v1.1 rev 8: Re-enable PublicChat by default. The command_is_known() guard
+- v1.10 rev 8: Re-enable PublicChat by default. The command_is_known() guard
   makes channel 0 safe; natural words are rejected before dispatch.
-- v1.1 rev 7: Remove mandatory space after prefix. command_is_known() now
+- v1.10 rev 7: Remove mandatory space after prefix. command_is_known() now
   guards both channels, so "anmenu" and "an menu" are equivalent. Natural
   words ("and", "an interesting") are rejected on both channels because they
   don't match any alias or dot-namespaced context.
-- v1.1 rev 6: Validate channel 0 commands against the alias table and plugin
+- v1.10 rev 6: Validate channel 0 commands against the alias table and plugin
   context list before dispatching. Natural words that happen to follow the
   prefix (e.g. "an interesting idea") are silently ignored on public chat.
   Channel 1 remains unrestricted since it is a private channel.
-- v1.1 rev 5: Revert PublicChat default to FALSE. A short 2-char prefix
+- v1.10 rev 5: Revert PublicChat default to FALSE. A short 2-char prefix
   (e.g. "an") collides with natural English words on public chat, causing
   accidental triggers. Channel 0 listening remains available as an opt-in
   via the Chat plugin menu.
-- v1.1 rev 4: Require a space after the prefix in strip_prefix. Previously
+- v1.10 rev 4: Require a space after the prefix in strip_prefix. Previously
   any word starting with the prefix (e.g. "and") would match "an" and
   trigger a command. Format is now strictly "<prefix> <command>".
-- v1.1 rev 3: Broadcast kernel.registernow on state_entry so kmod_ui and all
+- v1.10 rev 3: Broadcast kernel.registernow on state_entry so kmod_ui and all
   plugins re-emit kernel.register, ensuring CommandAliases is populated even
   when kmod_chat starts after kmod_ui. Without this, 'an menu' failed because
   the 'menu' alias was never built.
-- v1.1 rev 2: Default PublicChat to TRUE on first run. Channel 0 listening
+- v1.10 rev 2: Default PublicChat to TRUE on first run. Channel 0 listening
   is now on by default; it was previously off and required explicit opt-in
   via the Chat plugin.
-- v1.1 rev 1: Auto-build command alias table from kernel.register broadcasts.
+- v1.10 rev 1: Auto-build command alias table from kernel.register broadcasts.
   Aliases map lowercase label to context (e.g. "menu" -> "ui.core.root").
   kmod_ui emits a synthetic kernel.register for ROOT_CONTEXT/"Menu" so the
   root menu is reachable via chat without hardcoding.
-- v1.1 rev 0: Initial implementation. Auto-derives default prefix from the
+- v1.10 rev 0: Initial implementation. Auto-derives default prefix from the
   first two characters of the wearer's username (llGetUsername). Prefix and
   public-chat toggle are runtime-configurable via plugin_chat and persisted
   in LSD/settings. Commands are dispatched as ui.menu.start messages so any
@@ -295,7 +296,7 @@ integer speaker_authorised(key speaker) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

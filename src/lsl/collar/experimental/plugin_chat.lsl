@@ -1,46 +1,47 @@
 /*--------------------
 PLUGIN: plugin_chat.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Configuration UI for kmod_chat — change command prefix and toggle
          public chat (channel 0) listening.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
-- v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_prefix / persist_chat_chan / persist_public_chat send `settings.delta:<key>:<v>` envelopes.
-- v1.1 rev 11: Drop "[Chat]" source prefix from the access-denied notice.
+- v1.10 rev 14: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_prefix / persist_chat_chan / persist_public_chat send `settings.delta:<key>:<v>` envelopes.
+- v1.10 rev 11: Drop "[Chat]" source prefix from the access-denied notice.
   Brings this plugin into line with the project convention.
-- v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 9: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 9: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 7: Honor kernel.reset.factory as well as kernel.reset.soft.
+- v1.10 rev 7: Honor kernel.reset.factory as well as kernel.reset.soft.
   Previously ignored factory reset, leaving cached session state after
   factory wipe. Now self-resets on either.
-- v1.1 rev 6: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 6: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft.
-- v1.1 rev 5: Add configurable secondary channel ("Set Channel" button).
+- v1.10 rev 5: Add configurable secondary channel ("Set Channel" button).
   Uses llTextBox like prefix input; valid range 1-9, not 0.
-- v1.1 rev 4: Replace negative-channel chat input with llTextBox popup for
+- v1.10 rev 4: Replace negative-channel chat input with llTextBox popup for
   prefix input. Removes the need for the user to type on a private channel.
-- v1.1 rev 3: Guard ui.menu.start handler against raw (unrouted) dispatches
+- v1.10 rev 3: Guard ui.menu.start handler against raw (unrouted) dispatches
   from kmod_chat. Messages without an acl field are ignored; only messages
   routed through kmod_ui (which adds the acl field) are processed. Fixes
   spurious "Access denied" when chat commands were used.
-- v1.1 rev 2: Remove trustee (ACL 3) from Chat config entirely. Policy entry
+- v1.10 rev 2: Remove trustee (ACL 3) from Chat config entirely. Policy entry
   for ACL 3 dropped; ui.menu.start handler now rejects any caller with acl < 4
   before opening the menu.
-- v1.1 rev 1: Restrict "Set Prefix" to unowned wearer (ACL 4) and primary
+- v1.10 rev 1: Restrict "Set Prefix" to unowned wearer (ACL 4) and primary
   owner (ACL 5); trustees (ACL 3) retained "Toggle Public" only.
-- v1.1 rev 0: Initial implementation. Shows current prefix and public-chat
+- v1.10 rev 0: Initial implementation. Shows current prefix and public-chat
   status; allows owner/trustee to change prefix via local chat input and
   toggle channel 0 listening on/off.
 --------------------*/
@@ -386,7 +387,7 @@ handle_prefix_input(string new_prefix) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.10
-REVISION: 24
+REVISION: 25
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -10,35 +10,36 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
 CHANGES:
-- v1.1 rev 24: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 23: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_mode and persist_hardcore send `settings.delta:<key>:<v>` envelopes.
-- v1.1 rev 22: Split off the relay engine into kmod_rlv (Mono per-script
+- v1.10 rev 25: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 24: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 23: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_mode and persist_hardcore send `settings.delta:<key>:<v>` envelopes.
+- v1.10 rev 22: Split off the relay engine into kmod_rlv (Mono per-script
   byte budget). plugin_relay is now ~UI-only; refcount + auth + sources
   + ASK dialog moved out. "Bound by..." is async via relay.list.request
   / relay.list.response on UI_BUS.
-- v1.1 rev 21: Full rewrite as port of Satomi Ahn's multirelay (engine
+- v1.10 rev 21: Full rewrite as port of Satomi Ahn's multirelay (engine
   later moved to kmod_rlv in rev 22).
-- v1.1 rev 20: Correct product name in IMPL_VERSION reply.
-- v1.1 rev 19: Add ORG capability-probe handlers.
-- v1.1 rev 18: Drop "[RELAY]" source prefix.
-- v1.1 rev 17: ASK early-ack-deferred-apply (later replaced).
-- v1.1 rev 16: ASK queue + cap (later replaced).
-- v1.1 rev 15: persist_mode / persist_hardcore stop pre-writing LSD.
-- v1.1 rev 14: Strict ORG parser.
-- v1.1 rev 13: write_plugin_reg guards idempotent writes.
-- v1.1 rev 12: apply_settings_sync mirrors mode-change side effects.
-- v1.1 rev 11: Dormancy guard for COLLAR_UPDATER object description.
-- v1.1 rev 10: Self-declare menu presence via plugin.reg.<ctx> LSD.
-- v1.1 rev 9: ASK provisional-accept (superseded).
-- v1.1 rev 8: User notices via llRegionSayTo.
-- v1.1 rev 7: Chat command support.
-- v1.1 rev 6: sos.relay.clear handler on UI_BUS.
-- v1.1 rev 5: Wire-type rename.
-- v1.1 rev 4: handle_ground_rez takes a reason string.
-- v1.1 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts.
-- v1.1 rev 2: Namespace internal message type strings.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast to direct LSD.
-- v1.1 rev 0: Self-declared button visibility policy via LSD.
+- v1.10 rev 20: Correct product name in IMPL_VERSION reply.
+- v1.10 rev 19: Add ORG capability-probe handlers.
+- v1.10 rev 18: Drop "[RELAY]" source prefix.
+- v1.10 rev 17: ASK early-ack-deferred-apply (later replaced).
+- v1.10 rev 16: ASK queue + cap (later replaced).
+- v1.10 rev 15: persist_mode / persist_hardcore stop pre-writing LSD.
+- v1.10 rev 14: Strict ORG parser.
+- v1.10 rev 13: write_plugin_reg guards idempotent writes.
+- v1.10 rev 12: apply_settings_sync mirrors mode-change side effects.
+- v1.10 rev 11: Dormancy guard for COLLAR_UPDATER object description.
+- v1.10 rev 10: Self-declare menu presence via plugin.reg.<ctx> LSD.
+- v1.10 rev 9: ASK provisional-accept (superseded).
+- v1.10 rev 8: User notices via llRegionSayTo.
+- v1.10 rev 7: Chat command support.
+- v1.10 rev 6: sos.relay.clear handler on UI_BUS.
+- v1.10 rev 5: Wire-type rename.
+- v1.10 rev 4: handle_ground_rez takes a reason string.
+- v1.10 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts.
+- v1.10 rev 2: Namespace internal message type strings.
+- v1.10 rev 1: Migrate settings reads from JSON broadcast to direct LSD.
+- v1.10 rev 0: Self-declared button visibility policy via LSD.
 --------------------*/
 
 
@@ -485,7 +486,7 @@ handle_dialog_timeout(string msg) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

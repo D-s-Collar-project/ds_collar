@@ -1,24 +1,25 @@
 /*--------------------
 SCRIPT: control_hud.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Auto-detect nearby collars and connect automatically
 ARCHITECTURE: RLV relay-style broadcast and listen workflow, namespaced internal message protocol
 CHANGES:
-- v1.1 rev 6: Use llRequestDisplayName for scan labels (works for absent
+- v1.10 rev 7: Remove redundant empty else block in touch_end (context already defaults to ROOT_CONTEXT) — clears the empty-block analyzer warning.
+- v1.10 rev 6: Use llRequestDisplayName for scan labels (works for absent
   avatars; llKey2Name is regional-only). UUID tag now a placeholder while
   the async lookup resolves.
-- v1.1 rev 5: Fall back to UUID tag when llKey2Name returns "" (owner not
+- v1.10 rev 5: Fall back to UUID tag when llKey2Name returns "" (owner not
   in-region) so llDialog never receives an empty button label.
-- v1.1 rev 4: Per-collar detection. Dedup scan results by collar prim
+- v1.10 rev 4: Per-collar detection. Dedup scan results by collar prim
   (not owner), carry target_collar in ACL query so only the selected
   collar replies, and disambiguate same-owner labels as "Name #N".
-- v1.1 rev 3: Consistency pass — convert user-facing llOwnerSay notices
+- v1.10 rev 3: Consistency pass — convert user-facing llOwnerSay notices
   to llRegionSayTo(llGetOwner(), 0, ...). Matches project convention.
-- v1.1 rev 2: Namespace context values. ROOT_CONTEXT → "ui.core.root",
+- v1.10 rev 2: Namespace context values. ROOT_CONTEXT → "ui.core.root",
   SOS_CONTEXT → "ui.sos.root".
-- v1.1 rev 1: Namespaced internal message types (remote.collarscan, auth.aclqueryexternal, etc.).
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 1: Namespaced internal message types (remote.collarscan, auth.aclqueryexternal, etc.).
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 
@@ -354,8 +355,6 @@ default {
         string context = ROOT_CONTEXT;
         if (duration >= LONG_TOUCH_THRESHOLD) {
             context = SOS_CONTEXT;
-        }
-        else {
         }
 
         broadcast_collar_scan(context);

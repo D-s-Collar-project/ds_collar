@@ -1,66 +1,67 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Maintenance and utility functions for collar management
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
-- v1.1 rev 15: View Settings now shows the owning plugins' effective defaults for
+- v1.10 rev 16: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 15: View Settings now shows the owning plugins' effective defaults for
   unpersisted keys: runaway defaults ON (fmt_bool_def, matches plugin_access) and
   relay.mode absent = ASK (matches plugin_relay), instead of reporting OFF. Fixes
   the report disagreeing with the actual configuration when those were never toggled.
-- v1.1 rev 14: Add Update Collar entry. Wearer/primary-owner ACLs (2/4/5)
+- v1.10 rev 14: Add Update Collar entry. Wearer/primary-owner ACLs (2/4/5)
   only; trustees and TPE wearer (ACL 0) locked out by policy. Tapping it
   asks kmod_remote to broadcast remote.updateravailable for 5s; first
   remote.updaterhere reply wins. On match, confirm dialog shows updater
   key + reported version; on confirm, kmod_remote sends remote.collarready
   with a fresh PIN to the chosen updater so updater_driver's existing
   shim-load + bundle-dispatch flow runs against this collar.
-- v1.1 rev 13: Factory Reset → Reset Config. Now sends settings.reset.config
+- v1.10 rev 13: Factory Reset → Reset Config. Now sends settings.reset.config
   on SETTINGS_BUS to kmod_settings instead of calling llLinksetDataReset
   directly. kmod_settings owns reset semantics: preserves owner+lock,
   re-parses notecard for defaults, sets bootstrap sentinel, broadcasts
   kernel.reset.factory once LSD is final. Confirmation copy updated to
   reflect new behaviour and redirect abuse-recovery cases to Runaway.
-- v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 11: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 11: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 9: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 9: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory. (This plugin is the producer of both
   soft and factory reset broadcasts from the maintenance menu.)
-- v1.1 rev 8: Fix Clear Leash confirmation dialog — wrong type "dialog_open"
+- v1.10 rev 8: Fix Clear Leash confirmation dialog — wrong type "dialog_open"
   should be "ui.dialog.open". kmod_dialogs ignored it so the dialog never
   opened and the confirm button was never reachable.
-- v1.1 rev 7: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 7: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 6: Switch Clear Leash to force_release and add confirmation dialog.
+- v1.10 rev 6: Switch Clear Leash to force_release and add confirmation dialog.
   force_release is authorized by wearer identity or ACL >= 3, bypassing the
   leasher-identity check so it works on bad-actor leashes. Confirmation
   dialog prevents accidental or malicious triggers.
-- v1.1 rev 5: Namespace internal message type strings (kernel.*, ui.*, etc.)
-- v1.1 rev 4: Fix phantom owner/trustee/blacklist count in View Settings
+- v1.10 rev 5: Namespace internal message type strings (kernel.*, ui.*, etc.)
+- v1.10 rev 4: Fix phantom owner/trustee/blacklist count in View Settings
   and Access List. llCSV2List("") returns [""] (a single empty entry),
   not []. Routed all CSV reads through a csv_read() helper.
-- v1.1 rev 3: Two-mode access model. View Settings and Access List read
+- v1.10 rev 3: Two-mode access model. View Settings and Access List read
   primary owner from access.owner scalar (single mode) or access.owneruuids
   CSV (multi mode). Names come pre-resolved from kmod_settings.
-- v1.1 rev 2: Add Factory Reset (wearer-only, confirmation required).
+- v1.10 rev 2: Add Factory Reset (wearer-only, confirmation required).
   Wipes all LSD data and resets all scripts to defaults.
-- v1.1 rev 1: Migrate from JSON broadcast payloads to direct LSD reads.
+- v1.10 rev 1: Migrate from JSON broadcast payloads to direct LSD reads.
   Remove CachedSettings/SettingsReady; do_view_settings() and
   do_display_access_list() now read individual keys from LSD on demand.
   Remove apply_settings_sync()/apply_settings_delta() and settings_get request.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded ALLOWED_ACL_FULL list with policy reads via
   get_policy_buttons() and btn_allowed(). Removed PLUGIN_MIN_ACL and
   min_acl from kernel registration message.
@@ -779,7 +780,7 @@ handle_dialog_timeout(string msg) {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

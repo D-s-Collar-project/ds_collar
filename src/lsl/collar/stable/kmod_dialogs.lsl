@@ -1,35 +1,36 @@
 /*--------------------
 MODULE: kmod_dialogs.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: Centralized dialog management for shared listener handling
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
-- v1.1 rev 8: Drop dead empty `else { }` block in ui.dialog.buttonconfig.register handler. Restructured the field-presence check as early-return guards (one per JSON field) instead of a compound AND-condition with an empty else branch. No behavior change.
-- v1.1 rev 7: Toggle-button state is now read directly from LSD at render
+- v1.10 rev 9: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 8: Drop dead empty `else { }` block in ui.dialog.buttonconfig.register handler. Restructured the field-presence check as early-return guards (one per JSON field) instead of a compound AND-condition with an empty else branch. No behavior change.
+- v1.10 rev 7: Toggle-button state is now read directly from LSD at render
   time rather than taken from the button_data "state" field. Convention:
   for context "ui.core.lock" the state key is "plugin.lock.state" (the
   trailing dotted segment of the context). This lets plugins update their
   toggle state with a single LSD write — no ui.state.update link_message
   round-trip through kmod_ui — and kmod_dialogs picks the right label via
   the existing buttonconfig at render.
-- v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 6: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 5: Consistency pass — item-truncation warning converted from
+- v1.10 rev 5: Consistency pass — item-truncation warning converted from
   llOwnerSay to llRegionSayTo(llGetOwner(), 0, ...).
-- v1.1 rev 4: UI_BUS rename (Phase 1). ui.dialog.registerbuttonconfig→
+- v1.10 rev 4: UI_BUS rename (Phase 1). ui.dialog.registerbuttonconfig→
   ui.dialog.buttonconfig.register (was a compound name; split into
   domain-noun + verb to match house style).
-- v1.1 rev 3: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
+- v1.10 rev 3: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
   kernel.reset.soft, kernel.resetall→kernel.reset.factory.
-- v1.1 rev 2: Namespace internal message type strings (ui.dialog.*, kernel.*)
-- v1.1 rev 1: Fix button_data routing — JSON button objects with context+label
+- v1.10 rev 2: Namespace internal message type strings (ui.dialog.*, kernel.*)
+- v1.10 rev 1: Fix button_data routing — JSON button objects with context+label
   are now routable even without a "state" field. Previously only objects
   carrying all three (context+label+state) were treated as routable, so plugin
   action buttons emitted by btn(label, cmd) lost their context and clicks came
   back with context="".
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 
@@ -453,7 +454,7 @@ handle_dialog_close(string msg) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

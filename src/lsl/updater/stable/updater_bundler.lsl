@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,19 +25,20 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
-- v1.1 rev 12: Install-mode INV handler now emits LM_INSTALL_MISSING (flat missing-scripts CSV) instead of LM_INSTALL_FEATURES (grouped). The driver routes that into updater_bespoke_ui under ExistingMode=TRUE for per-plugin RLV granularity. LM_FEATURES_QUERY path (install_shim Minimal/Full menu) is unchanged — still emits grouped features via LM_INSTALL_FEATURES.
-- v1.1 rev 11: Particle stream visual feedback while shipping. Starts when shipping actually begins — LM_BUNDLE_BEGIN (update mode, ships immediately after diff), LM_INSTALL_GO (install-existing mode, after wearer confirms picker, NOT at LM_INSTALL_BEGIN where the LIST/QUERY exchange is still figuring out what to offer), or inside ship_to_install_shim (install_shim mode). Stops in notify_driver_done. Defensive stop in cleanup_bundle for cancel/timeout paths, plus explicit llParticleSystem([]) in state_entry because llResetScript clears the ParticlesActive flag but may leave the prim's emitter running. Light blue → cyan stream targeting the collar / shim prim via PSYS_SRC_TARGET_KEY.
-- v1.1 rev 10: Asset gating for install_shim. LM_INSTALL_SHIM_BEGIN payload now carries optional skip_animations ("1"/"0") and skip_notecards (CSV of names) flags; ship_to_install_shim honours them so the driver can suppress animations (when Animations subsystem is off in Bespoke) and per-notecard exclusions (e.g. "D/s Collar outfits setup" when plugin_outfits isn't selected). ship_nonscripts_to_install_shim takes a skip_list parameter — settings + user manual ship by default since the driver never adds them. Backwards-compatible: missing flags default to "ship everything".
-- v1.1 rev 9: Defensive cleanup_bundle() at the top of every LM_*_BEGIN / LM_FEATURES_QUERY handler. Removes the Mode != "" early-return guards that silently swallowed new requests when prior state was stale (the "Detecting missing components..." hang). LM_BUNDLE_RESET still present as belt-and-braces.
-- v1.1 rev 8: Add LM_BUNDLE_RESET handler — calls llResetScript on receipt. Driver fires this from its own state_entry so the bundler stays in sync after driver llResetScript, fixing a hang at "Detecting missing components..." when a previously-aborted session left Mode != "" and the next LM_INSTALL_BEGIN got silently early-returned.
-- v1.1 rev 7: install_shim mode now ships animations / objects / notecards after the script set, including the settings notecard (which is intentionally an example template on fresh install — wearers can customise defaults from it). Update and install-against-existing-collar paths still exclude the settings notecard at all three layers (build_candidates_typed / list_inventory_typed / verdict_for_typed) so wearer customisations are never overwritten. Earlier rev was over-cautious about llGiveInventory dialog floods — same-owner prim-to-prim transfer is silent regardless of attached state.
-- v1.1 rev 6: Add missing LM_FEATURES_QUERY handler. Constant was declared and the driver sent the message, but the bundler had no handler — install_shim flow hung at 'shim_features_querying' forever and the wearer's re-touches saw 'session already in progress'.
-- v1.1 rev 5: Add INSTALL and INSTALL_SHIM modes. Mode variable gates the diff predicate (intersect vs invert) and the dispatch shape. Feature grouping uses two hand-defined subsystem overrides (Leash, RLV — these don't decompose cleanly under the anchor heuristic) plus plugin_<name> anchor for everything else, with leftover core kmods collapsed into a single "Core Components" feature. Driver picks features via multi-select; bundler then ships the selected script set followed by all bundler-only non-scripts. The install-shim variant skips the shim handshake entirely — install_shim refused to start unless its prim was empty, so the bundler can ship via llRemoteLoadScriptPin without a per-item GIVE/SKIP roundtrip.
-- v1.1 rev 4: Update-only-installed model. Candidates is now intersected with CollarInv when each LIST/<type>-reply arrives, so the bundler only QUERYs items that are present in BOTH the bundler AND the collar — the rule is "known to the updater AND present in the collar gets refreshed; known but absent gets ignored; present but unknown stays." No SWEEP (would remove wearer customs); no auto-install of bundler-only items (wearer chose not to install them). ConditionalPairs / lookup_gate / Manifest / SWEEP / SWEPT machinery all retired — the general intersection rule subsumes the 3-script paired-kmod gate. Same model for scripts and non-scripts (animations, objects, notecards).
-- v1.1 rev 3: Extend the script-only diff to a typed phase machine that also covers animations, objects, and notecards. After SWEPT, walk LIST_ANIM / LIST_OBJ / LIST_NC and per-item QUERY_<type>; the shim wipes stale items synchronously and reports GIVE. Bundler then calls llGiveInventory(CollarKey, item) per GIVE — same-owner attached transfer is silent (the "attached = treated as agent" rule applies to cross-owner cases only) and bypasses RLV's edit-block. No SWEEP for non-scripts; items in collar not in bundler are wearer's customs and stay. Settings notecard ("settings") hard-excluded at both ends. Mirrors OpenCollar's update mechanism.
-- v1.1 rev 2: Drop notecard manifest. Replaced by inventory diff.
-- v1.1 rev 1: Add CONDITIONAL bundle mode (superseded by rev 2).
-- v1.1 rev 0: Initial implementation.
+- v1.10 rev 13: Dormancy marker renamed to "D/s Collar updater v1.1" (role-split description fix — the prim's branded desc, and the shims' staging self-park signal). No behaviour change: still ships running=TRUE with the intersect/no-sweep update model. Collar working markers "(updating)"/"(installing)" live in the shims. Also: build_candidates / build_candidates_typed now return the list (callers assign Candidates) so the analyzer stops constant-folding Candidates to empty at the phase guards.
+- v1.10 rev 12: Install-mode INV handler now emits LM_INSTALL_MISSING (flat missing-scripts CSV) instead of LM_INSTALL_FEATURES (grouped). The driver routes that into updater_bespoke_ui under ExistingMode=TRUE for per-plugin RLV granularity. LM_FEATURES_QUERY path (install_shim Minimal/Full menu) is unchanged — still emits grouped features via LM_INSTALL_FEATURES.
+- v1.10 rev 11: Particle stream visual feedback while shipping. Starts when shipping actually begins — LM_BUNDLE_BEGIN (update mode, ships immediately after diff), LM_INSTALL_GO (install-existing mode, after wearer confirms picker, NOT at LM_INSTALL_BEGIN where the LIST/QUERY exchange is still figuring out what to offer), or inside ship_to_install_shim (install_shim mode). Stops in notify_driver_done. Defensive stop in cleanup_bundle for cancel/timeout paths, plus explicit llParticleSystem([]) in state_entry because llResetScript clears the ParticlesActive flag but may leave the prim's emitter running. Light blue → cyan stream targeting the collar / shim prim via PSYS_SRC_TARGET_KEY.
+- v1.10 rev 10: Asset gating for install_shim. LM_INSTALL_SHIM_BEGIN payload now carries optional skip_animations ("1"/"0") and skip_notecards (CSV of names) flags; ship_to_install_shim honours them so the driver can suppress animations (when Animations subsystem is off in Bespoke) and per-notecard exclusions (e.g. "D/s Collar outfits setup" when plugin_outfits isn't selected). ship_nonscripts_to_install_shim takes a skip_list parameter — settings + user manual ship by default since the driver never adds them. Backwards-compatible: missing flags default to "ship everything".
+- v1.10 rev 9: Defensive cleanup_bundle() at the top of every LM_*_BEGIN / LM_FEATURES_QUERY handler. Removes the Mode != "" early-return guards that silently swallowed new requests when prior state was stale (the "Detecting missing components..." hang). LM_BUNDLE_RESET still present as belt-and-braces.
+- v1.10 rev 8: Add LM_BUNDLE_RESET handler — calls llResetScript on receipt. Driver fires this from its own state_entry so the bundler stays in sync after driver llResetScript, fixing a hang at "Detecting missing components..." when a previously-aborted session left Mode != "" and the next LM_INSTALL_BEGIN got silently early-returned.
+- v1.10 rev 7: install_shim mode now ships animations / objects / notecards after the script set, including the settings notecard (which is intentionally an example template on fresh install — wearers can customise defaults from it). Update and install-against-existing-collar paths still exclude the settings notecard at all three layers (build_candidates_typed / list_inventory_typed / verdict_for_typed) so wearer customisations are never overwritten. Earlier rev was over-cautious about llGiveInventory dialog floods — same-owner prim-to-prim transfer is silent regardless of attached state.
+- v1.10 rev 6: Add missing LM_FEATURES_QUERY handler. Constant was declared and the driver sent the message, but the bundler had no handler — install_shim flow hung at 'shim_features_querying' forever and the wearer's re-touches saw 'session already in progress'.
+- v1.10 rev 5: Add INSTALL and INSTALL_SHIM modes. Mode variable gates the diff predicate (intersect vs invert) and the dispatch shape. Feature grouping uses two hand-defined subsystem overrides (Leash, RLV — these don't decompose cleanly under the anchor heuristic) plus plugin_<name> anchor for everything else, with leftover core kmods collapsed into a single "Core Components" feature. Driver picks features via multi-select; bundler then ships the selected script set followed by all bundler-only non-scripts. The install-shim variant skips the shim handshake entirely — install_shim refused to start unless its prim was empty, so the bundler can ship via llRemoteLoadScriptPin without a per-item GIVE/SKIP roundtrip.
+- v1.10 rev 4: Update-only-installed model. Candidates is now intersected with CollarInv when each LIST/<type>-reply arrives, so the bundler only QUERYs items that are present in BOTH the bundler AND the collar — the rule is "known to the updater AND present in the collar gets refreshed; known but absent gets ignored; present but unknown stays." No SWEEP (would remove wearer customs); no auto-install of bundler-only items (wearer chose not to install them). ConditionalPairs / lookup_gate / Manifest / SWEEP / SWEPT machinery all retired — the general intersection rule subsumes the 3-script paired-kmod gate. Same model for scripts and non-scripts (animations, objects, notecards).
+- v1.10 rev 3: Extend the script-only diff to a typed phase machine that also covers animations, objects, and notecards. After SWEPT, walk LIST_ANIM / LIST_OBJ / LIST_NC and per-item QUERY_<type>; the shim wipes stale items synchronously and reports GIVE. Bundler then calls llGiveInventory(CollarKey, item) per GIVE — same-owner attached transfer is silent (the "attached = treated as agent" rule applies to cross-owner cases only) and bypasses RLV's edit-block. No SWEEP for non-scripts; items in collar not in bundler are wearer's customs and stay. Settings notecard ("settings") hard-excluded at both ends. Mirrors OpenCollar's update mechanism.
+- v1.10 rev 2: Drop notecard manifest. Replaced by inventory diff.
+- v1.10 rev 1: Add CONDITIONAL bundle mode (superseded by rev 2).
+- v1.10 rev 0: Initial implementation.
 --------------------*/
 
 
@@ -58,7 +59,7 @@ integer LM_INSTALL_MISSING     = 91009;  // bundler→driver: flat list of missi
 // Object description marker. Dormancy guard in every collar script checks
 // for this — any script dragged into this prim's inventory parks itself
 // instead of trying to run here.
-string UPDATER_MARKER = "COLLAR_UPDATER";
+string UPDATER_MARKER = "D/s Collar updater v1.1";
 
 // Wearer-specific config; never managed by the updater. Mirrors the
 // shim's exclusion so a stray "settings" notecard in this prim never
@@ -160,9 +161,11 @@ integer is_collar_script(string name) {
 }
 
 // Build the candidates list: every collar-namespace script in this prim,
-// excluding self and the shim. Local buf with refcount 1 → assigned to
-// the global once (avoids O(n²) on the global slot).
-build_candidates() {
+// excluding self and the shim. Returns the list; caller does
+// `Candidates = build_candidates()` so the reassignment stays visible to
+// the static analyzer (a direct global write here gets constant-folded to
+// "still []" at call sites).
+list build_candidates() {
     list buf = [];
     string self = llGetScriptName();
     integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
@@ -177,7 +180,7 @@ build_candidates() {
         }
         i += 1;
     }
-    Candidates = buf;
+    return buf;
 }
 
 // Build candidates for a non-script type. No namespace filter — the
@@ -187,7 +190,7 @@ build_candidates() {
 // overwritten. The install_shim fresh-target path uses
 // ship_nonscripts_to_install_shim instead, which intentionally includes
 // settings as a starter template.
-build_candidates_typed(integer inv_type) {
+list build_candidates_typed(integer inv_type) {
     list buf = [];
     integer count = llGetInventoryNumber(inv_type);
     integer i = 0;
@@ -198,7 +201,7 @@ build_candidates_typed(integer inv_type) {
         }
         i += 1;
     }
-    Candidates = buf;
+    return buf;
 }
 
 // Returns the LIST verb to send to the shim for the current phase.
@@ -270,7 +273,7 @@ list apply_diff_predicate(list cands, list collar_inv) {
 // RLV subsystem: kmod_rlv + every plugin that issues rlv.* link-messages
 // or @-commands. Anchor heuristic would split these across multiple
 // per-plugin features and leave kmod_rlv orphaned in Core; group them.
-// Verified set as of v1.1 rev 5: plugin_outfits, plugin_folders,
+// Verified set as of v1.10 rev 5: plugin_outfits, plugin_folders,
 // plugin_relay, plugin_restrict, plugin_rlvex, plugin_strip.
 //
 // Leash subsystem: anchor heuristic would group plugin_leash with the
@@ -441,13 +444,13 @@ begin_phase(string phase) {
     PendingName = "";
 
     if (phase == "animations") {
-        build_candidates_typed(INVENTORY_ANIMATION);
+        Candidates = build_candidates_typed(INVENTORY_ANIMATION);
     }
     else if (phase == "objects") {
-        build_candidates_typed(INVENTORY_OBJECT);
+        Candidates = build_candidates_typed(INVENTORY_OBJECT);
     }
     else if (phase == "notecards") {
-        build_candidates_typed(INVENTORY_NOTECARD);
+        Candidates = build_candidates_typed(INVENTORY_NOTECARD);
     }
     else if (phase == "done") {
         notify_driver_done();
@@ -636,7 +639,7 @@ default {
         // LM_BUNDLE_RESET handler was added.
         if (num == LM_FEATURES_QUERY) {
             cleanup_bundle();
-            build_candidates();
+            Candidates = build_candidates();
             list features = group_into_features(Candidates);
             string payload = llList2Json(JSON_OBJECT, [
                 "features", llList2Json(JSON_ARRAY, features)
@@ -663,7 +666,7 @@ default {
             SecureChannel = (integer)channel_str;
 
             TypePhase = "scripts";
-            build_candidates();
+            Candidates = build_candidates();
             SecureListen = llListen(SecureChannel, "", CollarKey, "");
 
             // Update mode ships immediately after the LIST/QUERY diff
@@ -696,7 +699,7 @@ default {
             SecureChannel = (integer)channel_str;
 
             TypePhase = "scripts";
-            build_candidates();
+            Candidates = build_candidates();
             SecureListen = llListen(SecureChannel, "", CollarKey, "");
 
             if (llGetListLength(Candidates) == 0) {

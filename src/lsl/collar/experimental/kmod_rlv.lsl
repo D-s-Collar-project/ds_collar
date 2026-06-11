@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: kmod_rlv.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: RLV subsystem. Single point of @-command emission for all
   refcount-stateful RLV restrictions in the collar. Owns the third-party
   RLV relay protocol (RELAY_CHANNEL listen, auth queue, ASK dialog,
@@ -20,7 +20,8 @@ ARCHITECTURE: Spun off from plugin_relay v1.10 rev 21 to keep that
     (one-shot or pre-existing semantics — Phase 2 migration), and
     kmod_leash (=force / =clear only, no refcount overlap).
 CHANGES:
-- v1.1 rev 4: say_to_source always uses llRegionSayTo instead of the
+- v1.10 rev 5: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 4: say_to_source always uses llRegionSayTo instead of the
   distance-based ladder (llWhisper / llSay / llShout / llRegionSay).
   Functional reach is unchanged — the source's listen fires on any
   speech method as long as the channel matches — but llRegionSayTo
@@ -29,9 +30,9 @@ CHANGES:
   expose the relay protocol traffic to the wearer. Drops the
   MR-faithful distance scaling Satomi MR uses; no relay source cares
   which speech method delivered the ack.
-- v1.1 rev 3: Scope safeword to relay-sourced restrictions only. Previous safeword_clear_all emitted llOwnerSay("@clear") which is object-wide — the viewer cleared every restriction tied to the collar's UUID, including plugin_lock's @detach=n, plugin_rlvex's exception entries, and anything else other scripts had issued. Replaced with relay_safeword_clear: walks Sources and calls release_source per-source; claim_clear emits @<behav>=y only when the LAST claim on a behav goes away, so non-relay consumers' claims are preserved. Mirrors Satomi's MR safeword: relay panic cuts the wearer loose from external sources, not from their own collar's lock state. sos.relay.clear notice text updated to reflect the narrowed scope ("Relay restrictions cleared." instead of "All RLV restrictions cleared.").
-- v1.1 rev 2: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 1: Initial implementation. Lift of plugin_relay rev 21's
+- v1.10 rev 3: Scope safeword to relay-sourced restrictions only. Previous safeword_clear_all emitted llOwnerSay("@clear") which is object-wide — the viewer cleared every restriction tied to the collar's UUID, including plugin_lock's @detach=n, plugin_rlvex's exception entries, and anything else other scripts had issued. Replaced with relay_safeword_clear: walks Sources and calls release_source per-source; claim_clear emits @<behav>=y only when the LAST claim on a behav goes away, so non-relay consumers' claims are preserved. Mirrors Satomi's MR safeword: relay panic cuts the wearer loose from external sources, not from their own collar's lock state. sos.relay.clear notice text updated to reflect the narrowed scope ("Relay restrictions cleared." instead of "All RLV restrictions cleared.").
+- v1.10 rev 2: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 1: Initial implementation. Lift of plugin_relay rev 21's
   refcount engine + relay protocol; adds multi-consumer apply/release
   API on UI_BUS. plugin_relay rewritten to UI shell that consumes this.
 --------------------*/
@@ -782,7 +783,7 @@ handle_ground_rez(string reason) {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

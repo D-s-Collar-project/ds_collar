@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.10
-REVISION: 20
+REVISION: 21
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.10 rev 21: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
 - v1.10 rev 20: Fix runtime "llDialog: message too long" (>512 chars) on the strip picker. Two unbounded contributors capped: locked_folders_line() dumped every locked-folder name uncapped (now ellipsized to 48), and the attachment rows appended an UN-bounded "@slot" after the 30-char name (now the whole "name @slot" display is ellipsized to 30; layer rows capped at 28). Nine attachment rows plus a long locked-folders line were exceeding 512; worst case is now ~434.
 - v1.10 rev 19: Revert the rev 16-18 @getpath/@getpathnew path-filter
   architecture. Verified empirically with both slot-form and UUID-form
@@ -706,7 +707,7 @@ handle_rlv_response(string message) {
 /* -------------------- EVENTS -------------------- */
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

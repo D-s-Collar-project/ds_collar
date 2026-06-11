@@ -1,50 +1,51 @@
 /*--------------------
 PLUGIN: plugin_bell.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Bell visibility and jingling control for the collar
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
-- v1.1 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 14: Drop empty on_rez handler — semantically identical to not declaring it (no-op default). Replaced with an explanatory comment so the intent ("state survives attach/detach") stays visible.
-- v1.1 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_bell_setting sends `settings.delta:<key>:<v>`; drops direct llLinksetDataWrite.
-- v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 16: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 14: Drop empty on_rez handler — semantically identical to not declaring it (no-op default). Replaced with an explanatory comment so the intent ("state survives attach/detach") stays visible.
+- v1.10 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_bell_setting sends `settings.delta:<key>:<v>`; drops direct llLinksetDataWrite.
+- v1.10 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 11: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 11: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 9: Chat subcommands "bell sound"/"bell silent" (gated by "Sound")
+- v1.10 rev 9: Chat subcommands "bell sound"/"bell silent" (gated by "Sound")
   and "bell vol up"/"bell vol dn" (gated by "Volume +"/"Volume -").
-- v1.1 rev 8: Chat command support (Phase 3). Registers "bell" alias.
+- v1.10 rev 8: Chat command support (Phase 3). Registers "bell" alias.
   "<prefix> bell" opens menu; "bell show"/"bell hide" set visibility
   (gated by btn_allowed("Show")); "bell jingle" triggers a manual
   jingle (respects BellSoundEnabled).
-- v1.1 rev 7: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 7: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory.
-- v1.1 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 5: Restrict bell policy to ACL 3+ (Trustee, Unowned wearer, Primary Owner).
+- v1.10 rev 5: Restrict bell policy to ACL 3+ (Trustee, Unowned wearer, Primary Owner).
   Public (ACL 1) and Owned wearer (ACL 2) no longer see the bell plugin in the menu,
   as bell settings are owner-imposed controls.
-- v1.1 rev 4: Namespaced internal message types (kernel.register, ui.dialog.open, etc.).
-- v1.1 rev 3: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
+- v1.10 rev 4: Namespaced internal message types (kernel.register, ui.dialog.open, etc.).
+- v1.10 rev 3: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
   factory reset clears cached bell state.
-- v1.1 rev 2: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
+- v1.10 rev 2: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
   Remove apply_settings_delta(); fold side effects into apply_settings_sync()
   via previous-state comparison. Both settings_sync and settings_delta call
   parameterless apply_settings_sync(). Remove settings_get request from
   state_entry; call apply_settings_sync() directly.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads.
   Button list built from get_policy_buttons() + btn_allowed().
 --------------------*/
@@ -458,7 +459,7 @@ apply_settings_sync() {
 /* -------------------- EVENT HANDLERS -------------------- */
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_proto.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: Holder-discovery handshake protocol for the leashing engine
 ARCHITECTURE: True LSL state machine.
                 default          — idle / coffle responder
@@ -14,12 +14,13 @@ ARCHITECTURE: True LSL state machine.
               (mode_str + validation_target + oc_ping_target). IPC reuses
               SETTINGS_BUS so no new bus number is consumed.
 CHANGES:
-- v1.1 rev 7: Strip the temporary DEBUG_LEASH scaffolding (constant +
+- v1.10 rev 8: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 7: Strip the temporary DEBUG_LEASH scaffolding (constant +
   logd helper + every logd call site) added during the avatar-center
   fallback diagnosis. The two underlying bugs are fixed (rev 4
   validator now uses linkset root, rev 6 + engine rev 32 carry the
   claim-mode tag), so the diagnostic trail is no longer needed.
-- v1.1 rev 6: Revert the rev 5 responder widening. The "A coffles B
+- v1.10 rev 6: Revert the rev 5 responder widening. The "A coffles B
   to A" path that motivated it is now handled at the source — the
   engine (kmod_leash_engine rev 32+) tags the user's original
   claim mode in persistent state (LeashClaimMode) and sendProtoStart
@@ -31,7 +32,7 @@ CHANGES:
     coffle  → collar LeashPoint (this responder)
     grab    → hand-held leash_holder.lsl
     post    → static-object linkset root
-- v1.1 rev 5: Coffle responder now also answers grab requests (still
+- v1.10 rev 5: Coffle responder now also answers grab requests (still
   skips post). Diagnosed second-order to rev 4 via the same DEBUG_LEASH
   trail: in the "A coffles B to A" RP path (A is ordered to chain B to
   themselves), claimLeash sets Leasher == FollowTarget == A.
@@ -46,7 +47,7 @@ CHANGES:
   because both responders answer; the validator pins whichever
   arrives first.
   (Superseded by rev 6's engine-side tag.)
-- v1.1 rev 4: Fix validateAndExtractHolder rejecting valid avatar/coffle
+- v1.10 rev 4: Fix validateAndExtractHolder rejecting valid avatar/coffle
   replies whose `holder` field is a CHILD prim of the responder's
   attachment. llGetObjectDetails(<child_prim_key>, [OBJECT_ATTACHED_POINT,
   ...]) returns 0 — only the linkset root reports the real attach point.
@@ -61,8 +62,8 @@ CHANGES:
   Diagnosed via in-world DEBUG_LEASH logs: `attach_pt=0 owner=<leasher
   uuid>` on the candidate, confirming the linkset (root) WAS attached
   and owned correctly but the child prim's OBJECT_ATTACHED_POINT was 0.
-- v1.1 rev 3: Defensive validProtoStart(msg) gate before captureProtoStart in all three paths that consume leash.proto.start (default's link_message, proto_native's link_message restart, proto_oc_lm's link_message restart). Without it, a malformed leash.proto.start (missing field) would silently corrupt the handshake — llJsonGetValue returns the literal string "JSON_INVALID" for missing fields, (key)"JSON_INVALID" yields garbage, proto_native's request would carry that garbage controller / mode. Engine always sends all fields today, but defends against future protocol drift / typos.
-- v1.1 rev 2: Convert HolderState integer-flag dispatch to actual LSL
+- v1.10 rev 3: Defensive validProtoStart(msg) gate before captureProtoStart in all three paths that consume leash.proto.start (default's link_message, proto_native's link_message restart, proto_oc_lm's link_message restart). Without it, a malformed leash.proto.start (missing field) would silently corrupt the handshake — llJsonGetValue returns the literal string "JSON_INVALID" for missing fields, (key)"JSON_INVALID" yields garbage, proto_native's request would carry that garbage controller / mode. Engine always sends all fields today, but defends against future protocol drift / typos.
+- v1.10 rev 2: Convert HolderState integer-flag dispatch to actual LSL
   states. HOLDER_STATE_* constants and HolderState global gone — the
   current state IS the phase. Phase transitions are now `state X;`
   instead of mutating a flag. completeHandshake / leashProtoListenerTerminate
@@ -73,7 +74,7 @@ CHANGES:
   state_entry — no manual close. New helpers: captureProtoStart() and
   validateAndExtractHolder(). Plenty of headroom in proto for the
   ~2KB scaffolding cost (was 28.7%, becomes ~32-34%).
-- v1.1 rev 1: Initial split from kmod_leash.lsl. Handshake state machine
+- v1.10 rev 1: Initial split from kmod_leash.lsl. Handshake state machine
   (then via integer flag), persistent native listener + responder, OC/LM
   fallback, all moved here. Engine-agnostic — receives controller /
   mode_str / validation_target / oc_ping_target via leash.proto.start
@@ -268,7 +269,7 @@ key validateAndExtractHolder(string msg) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

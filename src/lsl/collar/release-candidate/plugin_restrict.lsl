@@ -1,19 +1,20 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.10
-REVISION: 16
+REVISION: 17
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
-- v1.1 rev 16: Command audit against the RLV API. CAT_INV: drop @attachall / @detachall (not y/n restrictions in RLV; RLVa aliases to @attachallthis / @detachallthis — folder lock, plugin_folders' domain). CAT_OTHER: drop @stand (no such command), drop @accepttp (add/rem exception list, not y/n; moved to plugin_rlvex). CAT_TRAVEL: typo fix @tptlm → @tplm (landmark TP); add @sittp ("Sit TP"). Touch refactored from a single coarse "Touch" (@touchall) into the full hierarchy: @fartouch ("Touch Far"), @touchall ("Touch Own"), @touchworld ("Touch Wld"), @touchattach ("Touch Att"), @touchhud ("Touch HUD"), @interact ("Isolate"). New reconcile_sittp() drives @sittp's viewer state from the OR of explicit toggle + implicit holds via @tplm or @tploc — wearers blocked from teleporting can't bypass via far-sit warp either. apply_settings_sync calls reconcile_sittp after the apply loop.
-- v1.1 rev 15: persist_restrictions switches to `settings.delete:restrict.list` when Restrictions becomes empty (last toggle-off), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix — the empty-CSV settings.delta was silently dropped, leaving restrict.list populated and causing the next settings.sync to re-apply stale entries (the `@touchall` resurrection / folder-lock reactivation pattern). When a restriction is lifted now, its LSD entry is actually erased.
-- v1.1 rev 14: Apply the project's bottom-nav + top-to-bottom-L-R dialog convention across all three menus (main, category, sit-target). Nav row is now `<<, >>, Back` at slots 0-2 (was `Back, <<, >>` and inversion via a manual list-reverse). Items slot-mapped via a nav-count-agnostic reorder_item_buttons helper matching plugin_leash rev 22. Stripped the trailing `:` from every restriction label (LABEL_INV/SPEECH/TRAVEL/OTHER) — the `[X]` / `[ ]` checkbox prefix is the delimiter now. CAT_* / LABEL_* pre-sorted alphabetically by displayed label (parallel-stride preserved); main-menu if-blocks re-ordered alphabetical as well.
-- v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_restrictions sends `settings.delta:restrict.list:<csv>`; drops direct llLinksetDataWrite.
-- v1.1 rev 11: Migrate RLV emission to kmod_rlv (rlv.apply / rlv.release /
+- v1.10 rev 17: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 16: Command audit against the RLV API. CAT_INV: drop @attachall / @detachall (not y/n restrictions in RLV; RLVa aliases to @attachallthis / @detachallthis — folder lock, plugin_folders' domain). CAT_OTHER: drop @stand (no such command), drop @accepttp (add/rem exception list, not y/n; moved to plugin_rlvex). CAT_TRAVEL: typo fix @tptlm → @tplm (landmark TP); add @sittp ("Sit TP"). Touch refactored from a single coarse "Touch" (@touchall) into the full hierarchy: @fartouch ("Touch Far"), @touchall ("Touch Own"), @touchworld ("Touch Wld"), @touchattach ("Touch Att"), @touchhud ("Touch HUD"), @interact ("Isolate"). New reconcile_sittp() drives @sittp's viewer state from the OR of explicit toggle + implicit holds via @tplm or @tploc — wearers blocked from teleporting can't bypass via far-sit warp either. apply_settings_sync calls reconcile_sittp after the apply loop.
+- v1.10 rev 15: persist_restrictions switches to `settings.delete:restrict.list` when Restrictions becomes empty (last toggle-off), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix — the empty-CSV settings.delta was silently dropped, leaving restrict.list populated and causing the next settings.sync to re-apply stale entries (the `@touchall` resurrection / folder-lock reactivation pattern). When a restriction is lifted now, its LSD entry is actually erased.
+- v1.10 rev 14: Apply the project's bottom-nav + top-to-bottom-L-R dialog convention across all three menus (main, category, sit-target). Nav row is now `<<, >>, Back` at slots 0-2 (was `Back, <<, >>` and inversion via a manual list-reverse). Items slot-mapped via a nav-count-agnostic reorder_item_buttons helper matching plugin_leash rev 22. Stripped the trailing `:` from every restriction label (LABEL_INV/SPEECH/TRAVEL/OTHER) — the `[X]` / `[ ]` checkbox prefix is the delimiter now. CAT_* / LABEL_* pre-sorted alphabetically by displayed label (parallel-stride preserved); main-menu if-blocks re-ordered alphabetical as well.
+- v1.10 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_restrictions sends `settings.delta:restrict.list:<csv>`; drops direct llLinksetDataWrite.
+- v1.10 rev 11: Migrate RLV emission to kmod_rlv (rlv.apply / rlv.release /
   rlv.clear / rlv.force on UI_BUS, consumer="restrict"). Fixes a
   long-standing bug: the apply path emitted "@<behav>=y" (canonical
   RLV release form) instead of "=n" — restrictions in restrict.list
@@ -21,36 +22,36 @@ CHANGES:
   applied to the viewer. Wearers with non-empty restrict.list will now
   see their saved restrictions take effect on next state_entry. Force
   sit/unsit unchanged in semantics; routed via rlv.force.
-- v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 9: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 9: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 7: Chat command support (Phase 3). Registers "restrict" alias.
+- v1.10 rev 7: Chat command support (Phase 3). Registers "restrict" alias.
   "<prefix> restrict" opens menu; "<prefix> restrict clear" removes all
   active RLV restrictions (same as the "Clear all" menu button; gated
   by btn_allowed("Clear all")).
-- v1.1 rev 6: Honor kernel.reset.factory in addition to kernel.reset.soft,
+- v1.10 rev 6: Honor kernel.reset.factory in addition to kernel.reset.soft,
   and handle sos.restrict.clear by clearing all RLV restrictions. Factory
   reset previously left cached state; SOS emergency clear wasn't wired.
-- v1.1 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft.
-- v1.1 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 3: Namespace internal message type strings (kernel.*, ui.*, settings.*).
-- v1.1 rev 2: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 1: Migrate from JSON broadcast payloads to direct LSD reads.
+- v1.10 rev 3: Namespace internal message type strings (kernel.*, ui.*, settings.*).
+- v1.10 rev 2: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 1: Migrate from JSON broadcast payloads to direct LSD reads.
   Remove apply_settings_delta() and request_settings_sync(). apply_settings_sync()
   is now parameterless and reads restrict.list from LSD. Uses previous-state
   comparison to clear old RLV restrictions and apply new ones on change.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL / RESTRICT_MIN_ACL checks with policy reads
   via get_policy_buttons() and btn_allowed(). Removed PLUGIN_MIN_ACL,
   RESTRICT_MIN_ACL, and min_acl from kernel registration message.
@@ -783,7 +784,7 @@ handle_dialog_timeout(string msg) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }

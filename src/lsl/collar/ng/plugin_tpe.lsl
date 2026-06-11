@@ -1,57 +1,58 @@
 /*--------------------
 PLUGIN: plugin_tpe.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Manage TPE mode with wearer confirmation and owner oversight
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
-- v1.1 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_tpe_mode sends `settings.delta:tpe.mode:<v>`; drops direct llLinksetDataWrite calls in persist_tpe_mode and apply_settings_sync — kmod_settings is now sole writer.
-- v1.1 rev 12: Simplify wearer-consent dialog copy. The rev 11 enumeration
+- v1.10 rev 15: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 13: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_tpe_mode sends `settings.delta:tpe.mode:<v>`; drops direct llLinksetDataWrite calls in persist_tpe_mode and apply_settings_sync — kmod_settings is now sole writer.
+- v1.10 rev 12: Simplify wearer-consent dialog copy. The rev 11 enumeration
   of every SOS button was too much detail for the consent moment; one line
   pointing to the long-touch SOS as the safety hatch is enough.
-- v1.1 rev 11: Sharpen wearer-consent dialog copy to acknowledge the SOS
+- v1.10 rev 11: Sharpen wearer-consent dialog copy to acknowledge the SOS
   panel as the OOC safety hatch — including SOS Runaway as the absolute
   last resort. Prior copy implied "all control relinquished" without
   qualification, which misled wearers about whether any escape path
   remained while in TPE.
-- v1.1 rev 10: Toggle state now written to plugin.state.<ctx> in LSD
+- v1.10 rev 10: Toggle state now written to plugin.state.<ctx> in LSD
   (via idempotent write_plugin_state helper) instead of pushed via
   ui.state.update link_message. kmod_ui rev 17 reads plugin.state.<ctx>
   live at render time, so the state-cache hop is gone. Reset handler
   now also deletes plugin.state.<ctx> alongside the other LSD cleanup.
-- v1.1 rev 9: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 9: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 8: Switch to state-based label resolution. register_with_kernel
+- v1.10 rev 8: Switch to state-based label resolution. register_with_kernel
   now registers a buttonconfig for the TPE:Y / TPE:N pair via kmod_dialogs
   and emits ui.state.update with the current state. Toggle paths
   (handle_tpe_click, handle_button_click, apply_settings_sync) send
   ui.state.update; plugin.reg.<ctx> is written once at registration and
   never rewritten on toggle. Removes the LSD write + linkset_data fire +
   debounce + rebuild that used to happen on every TPE flip.
-- v1.1 rev 7: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 7: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 6: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 6: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory.
-- v1.1 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 3: Namespaced internal message types (kernel.register, ui.dialog.open, etc.).
-- v1.1 rev 2: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 1: Migrate from JSON broadcast payloads to direct LSD reads.
+- v1.10 rev 3: Namespaced internal message types (kernel.register, ui.dialog.open, etc.).
+- v1.10 rev 2: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 1: Migrate from JSON broadcast payloads to direct LSD reads.
   Remove apply_settings_delta() and request_settings_sync(). apply_settings_sync()
   is now parameterless and reads all keys from LSD. Both settings_sync and
   settings_delta call apply_settings_sync() in link_message.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads via
   get_policy_buttons() and btn_allowed(). Removed PLUGIN_MIN_ACL and
   min_acl from kernel registration message.
@@ -376,7 +377,7 @@ apply_settings_sync() {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
+        if (llGetObjectDesc() == "D/s Collar updater v1.1" || llGetObjectDesc() == "(updating)" || llGetObjectDesc() == "(installing)") {
             llSetScriptState(llGetScriptName(), FALSE);
             return;
         }
