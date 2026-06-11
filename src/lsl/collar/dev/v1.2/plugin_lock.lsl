@@ -325,10 +325,6 @@ toggle_lock(key user, integer acl_level) {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         gPolicyButtons = [];
         // Restore from LSD immediately (survives relog)

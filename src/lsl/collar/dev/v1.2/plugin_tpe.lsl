@@ -336,10 +336,6 @@ apply_settings_sync() {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         WearerKey = llGetOwner();
         cleanup_session();

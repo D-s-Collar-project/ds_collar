@@ -465,10 +465,6 @@ handle_soft_reset() {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         // Cold-start owner-change detection. CHANGED_OWNER doesn't fire
         // when ownership transfers while the script isn't running (the

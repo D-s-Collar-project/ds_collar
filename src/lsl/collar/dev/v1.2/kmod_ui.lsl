@@ -860,10 +860,6 @@ handle_dialog_timeout(string msg) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         PluginContexts = [];
         PluginLabels = [];

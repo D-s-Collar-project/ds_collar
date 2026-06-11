@@ -507,10 +507,6 @@ cleanup() {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         cleanup();
         register_self();

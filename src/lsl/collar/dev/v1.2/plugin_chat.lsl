@@ -376,10 +376,6 @@ handle_prefix_input(string new_prefix) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         cleanup_session();
         apply_settings_sync();

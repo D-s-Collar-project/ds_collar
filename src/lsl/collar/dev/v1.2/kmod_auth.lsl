@@ -675,10 +675,6 @@ handle_acl_query(string msg) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         SettingsReady = FALSE;
         PendingQueries = [];

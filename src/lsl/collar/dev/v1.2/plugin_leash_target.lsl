@@ -342,10 +342,6 @@ handlePickerClick(string ctx) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
         cleanupSession();
         OfferDialogSession = "";
         OfferTarget = NULL_KEY;

@@ -938,10 +938,6 @@ finalize_reset_config() {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         LastOwner = llGetOwner();
         NotecardKey = llGetInventoryKey(NOTECARD_NAME);

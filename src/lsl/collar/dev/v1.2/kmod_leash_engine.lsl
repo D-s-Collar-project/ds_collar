@@ -908,11 +908,6 @@ routeLinkMessage(integer num, string msg, key id) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);   // dormant in the bundler/updater object
-            return;                                       // before any listen/register/timer
-        }
-
         HolderTarget = NULL_KEY;
         AwaitingHolder = FALSE;
         AuthorizedLmController = NULL_KEY;

@@ -763,10 +763,6 @@ handle_ground_rez(string reason) {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         clear_pending_ask();
         drop_queue();

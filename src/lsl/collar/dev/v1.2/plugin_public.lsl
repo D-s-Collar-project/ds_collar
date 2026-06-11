@@ -257,10 +257,6 @@ toggle_public_access(key user, integer acl_level) {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         gPolicyButtons = [];
         apply_settings_sync();

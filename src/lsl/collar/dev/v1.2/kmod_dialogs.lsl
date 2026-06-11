@@ -427,10 +427,6 @@ handle_dialog_close(string msg) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         SessionIDs = [];
         SessionUsers = [];

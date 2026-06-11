@@ -319,10 +319,6 @@ announce_status() {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         UseFixed4711 = TRUE;
         UseRelayChan = TRUE;
@@ -337,10 +333,6 @@ default
 state starting
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         start_bootstrap();
     }
@@ -470,10 +462,6 @@ state starting
 state running
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         llSetTimerEvent(0.0);
     }

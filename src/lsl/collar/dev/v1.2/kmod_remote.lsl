@@ -494,10 +494,6 @@ handle_update_discover(string message) {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         // Clean up any existing listens
         if (AclQueryListenHandle != 0) {

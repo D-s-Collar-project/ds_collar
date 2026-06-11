@@ -218,10 +218,6 @@ integer speaker_authorised(key speaker) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         ListenChan0 = 0;
         ListenChan1 = 0;

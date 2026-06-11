@@ -395,10 +395,6 @@ cleanup_session() {
 
 default {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         // Snapshot animation count so CHANGED_INVENTORY can detect deltas and reset.
         integer raw_count = llGetInventoryNumber(INVENTORY_ANIMATION);

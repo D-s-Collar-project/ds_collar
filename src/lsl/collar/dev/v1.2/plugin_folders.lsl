@@ -696,10 +696,6 @@ handle_rlv_response(string message) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         cleanup_session();
         apply_settings_sync();

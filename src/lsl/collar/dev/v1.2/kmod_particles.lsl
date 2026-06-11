@@ -427,10 +427,6 @@ handle_lm_disable() {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         ParticlesActive = FALSE;
         TargetKey = NULL_KEY;

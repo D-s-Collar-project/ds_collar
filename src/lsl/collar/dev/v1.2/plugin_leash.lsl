@@ -660,10 +660,6 @@ scheduleStateQuery(string next_menu_context) {
 default
 {
     state_entry() {
-        if (llGetObjectDesc() == "COLLAR_UPDATER") {
-            llSetScriptState(llGetScriptName(), FALSE);
-            return;
-        }
 
         cleanupSession();
         register_self();
