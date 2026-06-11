@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,6 +25,7 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+- v1.1 rev 13: Dormancy marker renamed to "D/s Collar updater v1.1" (role-split description fix — the prim's branded desc, and the shims' staging self-park signal). No behaviour change: still ships running=TRUE with the intersect/no-sweep update model. Collar working markers "(updating)"/"(installing)" live in the shims. Also: build_candidates / build_candidates_typed now return the list (callers assign Candidates) so the analyzer stops constant-folding Candidates to empty at the phase guards.
 - v1.1 rev 12: Install-mode INV handler now emits LM_INSTALL_MISSING (flat missing-scripts CSV) instead of LM_INSTALL_FEATURES (grouped). The driver routes that into updater_bespoke_ui under ExistingMode=TRUE for per-plugin RLV granularity. LM_FEATURES_QUERY path (install_shim Minimal/Full menu) is unchanged — still emits grouped features via LM_INSTALL_FEATURES.
 - v1.1 rev 11: Particle stream visual feedback while shipping. Starts when shipping actually begins — LM_BUNDLE_BEGIN (update mode, ships immediately after diff), LM_INSTALL_GO (install-existing mode, after wearer confirms picker, NOT at LM_INSTALL_BEGIN where the LIST/QUERY exchange is still figuring out what to offer), or inside ship_to_install_shim (install_shim mode). Stops in notify_driver_done. Defensive stop in cleanup_bundle for cancel/timeout paths, plus explicit llParticleSystem([]) in state_entry because llResetScript clears the ParticlesActive flag but may leave the prim's emitter running. Light blue → cyan stream targeting the collar / shim prim via PSYS_SRC_TARGET_KEY.
 - v1.1 rev 10: Asset gating for install_shim. LM_INSTALL_SHIM_BEGIN payload now carries optional skip_animations ("1"/"0") and skip_notecards (CSV of names) flags; ship_to_install_shim honours them so the driver can suppress animations (when Animations subsystem is off in Bespoke) and per-notecard exclusions (e.g. "D/s Collar outfits setup" when plugin_outfits isn't selected). ship_nonscripts_to_install_shim takes a skip_list parameter — settings + user manual ship by default since the driver never adds them. Backwards-compatible: missing flags default to "ship everything".
@@ -58,7 +59,7 @@ integer LM_INSTALL_MISSING     = 91009;  // bundler→driver: flat list of missi
 // Object description marker. Dormancy guard in every collar script checks
 // for this — any script dragged into this prim's inventory parks itself
 // instead of trying to run here.
-string UPDATER_MARKER = "COLLAR_UPDATER";
+string UPDATER_MARKER = "D/s Collar updater v1.1";
 
 // Wearer-specific config; never managed by the updater. Mirrors the
 // shim's exclusion so a stray "settings" notecard in this prim never
@@ -160,9 +161,11 @@ integer is_collar_script(string name) {
 }
 
 // Build the candidates list: every collar-namespace script in this prim,
-// excluding self and the shim. Local buf with refcount 1 → assigned to
-// the global once (avoids O(n²) on the global slot).
-build_candidates() {
+// excluding self and the shim. Returns the list; caller does
+// `Candidates = build_candidates()` so the reassignment stays visible to
+// the static analyzer (a direct global write here gets constant-folded to
+// "still []" at call sites).
+list build_candidates() {
     list buf = [];
     string self = llGetScriptName();
     integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
@@ -177,7 +180,7 @@ build_candidates() {
         }
         i += 1;
     }
-    Candidates = buf;
+    return buf;
 }
 
 // Build candidates for a non-script type. No namespace filter — the
@@ -187,7 +190,7 @@ build_candidates() {
 // overwritten. The install_shim fresh-target path uses
 // ship_nonscripts_to_install_shim instead, which intentionally includes
 // settings as a starter template.
-build_candidates_typed(integer inv_type) {
+list build_candidates_typed(integer inv_type) {
     list buf = [];
     integer count = llGetInventoryNumber(inv_type);
     integer i = 0;
@@ -198,7 +201,7 @@ build_candidates_typed(integer inv_type) {
         }
         i += 1;
     }
-    Candidates = buf;
+    return buf;
 }
 
 // Returns the LIST verb to send to the shim for the current phase.
@@ -441,13 +444,13 @@ begin_phase(string phase) {
     PendingName = "";
 
     if (phase == "animations") {
-        build_candidates_typed(INVENTORY_ANIMATION);
+        Candidates = build_candidates_typed(INVENTORY_ANIMATION);
     }
     else if (phase == "objects") {
-        build_candidates_typed(INVENTORY_OBJECT);
+        Candidates = build_candidates_typed(INVENTORY_OBJECT);
     }
     else if (phase == "notecards") {
-        build_candidates_typed(INVENTORY_NOTECARD);
+        Candidates = build_candidates_typed(INVENTORY_NOTECARD);
     }
     else if (phase == "done") {
         notify_driver_done();
@@ -636,7 +639,7 @@ default {
         // LM_BUNDLE_RESET handler was added.
         if (num == LM_FEATURES_QUERY) {
             cleanup_bundle();
-            build_candidates();
+            Candidates = build_candidates();
             list features = group_into_features(Candidates);
             string payload = llList2Json(JSON_OBJECT, [
                 "features", llList2Json(JSON_ARRAY, features)
@@ -663,7 +666,7 @@ default {
             SecureChannel = (integer)channel_str;
 
             TypePhase = "scripts";
-            build_candidates();
+            Candidates = build_candidates();
             SecureListen = llListen(SecureChannel, "", CollarKey, "");
 
             // Update mode ships immediately after the LIST/QUERY diff
@@ -696,7 +699,7 @@ default {
             SecureChannel = (integer)channel_str;
 
             TypePhase = "scripts";
-            build_candidates();
+            Candidates = build_candidates();
             SecureListen = llListen(SecureChannel, "", CollarKey, "");
 
             if (llGetListLength(Candidates) == 0) {

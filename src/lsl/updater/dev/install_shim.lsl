@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: install_shim.lsl
 VERSION: 1.10
-REVISION: 6
+REVISION: 7
 PURPOSE: Empty-target receiver for the installer's fresh-install path. Wearer
   drops this single script into an object they want to turn into a collar;
   it sets a remote-load PIN, announces itself on EXTERNAL_ACL_REPLY_CHAN, and
@@ -14,6 +14,7 @@ ARCHITECTURE: Lives alone in the fresh target object. Uses kmod_remote's
   already present (drop into a non-empty target is a user error, not a
   reinstall path; that's what 'Update Collar' is for).
 CHANGES:
+- v1.1 rev 7: Role-split + rename the dormancy markers (description fix). Self-park stays on UPDATER_MARKER, now "D/s Collar updater v1.1" (updater prim only); the TARGET is stamped with a distinct INSTALLING_MARKER "(installing)" while installing, so a stuck marker can't brick a retry. On success the desc is branded from the wearer's prim name via branded_desc() (blank → "D/s Collar v1.1"; named → "<name> -- D/s Collar v1.1") instead of a flat overwrite; failure paths still restore OriginalDesc. Collar scripts' guard sleeps on "D/s Collar updater v1.1" / "(updating)" / "(installing)".
 - v1.1 rev 6: Add a SETTLE_DELAY (5s) between install.shim.done and teardown. The bundler ships scripts asynchronously, so the last items could still be landing when DONE arrived — the old immediate activate_collar_scripts + self-delete branded/reset a half-populated prim. DONE now arms the settle timer; a Finishing flag ignores late traffic so it can't reset the delay; timer() does the activate + teardown once the prim is complete.
 - v1.1 rev 5: INSTALL_TIMEOUT 300s → 600s. Bespoke walk + Minimal/Full picker can take longer than the previous 5-minute window; if the wearer overran it, the shim disarmed the PIN and self-deleted, then llRemoteLoadScriptPin failed on the bundler's first dispatch ("trying to illegally load script onto task"). 600s gives ~10 minutes of total margin past the wearer's decision + BUNDLE_TIMEOUT.
 - v1.1 rev 4: Stamp prim description with "D/s Collar v1.1" (BRAND_DESC) on the success path instead of restoring the OriginalDesc — a fresh prim's blank desc was a missed branding opportunity. Failure paths still restore OriginalDesc. Tracked via Activated flag so cleanup_and_die doesn't clobber the brand.
@@ -33,16 +34,24 @@ integer EXTERNAL_ACL_REPLY_CHAN = -8675310;
 
 
 /* -------------------- CONSTANTS -------------------- */
-// Dormancy marker set on installer prims. If this script was dragged into
-// the installer linkset during packaging, state_entry parks it instead of
-// trying to announce.
-string UPDATER_MARKER = "COLLAR_UPDATER";
+// Staging marker — the updater/installer prim's description. If this script
+// is sitting staged there (desc == UPDATER_MARKER) its state_entry parks it
+// instead of announcing. The shim self-parks ONLY on this, never on its own
+// working marker, so a stuck marker can't brick a future install.
+string UPDATER_MARKER = "D/s Collar updater v1.1";
 
-// Authoritative prim description stamped on the successfully-installed
-// collar. Replaces whatever was there before (typically "" for a fresh
-// rezzed prim) so the new collar advertises itself clearly. On failure
-// paths the original description is restored instead.
+// Working marker stamped on the TARGET prim while installing (the wearer
+// sees "(installing)"). Distinct from UPDATER_MARKER so the shim never
+// self-parks on it. Collar scripts' guard sleeps on this too.
+string INSTALLING_MARKER = "(installing)";
+
+// Brand appended to the prim description on a successful install. Blank
+// original → just this; named object → "<name> -- D/s Collar v1.1". On
+// failure paths the original description is restored instead.
 string BRAND_DESC = "D/s Collar v1.1";
+
+// Separator between the wearer's object name and the brand.
+string BRAND_SEP = " -- ";
 
 // How often we re-broadcast install.shim.ready until the installer acks.
 // 5 seconds is a comfortable cadence — fast enough that the wearer's next
@@ -154,15 +163,22 @@ cleanup_and_die() {
     llRemoveInventory(llGetScriptName());
 }
 
+// Compose the branded description from the wearer's original prim name.
+// Blank original → just the brand; otherwise "<original><sep><brand>".
+string branded_desc() {
+    if (OriginalDesc == "") return BRAND_DESC;
+    return OriginalDesc + BRAND_SEP + BRAND_DESC;
+}
+
 // Unpark every collar script that was loaded into this prim while the
-// dormancy marker was set. Stamps BRAND_DESC FIRST so the parked scripts'
-// state_entry sees the new clean description (not the marker) and doesn't
-// re-park themselves when llResetOtherScript fires. Activated flag tells
-// cleanup_and_die to keep the brand intact.
+// installing marker was set. Stamps the branded desc FIRST so the parked
+// scripts' state_entry sees the new clean description (not the marker) and
+// doesn't re-park themselves when llResetOtherScript fires. Activated flag
+// tells cleanup_and_die to keep the brand intact.
 // Sequence per script: enable (parked scripts ignore llResetOtherScript),
-// then reset → state_entry runs, sees BRAND_DESC, initializes normally.
+// then reset → state_entry runs, sees the brand, initializes normally.
 activate_collar_scripts() {
-    llSetObjectDesc(BRAND_DESC);
+    llSetObjectDesc(branded_desc());
     Activated = TRUE;
 
     list names = [];
@@ -208,15 +224,16 @@ default {
         Pin = random_pin();
         llSetRemoteScriptAccessPin(Pin);
 
-        // Inhibit the half-installed collar: stamp the prim with the
-        // dormancy marker so every script the bundler loads via
-        // llRemoteLoadScriptPin sees it in state_entry and parks itself.
-        // The wearer can't accidentally use a partial collar (touches,
-        // attachments, timers all stop at the dormancy gate). Cleared
-        // and resets fired in activate_collar_scripts when we receive
-        // install.shim.done.
+        // Inhibit the half-installed collar: capture the wearer's prim desc
+        // (for branding) then stamp INSTALLING_MARKER ("(installing)") so
+        // every script the bundler loads sees it in state_entry and parks
+        // itself. The wearer can't accidentally use a partial collar
+        // (touches, attachments, timers all stop at the dormancy gate).
+        // Unwound in activate_collar_scripts on install.shim.done.
+        // (INSTALLING_MARKER, not UPDATER_MARKER — the shim self-parks only
+        // on UPDATER_MARKER, so a stuck "(installing)" can't brick a retry.)
         OriginalDesc = llGetObjectDesc();
-        llSetObjectDesc(UPDATER_MARKER);
+        llSetObjectDesc(INSTALLING_MARKER);
 
         // Listen for the installer's ack and later for install.shim.done.
         // Open filter on sender; we filter by same-owner in the handler

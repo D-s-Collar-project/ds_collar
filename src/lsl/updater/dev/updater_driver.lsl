@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -21,6 +21,7 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
 CHANGES:
+- v1.1 rev 13: Dormancy marker renamed to "D/s Collar updater v1.1" (role-split description fix; the installer prim's branded desc + the shims' staging signal). BUILD_VERSION stays "1.1"; no behaviour change.
 - v1.1 rev 12: Existing-collar install path now uses updater_bespoke_ui instead of the inline multi-select feature picker, giving the wearer per-plugin RLV granularity (previously "RLV Subsystem" was a single bulk-install toggle). Bundler reports the flat missing list via LM_INSTALL_MISSING; driver wraps that in LM_BESPOKE_START with existing=1, bespoke_ui filters Displayed* down to subsystems where at least one script is actually missing, and on Install the driver forwards the selection to the bundler as LM_INSTALL_GO from the new install_bespoke_running phase. Removed: show_picker, match_picker_button, handle_picker_button, FEATURES_PER_PAGE, Selected, PickerPage, install_picking phase — driver shrinks by ~120 lines of bytecode. LM_INSTALL_FEATURES is now only consumed by the install_shim Minimal/Full picker path (Bespoke in install_shim mode dispatches LM_BESPOKE_START directly).
 - v1.1 rev 11: Button-label padding uses " " (single space) instead of "" (empty string) in show_picker and show_scan_picker. LSL rejects empty-string labels and the dialog wouldn't render cleanly when count < target_slots length (e.g. install picker with exactly one missing feature). Also fixed outfits-setup notecard name capitalization to "D/s Collar outfits setup".
 - v1.1 rev 10: Split Bespoke walk into sibling updater_bespoke_ui.lsl — inline version pushed lslinterpreter past the Mono 65 KB ceiling (104%). Driver now dispatches via LM_BESPOKE_START and handles LM_BESPOKE_DONE / LM_BESPOKE_CANCEL on return. Added build_shim_payload / dispatch_shim_ship helpers: payload now carries skip_animations and skip_notecards flags, derived from the script set (animations ride with plugin_animate; "D/s Collar outfits setup" notecard rides with plugin_outfits). Consolidated 8 inline close-dialog blocks into a close_dialog() helper; show_scan_picker / show_picker now reuse open_dialog instead of duplicating its setup. Selected list initialised via list-doubling instead of O(n²) +=. Post-consolidation memory estimate 94.7% (was 104%).
@@ -63,7 +64,7 @@ integer LM_BESPOKE_CANCEL      = 91012;  // updater_bespoke_ui→driver: wearer 
 // Object description marker; every collar script's dormancy guard parks
 // itself if found, so dragged-in scripts stay off in the installer's
 // inventory until shipped to the collar.
-string UPDATER_MARKER = "COLLAR_UPDATER";
+string UPDATER_MARKER = "D/s Collar updater v1.1";
 
 // Version this installer ships. Shown to the wearer at completion.
 string BUILD_VERSION = "1.1";

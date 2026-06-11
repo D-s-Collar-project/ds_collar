@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bespoke_ui.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: Bespoke install UI for the install_shim (fresh-target) path.
   Driver hands off via LM_BESPOKE_START with wearer / shim / pin; this
   script presents a one-stop toggle dialog of subsystems (HUD, Animations,
@@ -22,6 +22,7 @@ ARCHITECTURE: Lives in the same prim as updater_driver (the installer
   hard-coded here per the user spec rather than derived from the
   bundler's heuristic grouping.
 CHANGES:
+- v1.10 rev 5: Dormancy marker renamed to "D/s Collar updater v1.1" (role-split description fix; the installer prim's branded desc + the shims' staging signal). No behaviour change.
 - v1.10 rev 4: Add existing-collar mode. LM_BESPOKE_START now accepts an "existing":"1" flag plus a "missing" CSV (the bundler-MINUS-collar diff result). When set: skip the core-scripts pre-seed (collar already has core), build DisplayedSubs / DisplayedRlv filtered to subsystems / RLV plugins where at least one script is missing, and apply filter_missing to every selected script at commit so already-installed items don't re-load. Same fixed subsystem definitions serve both fresh-install and existing-collar paths — the only difference is the Displayed* filter and the core-seed gate. kmod_rlv inclusion stays paired with RLV plugin selection AND filtered through filter_missing (so the kmod doesn't reship if the collar already has it).
 - v1.10 rev 3: Button-label padding uses " " (single space) instead of "" (empty string). LSL rejects empty-string labels and the dialog wouldn't render cleanly; matches the project's blank-filler convention from the dialog convention memory. Also replaced the bespoke_rlv_plugins() function with SUBSYSTEM_KMOD + SUBSYSTEM_PLUGINS globals so the RLV kmod and its plugins are paired structurally — no dedupe needed.
 - v1.10 rev 2: Replace sequential Yes/No walk with a one-stop toggle
@@ -47,7 +48,7 @@ integer LM_BESPOKE_CANCEL = 91012;
 // Object description marker; if dragged into an installer prim by the
 // packager, every collar-namespace script's state_entry guard would
 // park itself.
-string UPDATER_MARKER = "COLLAR_UPDATER";
+string UPDATER_MARKER = "D/s Collar updater v1.1";
 
 // Dialog timeout — wearer has 2 min between interactions before we abandon.
 float DIALOG_TIMEOUT = 120.0;

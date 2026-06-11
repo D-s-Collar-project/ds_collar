@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: update_shim.lsl
 VERSION: 1.10
-REVISION: 8
+REVISION: 9
 PURPOSE: Transient payload deposited into the collar by updater_driver via
   llRemoteLoadScriptPin. Runs inside the collar, answers inventory and
   ship-decision queries from updater_bundler over the start_param channel,
@@ -27,6 +27,7 @@ ARCHITECTURE: Mirrors install_shim's dormancy-marker bracket: state_entry
   the shim does not touch LSD beyond the desc-backup key.
   "Kamikaze" pattern from OpenCollar's oc_update_shim.
 CHANGES:
+- v1.1 rev 9: Role-split the dormancy marker (description fix) so a stuck marker can't brick future updates. Renamed markers to human-readable strings: UPDATER_MARKER "COLLAR_UPDATER" → "D/s Collar updater v1.1" (updater prim / staging self-park), and the collar working marker is now WORKING_MARKER "(updating)" (was the same UPDATER_MARKER). The shim self-parks ONLY on UPDATER_MARKER (true only in the updater prim), so a stuck "(updating)" from an interrupted run no longer self-parks the next shim. Still backs up + restores the collar's real desc across the run (preserves any custom name). Collar scripts' guard now sleeps on "D/s Collar updater v1.1" / "(updating)" / "(installing)".
 - v1.1 rev 8: Add a SETTLE_DELAY (5s) between DONE and teardown. llRemoteLoadScriptPin / llGiveInventory are async, so the bundler's last script give(s) could still be landing when DONE arrived — the old immediate activate_collar_scripts + self-delete tore down against a half-populated prim. DONE now arms the settle timer (reusing the single timer); a Finishing flag ignores late traffic so it can't reset the delay; timer() does the restore + teardown once the prim is complete.
 - v1.1 rev 7: Bracket the update with the install_shim dormancy pattern. state_entry now saves the prim description to LSD (key `updater.original_desc`), stamps UPDATER_MARKER, and parks every collar-namespace script via park_collar_scripts. New activate_collar_scripts helper restores the desc from LSD, clears the LSD entry, and re-enables + llResetOtherScript-s each collar script so its state_entry runs again with the new bundle live. Replaces the previous remote.update.complete broadcast (rev 5) — kmod_bootstrap's startup orchestration now fires naturally as part of its own reset. Failure paths (inactivity timeout, CHANGED_OWNER) also activate so the wearer doesn't end up with a silent-locked collar. REMOTE_BUS constant removed.
 - v1.1 rev 6: INACTIVITY_TIMEOUT 120s → 600s. The install-against-existing-collar flow parks the bundler in scripts_await while the driver shows the feature picker; if the wearer took longer than 120s reading, the shim disarmed the PIN before they confirmed, then llRemoteLoadScriptPin failed with "trying to illegally load script onto task" on the next dispatch. 600s covers any plausible decision time + BUNDLE_TIMEOUT.
@@ -47,13 +48,15 @@ CHANGES:
 
 
 /* -------------------- CONSTANTS -------------------- */
-// Dormancy marker stamped on the collar's prim description for the
-// duration of the update. Every collar script's state_entry compares
-// llGetObjectDesc() against this string and parks itself via
-// llSetScriptState(self, FALSE) if it matches. Same marker install_shim
-// uses on fresh installs — the dormancy guard is a single check across
-// the ~33 collar-namespace scripts.
-string UPDATER_MARKER = "COLLAR_UPDATER";
+// Role-split dormancy markers (collar scripts' guard sleeps on any of the
+// three). UPDATER_MARKER is the updater PRIM's description; this shim
+// self-parks on it (staging) — true only when sitting in the updater
+// inventory, never on a worn collar, so a stuck marker can't brick the
+// next run. WORKING_MARKER is stamped on the COLLAR while the update runs
+// (the wearer sees "(updating)"); it is NOT a self-park trigger, so an
+// interrupted update that leaves it stuck still lets the next update run.
+string UPDATER_MARKER = "D/s Collar updater v1.1";
+string WORKING_MARKER = "(updating)";
 
 // LSD key holding the collar's pre-update prim description. Persisted
 // to linkset data (rather than a script global) so an unexpected reset
@@ -310,22 +313,24 @@ default {
 
         // Inhibit the collar's other scripts for the duration of the
         // update. Save the prim's pre-update description to LSD (survives
-        // unexpected resets of the shim itself), stamp UPDATER_MARKER,
-        // then park every collar-namespace script. Scripts being REPLACED
-        // by the bundler hit the dormancy guard in their new state_entry
-        // and self-park; scripts being KEPT (same UUID, untouched by the
-        // bundle) are caught by park_collar_scripts so they don't keep
-        // running against a half-swapped dependency graph. Unwound by
-        // activate_collar_scripts on the success/failure paths.
+        // unexpected resets of the shim itself), stamp WORKING_MARKER
+        // ("(updating)") on the collar, then park every collar-namespace
+        // script. Scripts being REPLACED by the bundler hit the dormancy
+        // guard in their new state_entry and self-park; scripts being KEPT
+        // (same UUID, untouched by the bundle) are caught by
+        // park_collar_scripts so they don't keep running against a
+        // half-swapped dependency graph. Unwound by activate_collar_scripts
+        // (which restores the saved desc) on the success/failure paths.
         //
-        // Re-entry guard: only save to LSD if the desc isn't already the
-        // marker — without it, a state_entry re-run (sim hiccup, manual
-        // reset) would overwrite the LSD backup with "COLLAR_UPDATER"
-        // itself, and activate would then restore desc=marker and the
-        // re-enabled scripts would immediately re-park.
-        if (llGetObjectDesc() != UPDATER_MARKER) {
+        // WORKING_MARKER (not UPDATER_MARKER) is what goes on the collar:
+        // the shim self-parks only on UPDATER_MARKER, so a stuck
+        // "(updating)" left by an interrupted run can't brick the next
+        // update. Re-entry guard: only save to LSD if the desc isn't
+        // already WORKING_MARKER, so a state_entry re-run doesn't overwrite
+        // the backup with the marker itself.
+        if (llGetObjectDesc() != WORKING_MARKER) {
             llLinksetDataWrite(UPDATER_DESC_BACKUP_KEY, llGetObjectDesc());
-            llSetObjectDesc(UPDATER_MARKER);
+            llSetObjectDesc(WORKING_MARKER);
         }
         park_collar_scripts();
 
