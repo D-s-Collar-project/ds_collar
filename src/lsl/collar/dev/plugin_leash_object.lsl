@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash_object.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Sub-plugin for object-target leash flows — Post mode. Sensor
          scan for in-world objects (posts, hitching points, leashposts),
          paginated picker, dispatches the post action to engine.
@@ -12,9 +12,10 @@ ARCHITECTURE: Hidden helper of plugin_leash. Does NOT register
               completion routes back to plugin_leash's main menu via
               ui.menu.start (context "ui.core.leash").
 CHANGES:
-- v1.1 rev 3: Wrap-around paging on `<<` / `>>` matching plugin_folders / plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. Page-count math hoisted out of the branches to dodge the LSL Mono nested-scope redeclaration trap.
-- v1.1 rev 2: Destroy picker dialog after action dispatch instead of re-opening parent leash menu — matches the project's "process finished → dialog gone" convention. Folded the dialog close into cleanupSession (mirroring plugin_leash) so completion/error paths just call cleanupSession directly; returnToParent retained only for the Back button (explicit back-navigation).
-- v1.1 rev 1: Initial split out of plugin_leash. Carries the Post sensor
+- v1.10 rev 4: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 3: Wrap-around paging on `<<` / `>>` matching plugin_folders / plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. Page-count math hoisted out of the branches to dodge the LSL Mono nested-scope redeclaration trap.
+- v1.10 rev 2: Destroy picker dialog after action dispatch instead of re-opening parent leash menu — matches the project's "process finished → dialog gone" convention. Folded the dialog close into cleanupSession (mirroring plugin_leash) so completion/error paths just call cleanupSession directly; returnToParent retained only for the Back button (explicit back-navigation).
+- v1.10 rev 1: Initial split out of plugin_leash. Carries the Post sensor
   scan + paginated picker. Hidden from kmod_ui's top menu. Delegated to
   via ui.menu.start with context="ui.core.leash.object" and subpath
   naming the action (currently only "post"; future static-target modes

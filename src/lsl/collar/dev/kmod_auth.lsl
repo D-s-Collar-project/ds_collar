@@ -1,34 +1,35 @@
 /*--------------------
 MODULE: kmod_auth.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Authoritative ACL engine - OPTIMIZED
 ARCHITECTURE: Dispatch table pattern with linkset data cache and JSON templates
 CHANGES:
-- v1.1 rev 9: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 8: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 10: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 9: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 8: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 7: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
+- v1.10 rev 7: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
   auth.aclresult→auth.acl.result, auth.aclupdate→auth.acl.update.
-- v1.1 rev 6: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
+- v1.10 rev 6: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
   kernel.reset.soft, kernel.resetall→kernel.reset.factory.
-- v1.1 rev 5: Document the LSL list== content-equality workaround at the
+- v1.10 rev 5: Document the LSL list== content-equality workaround at the
   ACL change detection block. No functional changes.
-- v1.1 rev 4: Namespace internal message type strings (acl_result → auth.aclresult,
+- v1.10 rev 4: Namespace internal message type strings (acl_result → auth.aclresult,
   acl_update → auth.aclupdate, acl_query → auth.aclquery, settings_sync → settings.sync,
   settings_delta → settings.delta, soft_reset → kernel.reset, soft_reset_all → kernel.resetall).
-- v1.1 rev 3: Migrate to two-mode access model. Single-owner mode reads
+- v1.10 rev 3: Migrate to two-mode access model. Single-owner mode reads
   scalar access.owner; multi-owner mode reads parallel CSV access.owneruuids.
   Trustees and blacklist now read from CSV keys (access.trusteeuuids,
   blacklist.blklistuuid).
-- v1.1 rev 2: Read settings from LSD instead of kv_json broadcast. Remove
+- v1.10 rev 2: Read settings from LSD instead of kv_json broadcast. Remove
   apply_settings_delta; side effects triggered by state comparison.
-- v1.1 rev 1: Removed dead policy_* fields from JSON templates. Removed
+- v1.10 rev 1: Removed dead policy_* fields from JSON templates. Removed
   plugin ACL registry (PluginAclContexts/Levels, register_acl, filter_plugins,
   broadcast_plugin_acl_list, plugin_acl_list_request) — superseded by LSD
   policy architecture where plugins self-declare visibility.
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 
@@ -104,7 +105,7 @@ list PendingQueries = [];  // [avatar_key, correlation_id, avatar_key, correlati
 integer PENDING_STRIDE = 2;
 integer MAX_PENDING_QUERIES = 50;
 
-/* Plugin ACL registry removed in v1.1 rev 1 — superseded by LSD policies */
+/* Plugin ACL registry removed in v1.10 rev 1 — superseded by LSD policies */
 
 /* -------------------- HELPER FUNCTIONS -------------------- */
 
@@ -494,7 +495,7 @@ broadcast_acl_change(string scope, key avatar) {
     llMessageLinked(LINK_SET, AUTH_BUS, msg, NULL_KEY);
 }
 
-/* Plugin ACL management removed in v1.1 rev 1 — superseded by LSD policies */
+/* Plugin ACL management removed in v1.10 rev 1 — superseded by LSD policies */
 
 /* -------------------- ROLE EXCLUSIVITY VALIDATION -------------------- */
 
@@ -693,7 +694,7 @@ handle_acl_query(string msg) {
 }
 
 /* handle_register_acl, handle_filter_plugins, handle_plugin_acl_list_request
-   removed in v1.1 rev 1 — superseded by LSD policies */
+   removed in v1.10 rev 1 — superseded by LSD policies */
 
 /* -------------------- EVENTS -------------------- */
 

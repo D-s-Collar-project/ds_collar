@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.10
-REVISION: 34
+REVISION: 35
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -13,32 +13,33 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              @getpath at picker render; this plugin does NOT maintain any
              shadow lock vector.
 CHANGES:
-- v1.1 rev 34: Revert revs 32+33 (worn.registry.locked bit-vector writer
+- v1.10 rev 35: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 34: Revert revs 32+33 (worn.registry.locked bit-vector writer
   and @getpath probe sweep). The shadow lock vector caused a Mono stack-heap
   collision in plugin_outfits and was unnecessary: plugin_strip can ask the
   viewer directly via @getstatusall:detach + @getpath at picker time. Drops
   snapshot_attached / queue_registry_update / apply_registry_update,
   begin_path_sweep / handle_path_response, the ProbeActive / Registry
   globals, and the bit-vector writes on attach / detach / lock / unlock.
-- v1.1 rev 31: persist_locked switches to `settings.delete:folders.locked` when LockedNames becomes empty (last unlock), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix: previously the empty-CSV `settings.delta` was silently dropped, folders.locked stayed populated with the last-removed entry, and the next settings.sync re-emitted @detachallthis:<folder>=n — visible as the "folder reactivates whenever any RLV restriction is toggled" bug.
-- v1.1 rev 30: Sort the parsed folder list alphabetically (case-sensitive) before render. Viewer returns @getinvworn in inventory-internal order; pick dialog was unbrowsable on large outfit trees.
-- v1.1 rev 29: Wrap-around paging on `<<` / `>>` matching plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. LastMaxPage global stashed by show_folder_pick so the dispatcher avoids recomputing action_count for the wrap branches.
-- v1.1 rev 28: Page size dynamic on action_count. ACL 2 (no Lock/Unlock in policy) at subfolder now gets 7 folder items per page (slot 5 fills with content); ACL 3+ still 6 (slot 5 = Lock|Unlock toggle). Root unchanged at 9. PAGE_SIZE_ROOT / PAGE_SIZE_SUBPATH constants removed — page_size = 9 - action_count.
-- v1.1 rev 27: Align folder-pick dialog layout with plugin_animate convention — nav order `<<, >>, Back` at slots 0-2, action buttons at slot 3+, content fills top-to-bottom via display-ordered target_slots. Folder 1 is now always top-left.
-- v1.1 rev 26: Collapse DiscoveredFolders/WornStates parallel lists into one stride-2 `Folders` list and pre-allocate via doubling in handle_rlv_response — eliminates O(N²) heap churn on large #RLV trees, halves persistent memory for the parsed listing.
-- v1.1 rev 25: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 24: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_locked sends `settings.delta:folders.locked:<csv>`.
-- v1.1 rev 23: Migrate RLV emission to kmod_rlv. Folder locks use
+- v1.10 rev 31: persist_locked switches to `settings.delete:folders.locked` when LockedNames becomes empty (last unlock), erasing the LSD key outright instead of writing an empty CSV. Pairs with kmod_settings rev 16 parser fix: previously the empty-CSV `settings.delta` was silently dropped, folders.locked stayed populated with the last-removed entry, and the next settings.sync re-emitted @detachallthis:<folder>=n — visible as the "folder reactivates whenever any RLV restriction is toggled" bug.
+- v1.10 rev 30: Sort the parsed folder list alphabetically (case-sensitive) before render. Viewer returns @getinvworn in inventory-internal order; pick dialog was unbrowsable on large outfit trees.
+- v1.10 rev 29: Wrap-around paging on `<<` / `>>` matching plugin_animate. `<<` on page 0 jumps to last page; `>>` on last page jumps to first. LastMaxPage global stashed by show_folder_pick so the dispatcher avoids recomputing action_count for the wrap branches.
+- v1.10 rev 28: Page size dynamic on action_count. ACL 2 (no Lock/Unlock in policy) at subfolder now gets 7 folder items per page (slot 5 fills with content); ACL 3+ still 6 (slot 5 = Lock|Unlock toggle). Root unchanged at 9. PAGE_SIZE_ROOT / PAGE_SIZE_SUBPATH constants removed — page_size = 9 - action_count.
+- v1.10 rev 27: Align folder-pick dialog layout with plugin_animate convention — nav order `<<, >>, Back` at slots 0-2, action buttons at slot 3+, content fills top-to-bottom via display-ordered target_slots. Folder 1 is now always top-left.
+- v1.10 rev 26: Collapse DiscoveredFolders/WornStates parallel lists into one stride-2 `Folders` list and pre-allocate via doubling in handle_rlv_response — eliminates O(N²) heap churn on large #RLV trees, halves persistent memory for the parsed listing.
+- v1.10 rev 25: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 24: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_locked sends `settings.delta:folders.locked:<csv>`.
+- v1.10 rev 23: Migrate RLV emission to kmod_rlv. Folder locks use
   rlv.apply / rlv.release with consumer="folders"; attach/detach/
   getinvworn use rlv.force passthrough. No direct llOwnerSay of @-commands.
-- v1.1 rev 22: Drop "[Folders]" source prefix from the two user-facing
+- v1.10 rev 22: Drop "[Folders]" source prefix from the two user-facing
   llRegionSayTo notices, matching the project convention applied to
   plugin_relay / plugin_sos in earlier revs.
-- v1.1 rev 21: Skip tilde-prefixed folders alongside dot-prefixed ones in
+- v1.10 rev 21: Skip tilde-prefixed folders alongside dot-prefixed ones in
   the @getinvworn parser. Tilde folders are auto-created by the viewer
   when scripted objects use Give-to-#RLV; the delivering object handles
   the attach, so they don't belong in the wearer's outfit browser.
-- v1.1 rev 20: Two fixes. (1) Worn indicator now reads @getinvworn's
+- v1.10 rev 20: Two fixes. (1) Worn indicator now reads @getinvworn's
   two-digit response correctly: <self><descendants> where each digit is
   0/1/2/3 (empty/none/partial/all). Previous code compared the raw
   two-char string to "1" / "2" and never matched, leaving every entry
@@ -47,29 +48,29 @@ CHANGES:
   (Attach/Detach/Lock|Unlock) are inline on the breadcrumb dialog of the
   drilled-in folder and operate on that path. Lock vs Unlock is
   state-driven (only the applicable one is shown).
-- v1.1 rev 19: Subfolder browsing. Track CurrentPath; re-issue @getinvworn
+- v1.10 rev 19: Subfolder browsing. Track CurrentPath; re-issue @getinvworn
   with the path on Open. Folder pick shows the breadcrumb; Back at a
   subfolder pops one level (Back at root still exits the plugin). All
   actions and the persisted lock list now use the full #RLV-relative
   path so the same operations work at any depth.
-- v1.1 rev 18: Narrow ACL 2 (owned wearer) to Attach/Detach only — no
+- v1.10 rev 18: Narrow ACL 2 (owned wearer) to Attach/Detach only — no
   Lock/Unlock so they cannot defeat owner-set folder locks. RLV still
   prevents Detach on a locked folder regardless of the menu offering it.
-- v1.1 rev 17: Extend ACL policy to include ACL 2 (owned wearer) with the
+- v1.10 rev 17: Extend ACL policy to include ACL 2 (owned wearer) with the
   same Attach/Detach/Lock/Unlock buttons as ACL 3/4/5. Owned wearers can
   now use folder management.
-- v1.1 rev 16: persist_locked stops pre-writing LSD before sending
+- v1.10 rev 16: persist_locked stops pre-writing LSD before sending
   settings.set. Aligns with project rule that kmod_settings is the
   canonical writer for shared LSD keys.
-- v1.1 rev 15: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 15: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 14: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 14: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 13: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 13: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.

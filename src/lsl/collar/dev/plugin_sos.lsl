@@ -1,15 +1,16 @@
 /*--------------------
 PLUGIN: plugin_sos.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Emergency wearer-accessible actions (OOC safety hatch)
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
-- v1.1 rev 13: "Clear RLV" is now a STRUCTURED clear, not a catch-all. Dropped the blanket llOwnerSay("@clear") and added sos.relay.clear alongside the existing sos.restrict.clear. Both downstream clears are consumer-scoped via kmod_rlv (plugin_restrict -> remove_all_restrictions -> rlv_clear_all -> rlv.clear consumer=restrict; relay safeword clear scopes to relay sources), so they drop only the bad-actor-reachable restrictions while the CONSENTED collar lock (a separate @detach consumer) stands. Rationale: @clear stripped the consented lock too, and could not reach a bad actor's own object regardless (RLV @clear is per-issuing-object). Leash unchanged (its own Unleash button + consumer).
-- v1.1 rev 12: Rename the user-facing "Runaway" label to "Escape" in the SOS menu and confirmation dialog. Button: "Escape"; bullet: "Escape an abusive setting. Resets the collar to factory settings."; confirm header "EMERGENCY ESCAPE"; confirm title "Escape"; initiation notice "Escape initiated…". Wire protocol unchanged — routing context stays "runaway", policy CSV key stays "Runaway", message type stays settings.runaway, comments / cross-reference to plugin_access's own "Runaway" path untouched. UI label only.
-- v1.1 rev 11: Drop "[SOS]" source prefix from the four user-facing
+- v1.10 rev 14: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 13: "Clear RLV" is now a STRUCTURED clear, not a catch-all. Dropped the blanket llOwnerSay("@clear") and added sos.relay.clear alongside the existing sos.restrict.clear. Both downstream clears are consumer-scoped via kmod_rlv (plugin_restrict -> remove_all_restrictions -> rlv_clear_all -> rlv.clear consumer=restrict; relay safeword clear scopes to relay sources), so they drop only the bad-actor-reachable restrictions while the CONSENTED collar lock (a separate @detach consumer) stands. Rationale: @clear stripped the consented lock too, and could not reach a bad actor's own object regardless (RLV @clear is per-issuing-object). Leash unchanged (its own Unleash button + consumer).
+- v1.10 rev 12: Rename the user-facing "Runaway" label to "Escape" in the SOS menu and confirmation dialog. Button: "Escape"; bullet: "Escape an abusive setting. Resets the collar to factory settings."; confirm header "EMERGENCY ESCAPE"; confirm title "Escape"; initiation notice "Escape initiated…". Wire protocol unchanged — routing context stays "runaway", policy CSV key stays "Runaway", message type stays settings.runaway, comments / cross-reference to plugin_access's own "Runaway" path untouched. UI label only.
+- v1.10 rev 11: Drop "[SOS]" source prefix from the four user-facing
   notices. Brings this plugin into line with the project convention.
-- v1.1 rev 10: Gate Runaway at ACL 2 by access.enablerunaway. An owned
+- v1.10 rev 10: Gate Runaway at ACL 2 by access.enablerunaway. An owned
   wearer whose owner has left in-scene Runaway enabled already has the
   Access → Runaway path; SOS Runaway in that case is a redundant
   long-touch foot-gun. Runtime filter in show_sos_menu strips Runaway
@@ -17,7 +18,7 @@ CHANGES:
   sosrunaway chat alias gets the same gate. ACL 0 (TPE) and ACL 2 with
   runaway disabled still get Runaway — those are the cases where the
   wearer has no other escape. ACL 4 unchanged (no exposure).
-- v1.1 rev 9: Widen policy to owned-wearer ACLs (0 and 2). TPE wearer
+- v1.10 rev 9: Widen policy to owned-wearer ACLs (0 and 2). TPE wearer
   (ACL 0) retains the full set (Unleash, Clear RLV, Clear Relay, Runaway)
   since SOS is their sole accessible menu. Owned non-TPE wearer (ACL 2)
   gets only Runaway — the other three actions are reachable via the
@@ -29,32 +30,32 @@ CHANGES:
   access.enablerunaway in-scene gate. Confirmation dialog required.
   Body text built dynamically from policy-allowed buttons. New chat
   alias sosrunaway.
-- v1.1 rev 8: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 8: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 7: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 7: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 6: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 6: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 5: Chat command support (Phase 3). Registers "sos" alias
+- v1.10 rev 5: Chat command support (Phase 3). Registers "sos" alias
   (opens SOS menu) plus three standalone panic aliases: "sosunleash",
   "sosrestrict", "sosrelay" — each fires its emergency action directly.
   ACL gate is automatic via the ui.sos.911 policy (ACL 0 only — the
   state you're in when locked out of normal access).
-- v1.1 rev 4: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 4: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory, sos.leashrelease→sos.leash.release,
   sos.restrictclear→sos.restrict.clear, sos.relayclear→sos.relay.clear.
-- v1.1 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 2: Namespace internal message type strings (kernel.*, ui.*, sos.*).
-- v1.1 rev 1: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 2: Namespace internal message type strings (kernel.*, ui.*, sos.*).
+- v1.10 rev 1: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads.
   Button list built from get_policy_buttons() + btn_allowed().
 --------------------*/

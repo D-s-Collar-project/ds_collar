@@ -1,31 +1,32 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: Startup coordination, RLV detection, status announcement
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
-- v1.1 rev 9: Listen on REMOTE_BUS for `remote.update.complete` (emitted by update_shim rev 5 just before self-deletion). llResetScript on receipt so startup orchestration re-runs once the new script set is live in the collar — RLV probe, register.refresh broadcast, status announcement all replay with the post-update plugin lineup. Handled in both `default` and `state running` link_message handlers so an update during either bootstrap or steady-state restarts correctly.
-- v1.1 rev 8: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 7: Remove unreachable `return;` after `state running` in timer event — state change is immediate, return never executed.
-- v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 10: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 9: Listen on REMOTE_BUS for `remote.update.complete` (emitted by update_shim rev 5 just before self-deletion). llResetScript on receipt so startup orchestration re-runs once the new script set is live in the collar — RLV probe, register.refresh broadcast, status announcement all replay with the post-update plugin lineup. Handled in both `default` and `state running` link_message handlers so an update during either bootstrap or steady-state restarts correctly.
+- v1.10 rev 8: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 7: Remove unreachable `return;` after `state running` in timer event — state change is immediate, return never executed.
+- v1.10 rev 6: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 5: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
+- v1.10 rev 5: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
   kernel.reset.soft, kernel.resetall→kernel.reset.factory,
   settings.notecardloaded→settings.notecard.loaded.
-- v1.1 rev 4: Namespace internal message type strings (settings.sync,
+- v1.10 rev 4: Namespace internal message type strings (settings.sync,
   settings.delta, settings.notecardloaded, kernel.reset, kernel.resetall).
-- v1.1 rev 3: Fix phantom owner count in startup announcement and stale
+- v1.10 rev 3: Fix phantom owner count in startup announcement and stale
   names_ready check. llCSV2List("") returns [""] (a single empty entry),
   not []. Routed CSV reads through a csv_read() helper.
-- v1.1 rev 2: Two-mode access model. Read primary owner from access.owner
+- v1.10 rev 2: Two-mode access model. Read primary owner from access.owner
   scalar (single mode) or access.owneruuids CSV (multi mode). Remove all
   display-name resolution code — kmod_settings now resolves names async
   and stores them in access.ownername / access.ownernames.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast payloads to direct
+- v1.10 rev 1: Migrate settings reads from JSON broadcast payloads to direct
   llLinksetDataRead. Remove request_settings() helper and settings_get message.
-- v1.1 rev 0: Version bump for LSD policy architecture. Bootstrap no longer
+- v1.10 rev 0: Version bump for LSD policy architecture. Bootstrap no longer
   manages UI policies — each plugin self-declares via llLinksetDataWrite.
 --------------------*/
 

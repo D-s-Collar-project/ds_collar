@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash_avatar.lsl
 VERSION: 1.10
-REVISION: 3
+REVISION: 4
 PURPOSE: Sub-plugin for avatar-target leash flows — Clip / Pass / Offer /
          Coffle. Also receives plugin.leash.offer.pending and shows the
          accept/decline dialog to the offer target.
@@ -18,9 +18,10 @@ ARCHITECTURE: Hidden helper of plugin_leash. Does NOT register
               Coffle and Pass differ in the engine: Pass swaps Controller,
               Coffle keeps Controller and changes FollowTarget only.
 CHANGES:
-- v1.1 rev 3: Real pagination on the avatar picker + wrap-around `<<` / `>>` matching plugin_folders / plugin_animate. Previously prev/next just re-scanned and re-rendered the same page; >9 nearby avatars silently overflowed reorder_item_buttons (items 10+ overwrote slot 0). Split showAvatarPicker (scan + sort) from renderAvatarPickerPage (page render), added SensorPage state, dropped the 18-cap (pagination handles it), dropped the now-redundant title parameter (dialogTitleForContext covers it).
-- v1.1 rev 2: Destroy picker dialog after action dispatch instead of re-opening parent leash menu — matches the project's "process finished → dialog gone" convention. Folded the dialog close into cleanupSession (mirroring plugin_leash) so completion/error paths just call cleanupSession directly; returnToParent retained only for the Back button (explicit back-navigation).
-- v1.1 rev 1: Initial split out of plugin_leash. Carries the Pass/Offer
+- v1.10 rev 4: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 3: Real pagination on the avatar picker + wrap-around `<<` / `>>` matching plugin_folders / plugin_animate. Previously prev/next just re-scanned and re-rendered the same page; >9 nearby avatars silently overflowed reorder_item_buttons (items 10+ overwrote slot 0). Split showAvatarPicker (scan + sort) from renderAvatarPickerPage (page render), added SensorPage state, dropped the 18-cap (pagination handles it), dropped the now-redundant title parameter (dialogTitleForContext covers it).
+- v1.10 rev 2: Destroy picker dialog after action dispatch instead of re-opening parent leash menu — matches the project's "process finished → dialog gone" convention. Folded the dialog close into cleanupSession (mirroring plugin_leash) so completion/error paths just call cleanupSession directly; returnToParent retained only for the Back button (explicit back-navigation).
+- v1.10 rev 1: Initial split out of plugin_leash. Carries the Pass/Offer
   avatar picker, the Coffle avatar picker, and the offer-reception
   accept/decline dialog. Hidden from kmod_ui's top menu (no plugin.reg).
   Delegated to via ui.menu.start with context="ui.core.leash.avatar" and

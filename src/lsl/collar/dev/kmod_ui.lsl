@@ -1,35 +1,36 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 20
 PURPOSE: Session management, LSD policy filtering, and plugin list orchestration
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
-- v1.1 rev 19: Handle ui.menu.close on UI_BUS — calls cleanup_session(user) which closes the dialog (via DIALOG_BUS ui.dialog.close) and drops the session state. Used by plugin_tpe to force-close the wearer's menu on TPE acceptance so the cached ACL can't be reused — next touch re-auths and (with tpe.mode now set) kmod_auth returns ACL_NOACCESS.
-- v1.1 rev 18: try_cached_session and handle_start's chat-cache-hit path
+- v1.10 rev 20: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 19: Handle ui.menu.close on UI_BUS — calls cleanup_session(user) which closes the dialog (via DIALOG_BUS ui.dialog.close) and drops the session state. Used by plugin_tpe to force-close the wearer's menu on TPE acceptance so the cached ACL can't be reused — next touch re-auths and (with tpe.mode now set) kmod_auth returns ACL_NOACCESS.
+- v1.10 rev 18: try_cached_session and handle_start's chat-cache-hit path
   now validate the per-avatar acl.<uuid>.cache entry against the global
   acl.timestamp epoch and treat entries older than the last settings
   change as stale (cache miss). Falls through to a fresh AUTH_BUS query
   if so. Defends against any future regression of the
   clear_acl_query_cache wipe chain on settings.sync.
-- v1.1 rev 17: Sort plugin list by label, not by context key. Previous rev
+- v1.10 rev 17: Sort plugin list by label, not by context key. Previous rev
   sorted plugin.reg.<ctx> keys lexicographically, which put plugin_access
   (context "ui.core.owner", label "Access") between Maintenance and Public
   instead of near the top where the wearer expects it. Port the stable
   branch's llListSortStrided(temp, 2, 1, TRUE) pattern: build a strided
   [context, label, ...] list, sort by label (stride_index=1), then split
   into PluginContexts / PluginLabels.
-- v1.1 rev 16: Drop the in-memory toggle state cache. Toggleable plugins
+- v1.10 rev 16: Drop the in-memory toggle state cache. Toggleable plugins
   now write plugin.<short>.state to LSD and kmod_dialogs reads it directly
   at render time via the existing buttonconfig path. PluginStateContexts /
   PluginStateValues / find_plugin_state_idx / get_plugin_state /
   set_plugin_state / handle_update_state and the ui.state.update
   link_message branch all go away. button_data objects stop carrying a
   "state" field. One less round-trip, two fewer globals, ~30 fewer lines.
-- v1.1 rev 15: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 15: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 14: LSD-backed plugin enumeration. Plugins self-declare their menu
+- v1.10 rev 14: LSD-backed plugin enumeration. Plugins self-declare their menu
   presence by writing plugin.reg.<context> = {"label":...,"script":...} to
   LSD; kmod_ui enumerates via llLinksetDataFindKeys and rebuilds views when
   the linkset_data event reports any plugin.reg.* change. A short timer-based
@@ -39,7 +40,7 @@ CHANGES:
   deferred rebuild and the kernel.plugins.request bootstrap emit are no
   longer needed. Label updates now flow through the same LSD key, so
   ui.label.update is dropped as a message type.
-- v1.1 rev 13: Defer build_views to next event frame on plugin_list arrival.
+- v1.10 rev 13: Defer build_views to next event frame on plugin_list arrival.
   handle_plugin_list's caller frame keeps the full link_message envelope and
   plugins_json substring alive; running build_views inline stacked per-level
   accumulators and policy reads on top of ~2KB of stranded JSON, blowing heap
@@ -47,7 +48,7 @@ CHANGES:
   those strings unwind first. apply_plugin_list now also clears the view
   tables eagerly so a touch landing in the clear/rebuild gap can't index a
   stale view into a cleared PluginContexts.
-- v1.1 rev 12: Memory pressure reduction on plugin-list arrival. Drops the
+- v1.10 rev 12: Memory pressure reduction on plugin-list arrival. Drops the
   llJson2List-for-counting allocation in apply_plugin_list (iterates until
   JSON_INVALID instead), frees temp_plugins after splitting, and moves the
   build_views() call out of apply_plugin_list so that frame unwinds first.
@@ -55,56 +56,56 @@ CHANGES:
   cutting 7× LSD reads and string allocations to 1× per plugin; levels fan
   out from the cached policy via CSV accumulators per level. Addresses a
   stack-heap collision observed on kernel.plugins.list reception.
-- v1.1 rev 11: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
+- v1.10 rev 11: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
   auth.aclresult→auth.acl.result, auth.aclupdate→auth.acl.update.
-- v1.1 rev 10: KERNEL_LIFECYCLE rename (Phase 1). kernel.register→
+- v1.10 rev 10: KERNEL_LIFECYCLE rename (Phase 1). kernel.register→
   kernel.register.declare, kernel.registernow→kernel.register.refresh,
   kernel.pluginlist→kernel.plugins.list, kernel.pluginlistrequest→
   kernel.plugins.request, kernel.reset→kernel.reset.soft, kernel.resetall
   →kernel.reset.factory.
-- v1.1 rev 9: Longest-prefix plugin routing for namespaced chat subcommands.
+- v1.10 rev 9: Longest-prefix plugin routing for namespaced chat subcommands.
   Context like "ui.core.animate.pose.nadu" matches plugin "ui.core.animate"
   and the remainder ("pose.nadu") is passed as a new `subpath` field in
   ui.menu.start. Plugins ignore subpath to keep menu behaviour, or read
   it to execute actions directly. ACL stays on the matched parent context.
-- v1.1 rev 8: Handle ui.chat.command (sent by kmod_chat rev 12). Routes to
+- v1.10 rev 8: Handle ui.chat.command (sent by kmod_chat rev 12). Routes to
   handle_start just like ui.menu.start, but plugins never see ui.chat.command
   so the double-dialog bug (when a plugin label starts with the chat prefix)
   is eliminated cleanly without relying on per-plugin acl guards.
-- v1.1 rev 7: Re-emit synthetic kernel.register for ROOT_CONTEXT/"Menu" in
+- v1.10 rev 7: Re-emit synthetic kernel.register for ROOT_CONTEXT/"Menu" in
   response to kernel.registernow. Previously only emitted from state_entry,
   so kmod_chat's alias table never contained "menu" after sending registernow.
   Also guard against raw unrouted ui.menu.start broadcasts in all dev plugins:
   messages without an acl field are ignored (fixes duplicate dialogs on chat
   commands).
-- v1.1 rev 6: handle_start falls back to root session for unrecognized chat
+- v1.10 rev 6: handle_start falls back to root session for unrecognized chat
   contexts (e.g. unresolved alias 'menu') instead of silently returning.
   Fixes 'an menu' doing nothing when the alias table was empty at startup.
-- v1.1 rev 5: Fix chat-driven plugin dispatch. handle_start now handles
+- v1.10 rev 5: Fix chat-driven plugin dispatch. handle_start now handles
   plugin-specific contexts (e.g. "ui.core.chat") dispatched by kmod_chat.
   Added dispatch_to_plugin() helper (extracted from handle_button_click).
   handle_start guards against already-routed messages (have acl field) to
   avoid re-entrancy. handle_acl_result routes plugin contexts to the plugin
   instead of send_render_menu.
-- v1.1 rev 4: Namespace context strings. ROOT_CONTEXT → "ui.core.root",
+- v1.10 rev 4: Namespace context strings. ROOT_CONTEXT → "ui.core.root",
   SOS_CONTEXT → "ui.sos.root", SOS_PREFIX → "ui.sos.". SOS plugins are
   now detected structurally by namespace prefix rather than flat sos_ prefix.
-- v1.1 rev 3: Views refactor. Replace per-session FilteredPluginIndices heap
+- v1.10 rev 3: Views refactor. Replace per-session FilteredPluginIndices heap
   (SessionFilteredStarts, SessionFilteredCounts, FilteredPluginIndices) with
   pre-computed view tables (ViewRootIndices, ViewSosIndices) keyed by ACL
   level. Views are built once in build_views() at plugin list load time.
   Per-touch LSD reads: 0 (was O(plugins)). cleanup_session() no longer shifts
   start pointers; create_session() no longer scans plugin policies. Net: -22
   lines, eliminated off-by-one hazard in pointer-shifting loop.
-- v1.1 rev 2: Dynamic no-access message for strangers when public access is
+- v1.10 rev 2: Dynamic no-access message for strangers when public access is
   off. If the collar has a primary owner, the toucher now sees "This collar is
   owned by [Honorific] Name and is exclusive to them." rather than the generic
   message. Falls back to the generic message when no owner is set. Added
   get_primary_owner_display() helper (reads LSD; supports single- and
   multi-owner modes; includes honorific when present).
-- v1.1 rev 1: Namespaced internal message type strings (e.g. "start" -> "ui.menu.start",
+- v1.10 rev 1: Namespaced internal message type strings (e.g. "start" -> "ui.menu.start",
   "acl_query" -> "auth.acl.query", "plugin_list" -> "kernel.plugins.list").
-- v1.1 rev 0: Replaced min_acl filtering with LSD policy reads. Root menu
+- v1.10 rev 0: Replaced min_acl filtering with LSD policy reads. Root menu
   visibility now determined by llLinksetDataRead("policy:<context>"). Removed
   PluginMinACLs parallel list and plugin_acl_list_request/response flow.
   Each plugin self-declares its policy via llLinksetDataWrite on registration.

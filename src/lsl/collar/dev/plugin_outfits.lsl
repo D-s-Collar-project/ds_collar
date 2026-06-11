@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 20
 PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -50,6 +50,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              click and hides those items for the rest of the session.
              No shared shadow lock vector between plugins.
 CHANGES:
+- v1.10 rev 20: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
 - v1.10 rev 19: Defensive cleanup of stale @detachallthis claims at scan
   time. Legacy paths "outfits/base" (rev 22 paradigm) and "outfits/~base"
   (rev 13 paradigm) are always released — plugin_outfits no longer manages

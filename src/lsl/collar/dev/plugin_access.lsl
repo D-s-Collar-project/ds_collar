@@ -1,56 +1,57 @@
 /*--------------------
 PLUGIN: plugin_access.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
-- v1.1 rev 15: Bytecode compaction pass against the 92.9%-of-Mono-budget headroom warning. Two helpers: `open_numbered_dialog(target, ctx, title, prompt, items)` collapses three numbered-list dialog-open sites (show_candidates, show_honorific, show_remove_trustee); `show_confirm(target, ctx, title, body)` extended to take a target and collapse six inline Yes/No dialog-open boilerplates in handle_button (set_select, set_hon, transfer_select, release_owner, trustee_select, runaway_disable_confirm) plus the two pre-existing release/runaway call sites. No behaviour change — same SessionId / MenuContext / message shape. If the analyzer still flags the script as too close to the Mono wall after this, fall back to the split path (extract plugin_access_owner / plugin_access_trustee).
-- v1.1 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 13: Migrate runaway-enable to settings.delta CSV write protocol (kmod_settings rev 14 sole writer for access.enablerunaway). Drops direct llLinksetDataWrite and JSON settings.set emission in both enable and disable code paths.
-- v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 16: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 15: Bytecode compaction pass against the 92.9%-of-Mono-budget headroom warning. Two helpers: `open_numbered_dialog(target, ctx, title, prompt, items)` collapses three numbered-list dialog-open sites (show_candidates, show_honorific, show_remove_trustee); `show_confirm(target, ctx, title, body)` extended to take a target and collapse six inline Yes/No dialog-open boilerplates in handle_button (set_select, set_hon, transfer_select, release_owner, trustee_select, runaway_disable_confirm) plus the two pre-existing release/runaway call sites. No behaviour change — same SessionId / MenuContext / message shape. If the analyzer still flags the script as too close to the Mono wall after this, fall back to the split path (extract plugin_access_owner / plugin_access_trustee).
+- v1.10 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 13: Migrate runaway-enable to settings.delta CSV write protocol (kmod_settings rev 14 sole writer for access.enablerunaway). Drops direct llLinksetDataWrite and JSON settings.set emission in both enable and disable code paths.
+- v1.10 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 11: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 11: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 9: Chat command support (Phase 3). Registers "access" alias.
+- v1.10 rev 9: Chat command support (Phase 3). Registers "access" alias.
   "access add/rem owner/trustee" enter the corresponding menu flow
   (sensor pick + consent/honorific dialogs). No username in chat —
   target selection stays in the menu by design.
-- v1.1 rev 8: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 8: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory, settings.setowner→settings.owner.set,
   settings.clearowner→settings.owner.clear, settings.addtrustee→
   settings.trustee.add, settings.removetrustee→settings.trustee.remove.
-- v1.1 rev 7: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 7: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 6: Namespace internal message type strings (kernel.*, settings.*,
+- v1.10 rev 6: Namespace internal message type strings (kernel.*, settings.*,
   ui.*) for bus-wide clarity. No behavioral changes.
-- v1.1 rev 5: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
+- v1.10 rev 5: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
   factory reset wipes cached owner/trustee state, not just LSD.
-- v1.1 rev 4: Fix phantom-trustee count. llCSV2List("") returns [""] (a
+- v1.10 rev 4: Fix phantom-trustee count. llCSV2List("") returns [""] (a
   single empty entry), not []. When the trustee/owner CSV keys were unset
   in LSD, the access plugin reported one trustee/owner that didn't exist.
   Added a csv_read() helper that returns [] for empty raw values and
   routed all CSV reads through it.
-- v1.1 rev 3: Two-mode access model. Single-owner mode reads/writes scalar
+- v1.10 rev 3: Two-mode access model. Single-owner mode reads/writes scalar
   access.owner / access.ownername / access.ownerhonorific. Multi-owner mode
   is read-only from notecard CSVs (access.owneruuids/names/honorifics) and
   the menu hides all owner-editing buttons. New API messages: set_owner,
   clear_owner, add_trustee, remove_trustee, runaway. Runaway now triggers
   factory reset via kmod_settings instead of clearing settings individually.
-- v1.1 rev 2: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
+- v1.10 rev 2: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
   Remove apply_settings_delta(); both sync and delta call apply_settings_sync().
   Remove request_settings_sync(); call apply_settings_sync() from state_entry.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads.
   Button list built from get_policy_buttons() + btn_allowed() combined with
   state-dependent logic (has_owner, RunawayEnabled, is_owner, etc.).

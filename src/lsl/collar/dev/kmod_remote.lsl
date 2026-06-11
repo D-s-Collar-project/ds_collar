@@ -1,11 +1,12 @@
 /*--------------------
 MODULE: kmod_remote.lsl
 VERSION: 1.10
-REVISION: 9
+REVISION: 10
 PURPOSE: External HUD communication bridge for remote control workflows
 ARCHITECTURE: Consolidated message bus lanes, namespaced internal message protocol
 CHANGES:
-- v1.1 rev 9: Add collar-driven update broker. plugin_maint asks via
+- v1.10 rev 10: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 9: Add collar-driven update broker. plugin_maint asks via
   REMOTE_BUS (remote.updaterscan.start); we broadcast remote.updateravailable
   on REPLY_CHAN and listen on QUERY_CHAN for remote.updaterhere — first
   responder wins, result returned to plugin_maint as remote.updaterscan.result.
@@ -14,23 +15,23 @@ CHANGES:
   the legacy update_discover handler) directly to the chosen updater so its
   existing shim-load / bundle-dispatch flow runs against this collar.
   Scan timeout is 5s, multiplexed onto the existing prune timer.
-- v1.1 rev 8: Honor optional target_collar filter in auth.aclqueryexternal
+- v1.10 rev 8: Honor optional target_collar filter in auth.aclqueryexternal
   so only the intended collar replies when a HUD scopes its query.
-- v1.1 rev 7: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 7: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 6: Consistency pass — PIN-ready notice converted from
+- v1.10 rev 6: Consistency pass — PIN-ready notice converted from
   llOwnerSay to llRegionSayTo(llGetOwner(), 0, ...).
-- v1.1 rev 5: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
+- v1.10 rev 5: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
   auth.aclresult→auth.acl.result.
-- v1.1 rev 4: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
+- v1.10 rev 4: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
   kernel.reset.soft, kernel.resetall→kernel.reset.factory.
-- v1.1 rev 3: Namespace context values. ROOT_CONTEXT → "ui.core.root",
+- v1.10 rev 3: Namespace context values. ROOT_CONTEXT → "ui.core.root",
   SOS_CONTEXT → "ui.sos.root".
-- v1.1 rev 2: Fix ACL response listener — expect "auth.acl.result" instead of stale
-  "acl_result" (missed in kmod_auth v1.1 rev 4 namespace migration).
-- v1.1 rev 1: Namespaced internal message types (auth.aclquery, ui.menu.start, etc.).
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 2: Fix ACL response listener — expect "auth.acl.result" instead of stale
+  "acl_result" (missed in kmod_auth v1.10 rev 4 namespace migration).
+- v1.10 rev 1: Namespaced internal message types (auth.aclquery, ui.menu.start, etc.).
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 

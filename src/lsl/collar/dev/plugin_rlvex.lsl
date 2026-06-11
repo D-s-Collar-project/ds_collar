@@ -1,25 +1,26 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.10
-REVISION: 14
+REVISION: 15
 PURPOSE: Manage RLV teleport and IM exceptions for owners and trustees
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
-- v1.1 rev 14: state_entry now invokes reconcile_all() immediately instead of relying on apply_settings_sync's 1-second deferred timer. RLV exceptions are viewer-side session state tagged to the script's UUID, so a recompile wipes them; the 1s timer left a window where the wearer's owners / trustees had no exceptions, and any cleanup() (menu open + back, dialog timeout) inside that window cancelled the timer permanently — so trustee exceptions stayed wiped until the next settings.sync. The toggle persistence (rlvex.*tp/im LSD keys) was working; what was missing was a guarantee that the deferred re-emit actually fires. Immediate restore closes the gap.
-- v1.1 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_setting sends `settings.delta:<key>:<v>`.
-- v1.1 rev 11: persist_setting stops pre-writing LSD before sending
+- v1.10 rev 15: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 14: state_entry now invokes reconcile_all() immediately instead of relying on apply_settings_sync's 1-second deferred timer. RLV exceptions are viewer-side session state tagged to the script's UUID, so a recompile wipes them; the 1s timer left a window where the wearer's owners / trustees had no exceptions, and any cleanup() (menu open + back, dialog timeout) inside that window cancelled the timer permanently — so trustee exceptions stayed wiped until the next settings.sync. The toggle persistence (rlvex.*tp/im LSD keys) was working; what was missing was a guarantee that the deferred re-emit actually fires. Immediate restore closes the gap.
+- v1.10 rev 13: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 12: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_setting sends `settings.delta:<key>:<v>`.
+- v1.10 rev 11: persist_setting stops pre-writing LSD before sending
   settings.set. Aligns with project rule that kmod_settings is the
   canonical writer for shared LSD keys.
-- v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 9: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 9: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 8: Reset handler now follows the standard pattern — delete the
+- v1.10 rev 8: Reset handler now follows the standard pattern — delete the
   plugin's LSD keys and llResetScript on kernel.reset.soft/factory, honouring
   any target_context guard. Previous rev deferred a reconcile via a 1s timer
   without resetting the script, which left viewer-side RLV exceptions (tagged
@@ -27,25 +28,25 @@ CHANGES:
   privileges until the next real script reset. llResetScript drops those
   viewer entries cleanly, and state_entry's apply_settings_sync reconciles
   from the current (possibly wiped) LSD on the way back up.
-- v1.1 rev 7: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 7: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 6: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 6: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory.
-- v1.1 rev 5: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 5: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 4: Namespace internal message type strings to dotted convention.
-- v1.1 rev 3: Two-mode access model. Read primary owner from access.owner
+- v1.10 rev 4: Namespace internal message type strings to dotted convention.
+- v1.10 rev 3: Two-mode access model. Read primary owner from access.owner
   scalar (single mode) or access.owneruuids CSV (multi mode). Trustees
   read from access.trusteeuuids CSV.
-- v1.1 rev 2: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
+- v1.10 rev 2: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
   Remove apply_settings_delta(); both sync and delta call apply_settings_sync().
   Remove request_settings_sync(); call apply_settings_sync() from state_entry.
   Previous-state comparison triggers reconcile_all() on any relevant change.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads via get_policy_buttons()
   and btn_allowed(). Removed PLUGIN_MIN_ACL and min_acl from kernel
   registration message.

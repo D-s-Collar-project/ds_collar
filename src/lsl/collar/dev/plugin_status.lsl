@@ -1,54 +1,55 @@
 /*--------------------
 PLUGIN: plugin_status.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Read-only collar status display for owners and observers
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy — view-only, the sole button is Back.
 CHANGES:
-- v1.1 rev 13: Remove unused button-policy scaffolding (gPolicyButtons,
+- v1.10 rev 14: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 13: Remove unused button-policy scaffolding (gPolicyButtons,
   get_policy_buttons). Never consulted — view-only plugin with no gateable
   buttons. The acl.policycontext registration stays; kmod_ui enforces access.
   Less code, less heap.
-- v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 11: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 11: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 9: Chat command support (Phase 3). Registers "status" alias.
+- v1.10 rev 9: Chat command support (Phase 3). Registers "status" alias.
   "<prefix> status" opens the status dialog (same as menu click); plugin
   has no action-level subcommands, so any non-empty subpath is rejected.
-- v1.1 rev 8: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 8: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory.
-- v1.1 rev 7: Add chat prefix and channel to status report (reads
+- v1.10 rev 7: Add chat prefix and channel to status report (reads
   chat.prefix, chat.public, and chat.channel from LSD).
-- v1.1 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 5: Namespace internal message type strings (kernel.*, ui.*, settings.*).
-- v1.1 rev 4: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
+- v1.10 rev 5: Namespace internal message type strings (kernel.*, ui.*, settings.*).
+- v1.10 rev 4: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
   factory reset clears cached session state.
-- v1.1 rev 3: Fix phantom owner/trustee count. llCSV2List("") returns
+- v1.10 rev 3: Fix phantom owner/trustee count. llCSV2List("") returns
   [""] (a single empty entry), not []. Routed all CSV reads through a
   csv_read() helper that returns [] for empty raw values.
-- v1.1 rev 2: Two-mode access model. Read primary owner from access.owner
+- v1.10 rev 2: Two-mode access model. Read primary owner from access.owner
   scalar (single mode) or access.owneruuids CSV (multi mode). Display
   names come pre-resolved from kmod_settings via access.ownername /
   access.ownernames / access.trusteenames — no async resolution here.
   Removed all llRequestDisplayName / dataserver name handling.
-- v1.1 rev 1: Read all settings directly from LSD (authoritative runtime
+- v1.10 rev 1: Read all settings directly from LSD (authoritative runtime
   state) instead of kv_json broadcast. Removes settings_get roundtrip;
   apply_settings_sync is now parameterless. Fixes status dialog showing
   "Uncommitted" when bootstrap correctly displayed the registered owner.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads via
   get_policy_buttons() and btn_allowed(). Removed PLUGIN_MIN_ACL and
   min_acl from kernel registration message. View-only plugin with empty

@@ -1,43 +1,44 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.10
-REVISION: 13
+REVISION: 14
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
-- v1.1 rev 13: Fix add/remove picks doing nothing — numbered_list responses carry an empty (not JSON_INVALID) context, so fall back to the button number when context is "" as well as invalid.
-- v1.1 rev 12: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 11: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 14: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 13: Fix add/remove picks doing nothing — numbered_list responses carry an empty (not JSON_INVALID) context, so fall back to the button number when context is "" as well as invalid.
+- v1.10 rev 12: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 11: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 10: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 10: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 9: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 9: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 8: Chat command support (Phase 3). Registers "blacklist" alias.
+- v1.10 rev 8: Chat command support (Phase 3). Registers "blacklist" alias.
   "blacklist add" and "blacklist rem" enter the corresponding menu flow
   (sensor pick for add, numbered remove list). No username in chat.
-- v1.1 rev 7: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 7: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory, settings.blacklistadd→
   settings.blacklist.add, settings.blacklistremove→settings.blacklist.remove.
-- v1.1 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 5: Namespace internal message type strings (kernel.*, settings.*,
+- v1.10 rev 5: Namespace internal message type strings (kernel.*, settings.*,
   ui.*) for consistency with CONSOLIDATED ISP naming conventions.
-- v1.1 rev 4: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
+- v1.10 rev 4: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
   factory reset clears cached blacklist state.
-- v1.1 rev 3: Migrate to flat CSV blacklist storage. Use new blacklist_add /
+- v1.10 rev 3: Migrate to flat CSV blacklist storage. Use new blacklist_add /
   blacklist_remove API messages instead of generic list set/persist.
-- v1.1 rev 2: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast payloads to direct
+- v1.10 rev 2: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 1: Migrate settings reads from JSON broadcast payloads to direct
   llLinksetDataRead. Remove apply_settings_delta — full re-read on every sync.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL, ALLOWED_ACL_LEVELS, and in_allowed_levels()
   with policy reads. Button list built from get_policy_buttons() + btn_allowed().
 --------------------*/

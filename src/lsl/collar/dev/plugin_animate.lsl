@@ -1,48 +1,49 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.10
-REVISION: 12
+REVISION: 13
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy filtering (animation buttons are dynamic content).
 CHANGES:
-- v1.1 rev 12: Remove unused button-policy scaffolding (gPolicyButtons,
+- v1.10 rev 13: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 12: Remove unused button-policy scaffolding (gPolicyButtons,
   get_policy_buttons, UserAcl). Never consulted — btn_allowed was never
   implemented and the buttons are dynamic animation names. The acl.policycontext
   registration stays; kmod_ui enforces access. Less code, less heap.
-- v1.1 rev 11: Drop AnimationList cache — read inventory live via llGetInventoryName / llGetInventoryNumber. Plugin resets when animation count changes (CHANGED_INVENTORY). Removes refresh_animation_list and ~1.5 KB of heap pressure.
-- v1.1 rev 10: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 11: Drop AnimationList cache — read inventory live via llGetInventoryName / llGetInventoryNumber. Plugin resets when animation count changes (CHANGED_INVENTORY). Removes refresh_animation_list and ~1.5 KB of heap pressure.
+- v1.10 rev 10: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 9: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 9: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 7: Consistency pass — inventory-overflow warning converted
+- v1.10 rev 7: Consistency pass — inventory-overflow warning converted
   from llOwnerSay to llRegionSayTo(llGetOwner(), 0, ...).
-- v1.1 rev 6: Add "stand" alias to stop animations. "<prefix> stand" stops
+- v1.10 rev 6: Add "stand" alias to stop animations. "<prefix> stand" stops
   the current animation, equivalent to "<prefix> pose stop". Plugin
   registers the alias via chat.alias.declare; handle_subpath recognises
   both "stand" and "pose.stop" as stop signals.
-- v1.1 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory, chat.alias.register→chat.alias.declare.
-- v1.1 rev 4: Chat subcommand support. Registers "pose" alias via
+- v1.10 rev 4: Chat subcommand support. Registers "pose" alias via
   chat.alias.register so "<prefix> pose nadu" routes here with
   subpath "pose.nadu" and plays the named animation directly (no menu).
   Empty subpath keeps existing menu behaviour.
-- v1.1 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 3: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 2: Namespace internal message type strings (kernel.*, ui.*, settings.*).
-- v1.1 rev 1: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
+- v1.10 rev 2: Namespace internal message type strings (kernel.*, ui.*, settings.*).
+- v1.10 rev 1: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
   factory reset clears cached state.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads.
   Button list built from get_policy_buttons() + btn_allowed().
 --------------------*/

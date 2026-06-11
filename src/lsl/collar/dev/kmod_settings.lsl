@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.10
-REVISION: 22
+REVISION: 23
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               (access.owner, access.ownername, access.ownerhonorific) and
@@ -19,80 +19,81 @@ ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
               and clears ones it has dropped, while runtime-set keys the card
               never listed survive (last-writer-wins between reloads).
 CHANGES:
-- v1.1 rev 22: Notecard parse is a manifest diff, not clear-all-then-reapply.
+- v1.10 rev 23: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 22: Notecard parse is a manifest diff, not clear-all-then-reapply.
   settings.cardmanifest (CSV of @owner/@trustees/@blacklist units + per-key
   tokens) records what the card provided. On reparse, apply_card_manifest_clear
   removes only keys the card managed last time; card-present keys are re-asserted
   by the parse; runtime-set keys the card never listed are preserved. Fixes a
   sparse card wiping menu-set owner/settings. clear_managed_settings removed
   (superseded). Restart still skips parse via the sentinel.
-- v1.1 rev 21: Register leash.enhanced in MANAGED_SETTINGS_KEYS — plugin_leash's enhanced-mode toggle now persists via the settings.delta CSV path (delta-native, not the engine's legacy settings.set), wipes with the managed family on factory reset/notecard reload, and is settable from the settings notecard as "leash.enhanced = 0|1" (lands via the existing generic dotted-key write-through in parse_notecard_line). One-line whitelist addition; no parser change needed.
-- v1.1 rev 20: Revert rev 19. worn.registry.locked + worn.registry.paths removed from MANAGED_SETTINGS_KEYS. The shared bit-vector approach caused a Mono stack-heap collision in plugin_outfits and was unnecessary — plugin_strip now reads lock state live via @getstatusall:detach + @getpath at picker render time (see plugin_strip rev 18, plugin_outfits rev 17, plugin_folders rev 34).
-- v1.1 rev 19: Register worn.registry.locked + worn.registry.paths in MANAGED_SETTINGS_KEYS. Shared attach-point lock bit vector: position i = ATTACH_* integer i, value "1" = the item currently at that attach point was attached from a folder under a locked subtree. plugin_outfits / plugin_folders write bits at attach/detach/lock/unlock time; plugin_strip reads the vector to filter the picker. Paths key is an audit-only CSV of source paths the writers have referenced. Both keys wipe on factory reset alongside the rest of the managed family.
-- v1.1 rev 18: Register plugin.outfit.active in MANAGED_SETTINGS_KEYS
+- v1.10 rev 21: Register leash.enhanced in MANAGED_SETTINGS_KEYS — plugin_leash's enhanced-mode toggle now persists via the settings.delta CSV path (delta-native, not the engine's legacy settings.set), wipes with the managed family on factory reset/notecard reload, and is settable from the settings notecard as "leash.enhanced = 0|1" (lands via the existing generic dotted-key write-through in parse_notecard_line). One-line whitelist addition; no parser change needed.
+- v1.10 rev 20: Revert rev 19. worn.registry.locked + worn.registry.paths removed from MANAGED_SETTINGS_KEYS. The shared bit-vector approach caused a Mono stack-heap collision in plugin_outfits and was unnecessary — plugin_strip now reads lock state live via @getstatusall:detach + @getpath at picker render time (see plugin_strip rev 18, plugin_outfits rev 17, plugin_folders rev 34).
+- v1.10 rev 19: Register worn.registry.locked + worn.registry.paths in MANAGED_SETTINGS_KEYS. Shared attach-point lock bit vector: position i = ATTACH_* integer i, value "1" = the item currently at that attach point was attached from a folder under a locked subtree. plugin_outfits / plugin_folders write bits at attach/detach/lock/unlock time; plugin_strip reads the vector to filter the picker. Paths key is an audit-only CSV of source paths the writers have referenced. Both keys wipe on factory reset alongside the rest of the managed family.
+- v1.10 rev 18: Register plugin.outfit.active in MANAGED_SETTINGS_KEYS
   for plugin_outfits's runtime on/off toggle (0 = disabled +
   ~outfits/~base unlocked, 1 = enabled; folder names retconned in
   plugin_outfits rev 13 — were .outfits/.base at the time of this
   rev). Settings key follows the user-specified name verbatim
   (deviates from the existing <short>.<key> convention).
-- v1.1 rev 17: Register outfits.locked in MANAGED_SETTINGS_KEYS for
+- v1.10 rev 17: Register outfits.locked in MANAGED_SETTINGS_KEYS for
   plugin_outfits rev 5 (persistent per-outfit @detachallthis locks,
   same pattern as folders.locked / lock.locked).
-- v1.1 rev 16: Fix settings.delta CSV parser silently dropping empty-value writes. llParseString2List discards trailing empty tokens, so `settings.delta:foo:` parsed to length 2 and bailed the `!= 3` guard, leaving LSD with the stale previous value. Switched to llParseStringKeepNulls. Root cause of the folder-lock reactivation: plugin_folders' unlock-last sent an empty-CSV delta, kmod_settings dropped it, folders.locked stayed populated, next settings.sync re-applied. Plugins should also prefer settings.delete for empty/no-value cases — see plugin_folders rev 31 / plugin_restrict rev 15.
-- v1.1 rev 15: Register leash.texture in MANAGED_SETTINGS_KEYS — new wearer-pick visual style for the leash particle stream (chain / silk). Still on the settings.set JSON path along with the rest of the leash.* family.
-- v1.1 rev 14: Expand MANAGED_SETTINGS_KEYS to the full plugin settings family (19 keys). Plugin migrations to the settings.delta CSV protocol: plugin_public, plugin_tpe, plugin_folders, plugin_relay, plugin_chat, plugin_bell, plugin_rlvex, plugin_restrict, plugin_access (runaway).
-- v1.1 rev 13: Notecard reload reverts managed settings keys to "absent" before re-parsing. Any key listed in MANAGED_SETTINGS_KEYS that's not in the new notecard ends up deleted, so consumer plugins fall back to in-script defaults via their existing lsd_int(key, fallback) reads. Replaces ad-hoc reload preservation with a uniform "notecard is canonical" model for managed keys.
-- v1.1 rev 12: Add CSV-envelope settings.delta / settings.delete write protocol. Plugins request writes via `settings.delta:<key>:<value>` (or `settings.delete:<key>`); kmod_settings validates against MANAGED_SETTINGS_KEYS whitelist, writes LSD, broadcasts settings.sync. Initial whitelist: lock.locked (plugin_lock PoC). Single-writer pattern eliminates LSD-ownership conflicts and routes settings changes through one authority.
-- v1.1 rev 11: Listen for kernel.reset.factory / kernel.reset.soft on
+- v1.10 rev 16: Fix settings.delta CSV parser silently dropping empty-value writes. llParseString2List discards trailing empty tokens, so `settings.delta:foo:` parsed to length 2 and bailed the `!= 3` guard, leaving LSD with the stale previous value. Switched to llParseStringKeepNulls. Root cause of the folder-lock reactivation: plugin_folders' unlock-last sent an empty-CSV delta, kmod_settings dropped it, folders.locked stayed populated, next settings.sync re-applied. Plugins should also prefer settings.delete for empty/no-value cases — see plugin_folders rev 31 / plugin_restrict rev 15.
+- v1.10 rev 15: Register leash.texture in MANAGED_SETTINGS_KEYS — new wearer-pick visual style for the leash particle stream (chain / silk). Still on the settings.set JSON path along with the rest of the leash.* family.
+- v1.10 rev 14: Expand MANAGED_SETTINGS_KEYS to the full plugin settings family (19 keys). Plugin migrations to the settings.delta CSV protocol: plugin_public, plugin_tpe, plugin_folders, plugin_relay, plugin_chat, plugin_bell, plugin_rlvex, plugin_restrict, plugin_access (runaway).
+- v1.10 rev 13: Notecard reload reverts managed settings keys to "absent" before re-parsing. Any key listed in MANAGED_SETTINGS_KEYS that's not in the new notecard ends up deleted, so consumer plugins fall back to in-script defaults via their existing lsd_int(key, fallback) reads. Replaces ad-hoc reload preservation with a uniform "notecard is canonical" model for managed keys.
+- v1.10 rev 12: Add CSV-envelope settings.delta / settings.delete write protocol. Plugins request writes via `settings.delta:<key>:<value>` (or `settings.delete:<key>`); kmod_settings validates against MANAGED_SETTINGS_KEYS whitelist, writes LSD, broadcasts settings.sync. Initial whitelist: lock.locked (plugin_lock PoC). Single-writer pattern eliminates LSD-ownership conflicts and routes settings changes through one authority.
+- v1.10 rev 11: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt. Notecard NOT touched
   in this path — that's exclusive to handle_runaway/factory_reset.
   Lets the kernel's owner-change wipe (collar_kernel rev 6) flush
   kmod_settings's stale in-memory state cleanly so the next state_entry
   re-parses the notecard against fresh LSD.
-- v1.1 rev 10: Notecard parsing gated by settings.bootstrapped sentinel —
+- v1.10 rev 10: Notecard parsing gated by settings.bootstrapped sentinel —
   state_entry no longer re-parses card after first bootstrap. New
   settings.reset.config message snapshots owner+lock keys, llLinksetDataReset,
   re-parses card, restores preserved keys for card-silent slots, sets sentinel,
   broadcasts. factory_reset (Runaway) now llRemoveInventory(notecard) before
   wipe — disarms hostile notecards. Reload Settings and CHANGED_INVENTORY
   notecard-changed paths clear sentinel before re-parsing.
-- v1.1 rev 9: settings.get now re-reads the notecard when one is present,
+- v1.10 rev 9: settings.get now re-reads the notecard when one is present,
   matching the UI contract that "Reload Settings" re-reads the notecard.
   Previous behavior rebroadcast LSD only, so a wearer who had (e.g.)
   unlocked the collar via menu would see "Reload Settings" do nothing for
   lock state — the notecard's lock.locked=1 was never re-applied. Guarded
   against concurrent reloads via IsLoadingNotecard.
-- v1.1 rev 8: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 8: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 7: Consistency pass — 6 ERROR/HINT notices (wearer-as-owner
+- v1.10 rev 7: Consistency pass — 6 ERROR/HINT notices (wearer-as-owner
   guard, TPE guards, multi-owner menu guards) converted from llOwnerSay
   to llRegionSayTo(llGetOwner(), 0, ...).
-- v1.1 rev 6: SETTINGS_BUS rename (Phase 1). Mutation handlers now
+- v1.10 rev 6: SETTINGS_BUS rename (Phase 1). Mutation handlers now
   dispatch on namespaced family names: settings.setowner→settings.owner.set,
   settings.clearowner→settings.owner.clear, settings.addtrustee→
   settings.trustee.add, settings.removetrustee→settings.trustee.remove,
   settings.blacklistadd→settings.blacklist.add, settings.blacklistremove→
   settings.blacklist.remove. Generics (settings.sync/delta/get/set/runaway)
   unchanged.
-- v1.1 rev 5: KERNEL_LIFECYCLE rename (Phase 1). kernel.resetall→
+- v1.10 rev 5: KERNEL_LIFECYCLE rename (Phase 1). kernel.resetall→
   kernel.reset.factory, settings.notecardloaded→settings.notecard.loaded.
-- v1.1 rev 4: Namespace internal message type strings (e.g. "set" →
+- v1.10 rev 4: Namespace internal message type strings (e.g. "set" →
   "settings.set", "settings_sync" → "settings.sync") for ISP clarity.
-- v1.1 rev 3: Replace JSON object owner/trustee storage with explicit
+- v1.10 rev 3: Replace JSON object owner/trustee storage with explicit
   two-mode flat scheme (scalars for single-owner, parallel CSVs for
   multi-owner). Async display name resolution. access.isowned = 0
   triggers factory reset. New API messages: set_owner, clear_owner,
   add_trustee, remove_trustee, blacklist_add, blacklist_remove, runaway.
-- v1.1 rev 2: Remove KvJson. All kv_* operations now read/write LSD
+- v1.10 rev 2: Remove KvJson. All kv_* operations now read/write LSD
   directly. Remove recover_lsd_settings (LSD is authoritative). Remove
   ForceReseed (notecard parsing always writes to LSD). Simplify
   handle_settings_restore to write each key to LSD.
-- v1.1 rev 1: Simplify broadcasts to lightweight signals. Consumers now
+- v1.10 rev 1: Simplify broadcasts to lightweight signals. Consumers now
   read directly from LSD; four broadcast functions replaced by a single
   broadcast_settings_changed() signal. Notecard parsing now always writes
   validated values to LSD. Notecard removal clears LSD settings keys.
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 

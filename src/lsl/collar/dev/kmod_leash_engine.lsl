@@ -1,7 +1,7 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl
 VERSION: 1.10
-REVISION: 35
+REVISION: 36
 PURPOSE: Leashing engine — state, ACL, claim/release/pass/yank, follow
          mechanics, settings persistence, broadcasts. Holder-discovery
          handshake protocol lives in sibling kmod_leash_proto.lsl.
@@ -11,13 +11,14 @@ ARCHITECTURE: Engine + sibling proto. Engine owns leash state and the
               machine. IPC reuses SETTINGS_BUS so no new bus number is
               consumed (proto filters on type prefix "leash.proto.*").
 CHANGES:
-- v1.1 rev 35: Remove the enhanced-mode subsystem — it now lives in plugin_leash (rev 25), applied locally like plugin_lock with no engine round-trip. Deleted: EnhancedMode / EnhancedActive / LeasherAcl / AuthorizedLmControllerAcl globals, KEY_LEASH_ENHANCED, applyEnhancedRestrictions / clearEnhancedRestrictions / toggleEnhancedInternal, the toggle_enhanced ACL branch, the "enhanced" broadcast field, and the applySettingsSync read. setLeashState drops its 5th param (leasher_acl) and passLeashInternal its 2nd (new_leasher_acl) — both existed only to feed enhanced; callers (claimLeash, handleLmGrabbed, pass_target_check) updated. claimLeash keeps its own acl_level (still gates take-over). The "invisible" texture whitelist added in rev 34 stays.
-- v1.1 rev 34: Add enhanced mode (persisted wearer toggle) + "invisible" texture style. Enhanced issues @sittp,tploc,tplm,tplure=n on every connect path when EnhancedMode is on AND leasher ACL >= 3; cleared inside clearLeashState (unleash / offsim auto-release / wearer-detach / region-change / Runaway / factory reset). Restrictions follow the leash, not the leasher's presence — post-only mode (avatar offline, holder present) keeps them active. Toggle gated to ACL >= 3 in handleAclResult (hard floor, not policy-driven). LeasherAcl is captured at setLeashState (new 5th param); passes thread the target's ACL from pass_target_check; LM grab reuses cached AuthorizedLmControllerAcl to avoid a second auth round-trip. broadcastState now exposes enhanced for the UI. Texture whitelist (applySettingsSync + setTextureInternal) accepts "invisible".
-- v1.1 rev 33: Strip the temporary DEBUG_LEASH scaffolding (constant +
+- v1.10 rev 36: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 35: Remove the enhanced-mode subsystem — it now lives in plugin_leash (rev 25), applied locally like plugin_lock with no engine round-trip. Deleted: EnhancedMode / EnhancedActive / LeasherAcl / AuthorizedLmControllerAcl globals, KEY_LEASH_ENHANCED, applyEnhancedRestrictions / clearEnhancedRestrictions / toggleEnhancedInternal, the toggle_enhanced ACL branch, the "enhanced" broadcast field, and the applySettingsSync read. setLeashState drops its 5th param (leasher_acl) and passLeashInternal its 2nd (new_leasher_acl) — both existed only to feed enhanced; callers (claimLeash, handleLmGrabbed, pass_target_check) updated. claimLeash keeps its own acl_level (still gates take-over). The "invisible" texture whitelist added in rev 34 stays.
+- v1.10 rev 34: Add enhanced mode (persisted wearer toggle) + "invisible" texture style. Enhanced issues @sittp,tploc,tplm,tplure=n on every connect path when EnhancedMode is on AND leasher ACL >= 3; cleared inside clearLeashState (unleash / offsim auto-release / wearer-detach / region-change / Runaway / factory reset). Restrictions follow the leash, not the leasher's presence — post-only mode (avatar offline, holder present) keeps them active. Toggle gated to ACL >= 3 in handleAclResult (hard floor, not policy-driven). LeasherAcl is captured at setLeashState (new 5th param); passes thread the target's ACL from pass_target_check; LM grab reuses cached AuthorizedLmControllerAcl to avoid a second auth round-trip. broadcastState now exposes enhanced for the UI. Texture whitelist (applySettingsSync + setTextureInternal) accepts "invisible".
+- v1.10 rev 33: Strip the temporary DEBUG_LEASH scaffolding (constant +
   logd helper + every logd call site) added during the avatar-center
   fallback diagnosis. Underlying bugs are fixed in rev 32 + proto rev
   6/7; the diagnostic trail is no longer needed.
-- v1.1 rev 32: Tag the user's original claim mode so sendProtoStart
+- v1.10 rev 32: Tag the user's original claim mode so sendProtoStart
   emits the correct wire mode even when the (Leasher, FollowTarget)
   state alone is ambiguous. Motivating case: "A coffles B to A"
   (A is ordered to chain B to themselves, A is both action user and
@@ -39,21 +40,21 @@ CHANGES:
   collapsing into grab. LeashClaimMode's global initialiser (0 =
   MODE_AVATAR) matches that fallback. Persistence considered and
   dropped — no kmod_settings touch needed.
-- v1.1 rev 31: Fix post-mode leash re-pinning to wearer's leashpoint after ~10s. applySettingsSync's cold-restart default (FollowTarget=Leasher, FollowIsAvatar=TRUE) was firing on every settings.sync broadcast, not just at boot. After claimLeash persisted leashed/leasher, the resulting settings.sync round-tripped through this handler and clobbered an active post/coffle session back into grab mode. The next 10s retry timer then sent a mode=grab handshake with ValidationTarget=Leasher, and any attached responder owned by Leasher (e.g. another worn collar's leashpoint) validated successfully — particles re-aimed to it. Guard the defaulting with FollowTarget == NULL_KEY so it only fires when there's no in-memory mode (true cold restart).
-- v1.1 rev 30: Drop stale leash.proto.holder / leash.proto.fallback messages from kmod_leash_proto when !Leashed. Proto can emit a late holder/fallback notification after an Unclip because LSL discards pending events on state change — a queued proto.shutdown gets dropped if proto state-changes first, so the handshake keeps running in the background until natural timeout (~4s). Without this guard, a real responder reply during that window would re-pin HolderTarget on a released leash, lighting particles to a phantom holder. One-line `if (!Leashed) return;` at the top of each handler.
-- v1.1 rev 29: Architectural split — handshake protocol moved to kmod_leash_proto.lsl. Engine retains leash state, ACL, claim/release/pass/yank, follow mechanics, controls, settings persistence, broadcasts, Lockmeister grab inflow. Removed from engine: HOLDER_STATE_* constants, HolderState/HolderPhaseStart/HolderListen/HolderListenOC/HolderSession globals, NATIVE_PHASE_DURATION/OC_PHASE_DURATION, LEASH_CHAN_LM/LEASH_CHAN_NATIVE constants, leashingModeQuery / findLeashpointPrim / leashProtoNativeRequest / leashProtoNativeResponse / leashProtoOCTargetHelper / leashProtoOCCompat / leashProtoHandover / leashProtoListenerTerminate / completeHandshake helpers, listen() event, native listener in state_entry, leashProtoHandover() tick. Engine keeps HolderTarget (the truth — proto reports, engine pins). IPC contract on SETTINGS_BUS: engine→proto sends leash.proto.start (controller, mode_str, validation_target, oc_ping_target) and leash.proto.shutdown; proto→engine sends leash.proto.holder (handshake found a holder) and leash.proto.fallback (handshake timed out, particle fallback target). Re-handshake retry in timer now sends leash.proto.start unconditionally (proto handles its own state idempotently). claimLeash and passLeashInternal call sendProtoStart instead of leashingModeQuery. clearLeashState calls sendProtoShutdown instead of leashProtoListenerTerminate. Renamed file: kmod_leash.lsl → kmod_leash_engine.lsl.
-- v1.1 rev 28: Bytecode reduction pass after Mono stack-heap collision in rev 27 (66888B / 102%). Saved ~1665B (now 65223B / 99.5%). Changes: (1) handleLmGrabbed now calls setLeashState; handleLmReleased now calls clearLeashState(TRUE) — closes a defensive cleanup gap. (2) New clearReclipState() helper replaces 3-place verbatim duplication in clearLeashState + checkAutoReclip. (3) New completeHandshake(holder) helper consolidates the 4-line tail of leashProtoNativeResponse + leashProtoOCCompat. (4) Dropped rlvFollowTarget — startFollow now skips MODE_POST inline and uses leashFollowTarget for avatar/coffle. (5) Inlined single-use persist helpers (persistLength/persistTurnto/persistTexture). (6) leashProtoNativeResponse avatar+coffle validation collapsed via leashFollowTarget for expected_wearer. (7) New clearPendingAction() helper used in handleAclResult final reset and state_entry. (8) NEW claimLeash(user, mode, target_key, acl_level) replaces grabLeashInternal/coffleLeashInternal/postLeashInternal — the per-mode *Internal entry points are gone; sections 3 and 4 dissolved. (9) handleAclResult dual if-ladder restructured into per-action blocks with inline policy check (marginal — denyAccess proliferation offsets ladder removal). passLeashInternal kept separate (different intent; uses notifyLeashTransfer). All inter-collar protocol strings preserved (OC interop is a hard requirement).
-- v1.1 rev 27: Add per-wearer leash texture setting (chain / silk). New LeashTexture global persisted under leash.texture (settings.set JSON path), defaults to "chain". setParticlesState passes LeashTexture as the style field on particles.start, broadcastState includes texture so plugin_leash can render the selection, and a new set_texture action (gated by POL_SETTINGS) routes through setTextureInternal — which validates against the chain/silk whitelist and re-renders particles immediately if leashed. Drops the hardcoded "style", "chain" in setParticlesState.
-- v1.1 rev 26: Consolidate mode-anchor branches and rename internal handshake/response helpers. New leashFollowTarget() replaces the 3-way LeashMode branch duplicated in followTick and control() (returns Leasher / CoffleTargetAvatar / LeashTarget). New rlvFollowTarget() replaces the @follow branch in startFollow (NULL_KEY in post mode). Renames: beginHolderHandshake → leashingModeQuery, handleHolderResponseNative → leashProtoNativeResponse, handleHolderResponseOc → leashProtoOCCompat. Earlier changelog entries were rewritten in place to use the new names — refer to git history for the prior identifiers. No behavior change.
-- v1.1 rev 25: control() event applies a soft corrective llMoveToTarget toward the leash anchor when the wearer presses a directional key at/past LeashLength. Bridges the 1Hz followTick gap, provides post-mode tether (no RLV @follow there), and serves as non-RLV fallback in avatar/coffle. llTakeControls mask is expanded beyond CONTROL_ML_LBUTTON only while leashed AND (at-limit OR yanking) — managed via updateControlsMask() called from followTick (AtLimit transition), yankToLeasher, at_target arrival, clearLeashState, and run_time_permissions.
-- v1.1 rev 24: Drop PERMISSION_CONTROL_CAMERA from llRequestPermissions — unused (no camera API consumers), and triggered the "Camera control currently only supported for attachments..." runtime warning whenever the collar was rezzed (e.g. in a vendor box). Take-controls alone is sufficient for the no-script-parcel sticky exemption.
-- v1.1 rev 23: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 22: Explicit (integer) cast on TickCount in `% N` expressions. No functional change — lslint accepted both forms; the cast silences a false-positive type warning from the lsl-lsp VS Code extension.
-- v1.1 rev 21: Listen for kernel.reset.factory / kernel.reset.soft on
+- v1.10 rev 31: Fix post-mode leash re-pinning to wearer's leashpoint after ~10s. applySettingsSync's cold-restart default (FollowTarget=Leasher, FollowIsAvatar=TRUE) was firing on every settings.sync broadcast, not just at boot. After claimLeash persisted leashed/leasher, the resulting settings.sync round-tripped through this handler and clobbered an active post/coffle session back into grab mode. The next 10s retry timer then sent a mode=grab handshake with ValidationTarget=Leasher, and any attached responder owned by Leasher (e.g. another worn collar's leashpoint) validated successfully — particles re-aimed to it. Guard the defaulting with FollowTarget == NULL_KEY so it only fires when there's no in-memory mode (true cold restart).
+- v1.10 rev 30: Drop stale leash.proto.holder / leash.proto.fallback messages from kmod_leash_proto when !Leashed. Proto can emit a late holder/fallback notification after an Unclip because LSL discards pending events on state change — a queued proto.shutdown gets dropped if proto state-changes first, so the handshake keeps running in the background until natural timeout (~4s). Without this guard, a real responder reply during that window would re-pin HolderTarget on a released leash, lighting particles to a phantom holder. One-line `if (!Leashed) return;` at the top of each handler.
+- v1.10 rev 29: Architectural split — handshake protocol moved to kmod_leash_proto.lsl. Engine retains leash state, ACL, claim/release/pass/yank, follow mechanics, controls, settings persistence, broadcasts, Lockmeister grab inflow. Removed from engine: HOLDER_STATE_* constants, HolderState/HolderPhaseStart/HolderListen/HolderListenOC/HolderSession globals, NATIVE_PHASE_DURATION/OC_PHASE_DURATION, LEASH_CHAN_LM/LEASH_CHAN_NATIVE constants, leashingModeQuery / findLeashpointPrim / leashProtoNativeRequest / leashProtoNativeResponse / leashProtoOCTargetHelper / leashProtoOCCompat / leashProtoHandover / leashProtoListenerTerminate / completeHandshake helpers, listen() event, native listener in state_entry, leashProtoHandover() tick. Engine keeps HolderTarget (the truth — proto reports, engine pins). IPC contract on SETTINGS_BUS: engine→proto sends leash.proto.start (controller, mode_str, validation_target, oc_ping_target) and leash.proto.shutdown; proto→engine sends leash.proto.holder (handshake found a holder) and leash.proto.fallback (handshake timed out, particle fallback target). Re-handshake retry in timer now sends leash.proto.start unconditionally (proto handles its own state idempotently). claimLeash and passLeashInternal call sendProtoStart instead of leashingModeQuery. clearLeashState calls sendProtoShutdown instead of leashProtoListenerTerminate. Renamed file: kmod_leash.lsl → kmod_leash_engine.lsl.
+- v1.10 rev 28: Bytecode reduction pass after Mono stack-heap collision in rev 27 (66888B / 102%). Saved ~1665B (now 65223B / 99.5%). Changes: (1) handleLmGrabbed now calls setLeashState; handleLmReleased now calls clearLeashState(TRUE) — closes a defensive cleanup gap. (2) New clearReclipState() helper replaces 3-place verbatim duplication in clearLeashState + checkAutoReclip. (3) New completeHandshake(holder) helper consolidates the 4-line tail of leashProtoNativeResponse + leashProtoOCCompat. (4) Dropped rlvFollowTarget — startFollow now skips MODE_POST inline and uses leashFollowTarget for avatar/coffle. (5) Inlined single-use persist helpers (persistLength/persistTurnto/persistTexture). (6) leashProtoNativeResponse avatar+coffle validation collapsed via leashFollowTarget for expected_wearer. (7) New clearPendingAction() helper used in handleAclResult final reset and state_entry. (8) NEW claimLeash(user, mode, target_key, acl_level) replaces grabLeashInternal/coffleLeashInternal/postLeashInternal — the per-mode *Internal entry points are gone; sections 3 and 4 dissolved. (9) handleAclResult dual if-ladder restructured into per-action blocks with inline policy check (marginal — denyAccess proliferation offsets ladder removal). passLeashInternal kept separate (different intent; uses notifyLeashTransfer). All inter-collar protocol strings preserved (OC interop is a hard requirement).
+- v1.10 rev 27: Add per-wearer leash texture setting (chain / silk). New LeashTexture global persisted under leash.texture (settings.set JSON path), defaults to "chain". setParticlesState passes LeashTexture as the style field on particles.start, broadcastState includes texture so plugin_leash can render the selection, and a new set_texture action (gated by POL_SETTINGS) routes through setTextureInternal — which validates against the chain/silk whitelist and re-renders particles immediately if leashed. Drops the hardcoded "style", "chain" in setParticlesState.
+- v1.10 rev 26: Consolidate mode-anchor branches and rename internal handshake/response helpers. New leashFollowTarget() replaces the 3-way LeashMode branch duplicated in followTick and control() (returns Leasher / CoffleTargetAvatar / LeashTarget). New rlvFollowTarget() replaces the @follow branch in startFollow (NULL_KEY in post mode). Renames: beginHolderHandshake → leashingModeQuery, handleHolderResponseNative → leashProtoNativeResponse, handleHolderResponseOc → leashProtoOCCompat. Earlier changelog entries were rewritten in place to use the new names — refer to git history for the prior identifiers. No behavior change.
+- v1.10 rev 25: control() event applies a soft corrective llMoveToTarget toward the leash anchor when the wearer presses a directional key at/past LeashLength. Bridges the 1Hz followTick gap, provides post-mode tether (no RLV @follow there), and serves as non-RLV fallback in avatar/coffle. llTakeControls mask is expanded beyond CONTROL_ML_LBUTTON only while leashed AND (at-limit OR yanking) — managed via updateControlsMask() called from followTick (AtLimit transition), yankToLeasher, at_target arrival, clearLeashState, and run_time_permissions.
+- v1.10 rev 24: Drop PERMISSION_CONTROL_CAMERA from llRequestPermissions — unused (no camera API consumers), and triggered the "Camera control currently only supported for attachments..." runtime warning whenever the collar was rezzed (e.g. in a vendor box). Take-controls alone is sufficient for the no-script-parcel sticky exemption.
+- v1.10 rev 23: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 22: Explicit (integer) cast on TickCount in `% N` expressions. No functional change — lslint accepted both forms; the cast silences a false-positive type warning from the lsl-lsp VS Code extension.
+- v1.10 rev 21: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt — flushes in-memory
   leash/coffle state on the kernel's owner-change wipe (collar_kernel
   rev 6). Adds the KERNEL_LIFECYCLE bus constant.
-- v1.1 rev 20: Permission request now combined as
+- v1.10 rev 20: Permission request now combined as
   PERMISSION_TAKE_CONTROLS | PERMISSION_CONTROL_CAMERA. CONTROL_CAMERA
   is preemptive (no current consumer; held for future leash-camera work).
   run_time_permissions now actually calls llTakeControls — without it,
@@ -62,58 +63,58 @@ CHANGES:
   unobtrusive control (CONTROL_ML_LBUTTON, accept=FALSE pass_on=TRUE)
   so the wearer's input is unaffected; the exemption applies to every
   script in the same prim.
-- v1.1 rev 19: Body reorganized into shared infrastructure followed by
+- v1.10 rev 19: Body reorganized into shared infrastructure followed by
   three per-mode sections (avatar / coffle / post) and a settings
   section. Behavior unchanged. setLengthInternal now reuses
   clampLeashLength instead of inlining the clamp; pass_target_check
   picks action_name with a single guard. LM grab/release handlers
   extracted from the link_message body into named helpers in the
   avatar section so each mode's surface is contiguous.
-- v1.1 rev 18: passLeashInternal now calls startFollow() after the
+- v1.10 rev 18: passLeashInternal now calls startFollow() after the
   state swap. setLeashState updates Leasher, but the existing RLV
   @follow rule was still aimed at the previous leasher's avatar
   until the next grab — so a passed wearer kept being dragged
   toward the old leasher even though particles redirected.
-- v1.1 rev 17: Tag plugin.leash.request with `mode` (grab/coffle/post);
+- v1.10 rev 17: Tag plugin.leash.request with `mode` (grab/coffle/post);
   the collar's native responder now only replies for coffle, so a
   leasher's leash_holder no longer loses the handshake race to the
   leasher's own collar leashpoint in grab mode (and the same for the
   coffle target's holder vs leashpoint, where leashpoint should win).
   Old requests without the field still get a reply (back-compat).
-- v1.1 rev 16: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 16: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 15: Act as a native-protocol leash-holder responder. Collar now
+- v1.10 rev 15: Act as a native-protocol leash-holder responder. Collar now
   replies to plugin.leash.request on LEASH_CHAN_NATIVE with its own
   LeashPoint prim (same role as leash_holder.lsl), so coffle mode resolves
   to the target collar's leashpoint instead of falling through to the
   avatar pelvis. Native listener is now persistent (opened at state_entry,
   not reopened per handshake); HolderListen removed from leashProtoListenerTerminate
   and phase transition. Self-sent requests are filtered.
-- v1.1 rev 14: Convert all user-facing notices from llOwnerSay to
+- v1.10 rev 14: Convert all user-facing notices from llOwnerSay to
   llRegionSayTo(...0, ...) for consistency with project convention.
   Actor-targeted (user): Leash grabbed/released, Coffled to, Posted to.
   Wearer-targeted (llGetOwner): offsim notifications, auto-release,
   notifyLeashTransfer wearer line, yank feedback, Lockmeister
   grab/release notices. RLV commands (@follow, @setrot) stay as
   llOwnerSay — required by the RLV delivery protocol.
-- v1.1 rev 13: Cap auto-reclip waiting window at 2min. Adds ReclipDeadline
+- v1.10 rev 13: Cap auto-reclip waiting window at 2min. Adds ReclipDeadline
   alongside ReclipScheduled so the wearer isn't surprise-reclipped if the
   leasher crashes and logs back in hours later. Checked before the
   MAX_RECLIP_ATTEMPTS cap so a late-returning leasher is never reclipped.
-- v1.1 rev 12: Re-acquire leashpoint after holder detach/reattach.
+- v1.10 rev 12: Re-acquire leashpoint after holder detach/reattach.
   Timer retries leashingModeQuery every ~10s when Leashed &&
   HolderTarget == NULL_KEY && HolderState == HOLDER_STATE_COMPLETE,
   so a reattached holder gets picked up without unclip+re-clip.
   Drops rev 11 temporary diagnostics (no regression; was a sim crash
   that failed to persist the emitter child as linkset).
-- v1.1 rev 11: Consolidate leash-action notices to owner IM only; drop
+- v1.10 rev 11: Consolidate leash-action notices to owner IM only; drop
   duplicate llRegionSayTo on channel 0. Remove notifyLeashAction helper;
   callers inline llOwnerSay. New formats: "Leash grabbed by X", "Leash
   released", "Coffled to Y", "Posted to Z". Adds temporary diagnostic
   llOwnerSays in leashProtoNativeResponse — remove once particles
   regression is resolved.
-- v1.1 rev 10: Extend native/OC holder handshake to coffle and post modes.
+- v1.10 rev 10: Extend native/OC holder handshake to coffle and post modes.
   Previously only grab mode discovered a LeashPoint prim; coffle/post
   aimed particles at the raw sensor-detected target (avatar pelvis for
   coffle, root prim for post). Both now run the same two-phase handshake
@@ -124,32 +125,32 @@ CHANGES:
   in non-avatar modes via leashProtoOCTargetHelper(), giving emergent interop with
   OC-protocol collars (coffle) and LM-compatible leashposts (post).
   followTick now prefers HolderTarget over the raw target in all modes.
-- v1.1 rev 9: Sub-protocol rename (Phase 1). particles.lmenable→
+- v1.10 rev 9: Sub-protocol rename (Phase 1). particles.lmenable→
   particles.lm.enable, particles.lmdisable→particles.lm.disable,
   particles.lmgrabbed→particles.lm.grabbed, particles.lmreleased→
   particles.lm.released, plugin.leash.offerpending→plugin.leash.offer.pending,
   sos.leashrelease→sos.leash.release.
-- v1.1 rev 8: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
+- v1.10 rev 8: AUTH_BUS rename (Phase 1). auth.aclquery→auth.acl.query,
   auth.aclresult→auth.acl.result.
-- v1.1 rev 7: Remove stylistic artifact from plugin.leash.state broadcast.
+- v1.10 rev 7: Remove stylistic artifact from plugin.leash.state broadcast.
   Integer fields were cast to string for symmetry with the old JSON-object
   settings broadcast (retired in rev 2); the symmetry no longer exists, so
   integers now emit as native JSON numbers matching kmod_auth templates.
   Consumers already use (integer)llJsonGetValue; decoding is unchanged.
   Keys retain (string) casts (required — LSL keys aren't strings).
-- v1.1 rev 6: Namespace pass — align all cross-module strings with the
+- v1.10 rev 6: Namespace pass — align all cross-module strings with the
   dev bus vocabulary (particles.*, auth.*, settings.*, sos.*, plugin.leash.*,
   kernel-none). PLUGIN_CONTEXT becomes "ui.core.leash", LSD policy key
   moves to "acl.policycontext:", LSD setting keys move to "leash.*".
   External native holder protocol moves to "plugin.leash.request/target".
   No kernel-lifecycle integration added (intentional; see README).
-- v1.1 rev 5: Add force_release action for maintenance emergency clear.
+- v1.10 rev 5: Add force_release action for maintenance emergency clear.
   "Clear Leash" in the maintenance plugin now sends force_release instead
   of release, which is authorized if the requesting user is the wearer
   OR has ACL >= 3. Prevents bad actors who leash a public-access collar
   from blocking the wearer's own emergency clear, and also stops stray
   leash particles from persisting indefinitely.
-- v1.1 rev 4: Fixed yank anchoring and stiff walking. yankToLeasher now
+- v1.10 rev 4: Fixed yank anchoring and stiff walking. yankToLeasher now
   pairs llMoveToTarget with llTarget so an at_target event releases the
   physics hold the moment the wearer arrives, instead of leaving them
   glued to the leasher's exact position forever. followTick now stops
@@ -157,7 +158,7 @@ CHANGES:
   out-of-range -> in-range transitions), pulls to 0.85 * length with a
   gentler tau (1.0), and runs at 1.0s instead of 2.0s for responsiveness.
   Offsim/auto-reclip throttle rebalanced to keep its prior ~4s cadence.
-- v1.1 rev 3: Reject native-protocol holder responses from objects that are
+- v1.10 rev 3: Reject native-protocol holder responses from objects that are
   not worn by the leasher. leashingModeQuery() broadcasts via
   llRegionSay on LEASH_CHAN_NATIVE so any in-world native-compatible holder
   could reply with its own UUID, hijacking the leash and pulling
@@ -166,12 +167,12 @@ CHANGES:
   responding object to be an attachment owned by the leasher; otherwise
   the response is dropped and the handshake falls through to OC and
   finally to direct-to-avatar attachment.
-- v1.1 rev 2: Read settings from LSD instead of kv_json broadcast. Remove
+- v1.10 rev 2: Read settings from LSD instead of kv_json broadcast. Remove
   applySettingsDelta; both sync and delta call parameterless applySettingsSync.
-- v1.1 rev 1: Replaced hardcoded ALLOWED_ACL_* lists and inAllowedList() with
+- v1.10 rev 1: Replaced hardcoded ALLOWED_ACL_* lists and inAllowedList() with
   LSD policy reads via policy_allows(). Action permissions now read from the
   same policy:core_leash LSD key that plugin_leash declares.
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 

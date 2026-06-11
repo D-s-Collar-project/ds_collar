@@ -1,11 +1,12 @@
 /*--------------------
 MODULE: collar_kernel.lsl
 VERSION: 1.10
-REVISION: 7
+REVISION: 8
 PURPOSE: Plugin registry, lifecycle management, heartbeat monitoring
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
-- v1.1 rev 7: Heap-pressure fixes for the plugin-count growth path
+- v1.10 rev 8: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 7: Heap-pressure fixes for the plugin-count growth path
   (plugin_strip + plugin_outfits pushed the linkset to a stack-heap
   collision at boot). Four hot loops rewritten:
   * prune_dead_plugins and prune_missing_scripts now iterate the
@@ -20,7 +21,7 @@ CHANGES:
     O(N²) at the `+=` site).
   Removed unused REG_CONTEXT stride constant — the refactored prune
   paths no longer reference it.
-- v1.1 rev 6: Owner-change LSD wipe safeguard. On any detected owner
+- v1.10 rev 6: Owner-change LSD wipe safeguard. On any detected owner
   change (runtime CHANGED_OWNER OR cold-start mismatch between the
   persisted safeguard.last_owner key and llGetOwner()), kernel calls
   llLinksetDataReset(), re-writes safeguard.last_owner with the new
@@ -29,10 +30,10 @@ CHANGES:
   slate when the collar is transferred from creator to customer
   through inventory (the path that doesn't fire CHANGED_OWNER on a
   running script).
-- v1.1 rev 5: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 5: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 4: Drop kernel.plugins.list broadcast. Plugins now self-declare
+- v1.10 rev 4: Drop kernel.plugins.list broadcast. Plugins now self-declare
   menu presence via LSD (plugin.reg.<ctx>) and kmod_ui enumerates on the
   linkset_data event. broadcast_plugin_list, handle_plugin_list_request,
   kernel.plugins.request, and PendingPluginListRequest are removed. Also
@@ -41,20 +42,20 @@ CHANGES:
   already covers dropped pings. prune_missing_scripts now also sweeps
   orphaned plugin.reg.<ctx> and acl.policycontext:<ctx> LSD entries whose
   owning script is no longer in inventory.
-- v1.1 rev 3: KERNEL_LIFECYCLE wire-type rename (Phase 1 of bus
+- v1.10 rev 3: KERNEL_LIFECYCLE wire-type rename (Phase 1 of bus
   restructuring). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.pluginlist→
   kernel.plugins.list, kernel.pluginlistrequest→kernel.plugins.request,
   kernel.reset→kernel.reset.soft, kernel.resetall→kernel.reset.factory.
   Plugins still emit old names until Phase 2; this module will not
   register them or respond to their pings until they migrate.
-- v1.1 rev 2: Namespaced internal message type strings with "kernel." prefix
+- v1.10 rev 2: Namespaced internal message type strings with "kernel." prefix
   (register_now → kernel.registernow, ping → kernel.ping, etc.).
-- v1.1 rev 1: Removed min_acl from registry and registration flow. Plugins no
+- v1.10 rev 1: Removed min_acl from registry and registration flow. Plugins no
   longer send min_acl (superseded by LSD policies). Removed route_field to
   AUTH_BUS register_acl and handle_acl_registry_request — auth module no longer
   maintains a plugin ACL registry.
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 

@@ -1,16 +1,17 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.10
-REVISION: 19
+REVISION: 20
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
-- v1.1 rev 19: "invisible" style now emits NO particles instead of rendering a transparent-texture stream. render_leash_particles short-circuits invisible (and NULL target) to llLinkParticleSystem([]) and drops INVISIBLE_TEXTURE entirely. The leash tether (RLV @follow + llMoveToTarget length enforcement) lives in kmod_leash_engine and is independent of this module, so an invisible leash still follows/yanks/limits/turns exactly like chain/silk — it just draws nothing. Removes the library-asset-fetch + blend-mode fragility of the transparent-texture approach (SL's default particle blend shows a texture's RGB unless it is truly alpha-0 in every viewer). The holder handshake is unaffected, so leasher-side OC/LM "grabbed" feedback still fires.
-- v1.1 rev 18: Add INVISIBLE_TEXTURE (fully-transparent library texture) as a third ParticleStyle. render_leash_particles routes "invisible" to that UUID; particle system still emits (FOLLOW_SRC + TARGET_POS keep tethering math live), just renders nothing. Picked over alpha=0 to avoid any residual ribbon/sprite trail artifacts at very small alpha thresholds.
-- v1.1 rev 17: Add SILK_TEXTURE alongside CHAIN_TEXTURE; render_leash_particles (renamed from render_chain_particles) now picks the texture from ParticleStyle ("chain" / "silk", default "chain"). handle_particles_start parses the requested style up-front so the idempotence guard can detect a style change and re-render on chain↔silk swap. All other particle knobs remain shared across styles.
-- v1.1 rev 16: Swap CHAIN_*_SCALE X/Y. FOLLOW_VELOCITY aligns the
+- v1.10 rev 20: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 19: "invisible" style now emits NO particles instead of rendering a transparent-texture stream. render_leash_particles short-circuits invisible (and NULL target) to llLinkParticleSystem([]) and drops INVISIBLE_TEXTURE entirely. The leash tether (RLV @follow + llMoveToTarget length enforcement) lives in kmod_leash_engine and is independent of this module, so an invisible leash still follows/yanks/limits/turns exactly like chain/silk — it just draws nothing. Removes the library-asset-fetch + blend-mode fragility of the transparent-texture approach (SL's default particle blend shows a texture's RGB unless it is truly alpha-0 in every viewer). The holder handshake is unaffected, so leasher-side OC/LM "grabbed" feedback still fires.
+- v1.10 rev 18: Add INVISIBLE_TEXTURE (fully-transparent library texture) as a third ParticleStyle. render_leash_particles routes "invisible" to that UUID; particle system still emits (FOLLOW_SRC + TARGET_POS keep tethering math live), just renders nothing. Picked over alpha=0 to avoid any residual ribbon/sprite trail artifacts at very small alpha thresholds.
+- v1.10 rev 17: Add SILK_TEXTURE alongside CHAIN_TEXTURE; render_leash_particles (renamed from render_chain_particles) now picks the texture from ParticleStyle ("chain" / "silk", default "chain"). handle_particles_start parses the requested style up-front so the idempotence guard can detect a style change and re-render on chain↔silk swap. All other particle knobs remain shared across styles.
+- v1.10 rev 16: Swap CHAIN_*_SCALE X/Y. FOLLOW_VELOCITY aligns the
   particle's Y axis to motion, so link length goes on Y not X.
-- v1.1 rev 15: Switch chain from ribbon mode to a regular particle
+- v1.10 rev 15: Switch chain from ribbon mode to a regular particle
   stream. Drops PSYS_PART_RIBBON_MASK, adds PSYS_PART_FOLLOW_VELOCITY_MASK
   so each chain-link sprite orients along its motion vector. Eliminates
   the ribbon-specific artifacts that drove revs 9–14: target-movement
@@ -20,7 +21,7 @@ CHANGES:
   a stream of discrete link sprites rather than a continuous textured
   ribbon. Tuning: BURST_RATE 0.0→0.02, MAX_AGE 3.0→2.0, SCALE
   rectangular for FOLLOW_VELOCITY orientation, ACCEL -1.0→-1.5.
-- v1.1 rev 14: Restore PSYS_PART_FOLLOW_SRC_MASK — rev 13 removal was
+- v1.10 rev 14: Restore PSYS_PART_FOLLOW_SRC_MASK — rev 13 removal was
   wrong direction. Without FOLLOW_SRC, alive particles stay in
   worldspace where they were emitted, so a moving wearer produces a
   trail of emission points near the leashpoint that ribbon-stretches
@@ -28,7 +29,7 @@ CHANGES:
   FOLLOW_SRC restored, alive particles translate with source as it
   moves; chain shape is computed in source's reference frame, no
   trail artifact. Matches the slua reference (no complaints there).
-- v1.1 rev 13: Drop PSYS_PART_FOLLOW_SRC_MASK from chain flags. Strays
+- v1.10 rev 13: Drop PSYS_PART_FOLLOW_SRC_MASK from chain flags. Strays
   correlated with wearer movement: FOLLOW_SRC translates every alive
   particle by source_delta when the source moves, so the oldest
   particles (near target) get yanked with the wearer; TARGET_POS then
@@ -37,7 +38,7 @@ CHANGES:
   alive particles stay in worldspace — the chain lags slightly behind
   a moving wearer but settles smoothly under TARGET_POS alone, no
   conflict.
-- v1.1 rev 12: handle_particles_start idempotence guard. Was unconditionally
+- v1.10 rev 12: handle_particles_start idempotence guard. Was unconditionally
   re-issuing llLinkParticleSystem on every particles.start, which reset
   the ribbon — for ~tens of ms after each reset only 1-2 particles
   exist, and TARGET_POS pulls them straight at the holder, rendering as
@@ -46,28 +47,28 @@ CHANGES:
   user saw recurring straight-line strays. Now skips re-render when
   source/target/active state are unchanged. handle_particles_update
   already had this guard.
-- v1.1 rev 11: Adopt LSL wiki catenary recipe — BURST_RATE 0.015→0.0
+- v1.10 rev 11: Adopt LSL wiki catenary recipe — BURST_RATE 0.015→0.0
   (max sim emission), MAX_AGE 1.125→3.0 (TARGET_POS uses lifetime as
   travel time, so longer life lets each particle traverse src→target
   fully), ACCEL -2.0→-1.0 (gentle sag without overwhelming TARGET_POS
   correction). Ribbon Z scale 0.05→0.0 per LSL convention.
-- v1.1 rev 10: Hoist chain particle knobs into top-level constants
+- v1.10 rev 10: Hoist chain particle knobs into top-level constants
   (CHAIN_BURST_RATE, CHAIN_MAX_AGE, CHAIN_ACCEL, etc.). Soften
   gravity from -3.95→-2.0 to reduce ribbon stretching.
-- v1.1 rev 9: Drop PSYS_PART_FOLLOW_VELOCITY_MASK from chain flags. Per
+- v1.10 rev 9: Drop PSYS_PART_FOLLOW_VELOCITY_MASK from chain flags. Per
   the LSL wiki it has no effect on ribbon-mode particles, but a particle
   that occasionally escapes ribbon rendering would fall back to
   FOLLOW_VELOCITY orientation — drawn as an elongated streak along its
   velocity. That matches the "stray straight particle" symptom seen
   alongside the ribbon. Removing the flag eliminates the fallback path.
-- v1.1 rev 8: Retune chain particles — burst rate 0.05→0.015, scale
+- v1.10 rev 8: Retune chain particles — burst rate 0.05→0.015, scale
   0.06→0.05, max_age 1.5→1.125, accel z -1.75→-3.95 (denser, snappier
   fall with shorter trail).
-- v1.1 rev 7: Reviewed burst and scale for particles.
-- v1.1 rev 6: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 7: Reviewed burst and scale for particles.
+- v1.10 rev 6: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 5: Stop orphaning the rendering slot when the target goes
+- v1.10 rev 5: Stop orphaning the rendering slot when the target goes
   transiently missing. Periodic validation used to clear SourcePlugin
   alongside TargetKey, which left a subsequent particles.stop with a
   source mismatch — so unclip couldn't clear particles after a holder
@@ -76,18 +77,18 @@ CHANGES:
   restart the validation timer in handle_particles_update so a renderer
   that resumes after a target-gone gap still gets periodic checks.
   Drops rev 4 temporary diagnostic (regression was a sim crash).
-- v1.1 rev 4: Temporary diagnostic llOwnerSay in handle_particles_start —
+- v1.10 rev 4: Temporary diagnostic llOwnerSay in handle_particles_start —
   remove once particles regression is resolved.
-- v1.1 rev 3: Sub-protocol rename (Phase 1). particles.lmenable→
+- v1.10 rev 3: Sub-protocol rename (Phase 1). particles.lmenable→
   particles.lm.enable, particles.lmdisable→particles.lm.disable,
   particles.lmgrabbed→particles.lm.grabbed, particles.lmreleased→
   particles.lm.released.
-- v1.1 rev 2: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
+- v1.10 rev 2: KERNEL_LIFECYCLE rename (Phase 1). kernel.reset→
   kernel.reset.soft, kernel.resetall→kernel.reset.factory.
-- v1.1 rev 1: Namespace pass — align message vocabulary with dev peers
+- v1.10 rev 1: Namespace pass — align message vocabulary with dev peers
   (particles.*, kernel.*) and update the native-priority source match from
   "core_leash" to "ui.core.leash" to track kmod_leash's PLUGIN_CONTEXT.
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 

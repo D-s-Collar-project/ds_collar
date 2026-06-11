@@ -1,21 +1,22 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.10
-REVISION: 4
+REVISION: 5
 PURPOSE: Menu rendering and visual presentation service
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
-- v1.1 rev 4: Listen for kernel.reset.factory / kernel.reset.soft on
+- v1.10 rev 5: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 4: Listen for kernel.reset.factory / kernel.reset.soft on
   KERNEL_LIFECYCLE and llResetScript on receipt — flushes in-memory
   state on the kernel's owner-change wipe (collar_kernel rev 6).
-- v1.1 rev 3: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 3: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 2: Namespace context values. ROOT_CONTEXT → "ui.core.root",
+- v1.10 rev 2: Namespace context values. ROOT_CONTEXT → "ui.core.root",
   SOS_CONTEXT → "ui.sos.root". Added ROOT_CONTEXT/SOS_CONTEXT constants
   to replace the four former hardcoded literals in render_menu().
-- v1.1 rev 1: Namespace internal message type strings (dialog_open→ui.dialog.open, render_menu→ui.menu.render, show_message→ui.message.show).
-- v1.1 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
+- v1.10 rev 1: Namespace internal message type strings (dialog_open→ui.dialog.open, render_menu→ui.menu.render, show_message→ui.message.show).
+- v1.10 rev 0: Version bump for LSD policy architecture. No functional changes to this module.
 --------------------*/
 
 

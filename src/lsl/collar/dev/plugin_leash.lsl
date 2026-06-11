@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.10
-REVISION: 25
+REVISION: 26
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
          multi-step flows (Pass/Offer/Coffle, Post) to hidden sub-plugins.
@@ -13,25 +13,26 @@ ARCHITECTURE: Renderer for the leash module. Picker flows now live in
               subpath; the sub-plugin returns to us via ui.menu.start
               with our context.
 CHANGES:
-- v1.1 rev 25: Enhanced mode is now applied LOCALLY via llOwnerSay (no kmod_leash_engine round-trip; the engine path needed rev 34's toggle_enhanced handler and never fired). The restrictions FOLLOW THE LEASH, matching the original engine semantics: sync_enhanced() issues @sittp,tploc,tplm,tplure=n only while EnhancedMode is on AND the wearer is leashed, and =y to clear — so they lift automatically when the leash unclips and re-arm on the next clip. EnhancedMode (intent) is owned in-script; the toggle (ACL 3+) flips it and calls sync_enhanced(); the plugin.leash.state handler also calls sync_enhanced() on every Leashed change. SOS emergency Unleash (sos.leash.release on UI_BUS) is caught directly here and clears the restriction immediately — not relying on the engine's Leashed=FALSE broadcast round-trip — guarded to the wearer (id == owner) like the engine's own handler. Idempotent via EnhancedApplied, which defaults TRUE so the first sync at boot (state_entry calls load_enhanced()) forces a clean clear — enforcing the invariant "not leashed => no leash RLV restrictions" even after a bare reset-while-worn that would otherwise strand a stale @sittp. PERSISTED + ON BY DEFAULT: the intent survives via kmod_settings (settings.delta:leash.enhanced) — persist_enhanced() writes on toggle, load_enhanced() restores from LSD at state_entry (LSD survives script reset) and on every settings.sync, defaulting ON when the key is absent (a leash should restrain; notecard "leash.enhanced = 0" or the ACL3+ toggle disables it). Also settable from the settings notecard as "leash.enhanced = 0|1" (kmod_settings rev 21 whitelists the key). Toggle button "Enhance: Y" / "Enhance: N" (was "Enhanced: On/Off"); body "Enhanced mode: Enabled|Disabled" (was "Enhanced: 0|1"). Texture routing (chain/silk/invisible) unchanged, working via button_data context. Turn line relabeled "Turn to face: 0|1" -> "Turn to leasher: Enabled|Disabled" (button stays "Turn: On/Off"); Turn toggle still routes to the engine, which owns the @setrot follow-rotation.
-- v1.1 rev 24: Settings menu surfaces Enhanced (ACL 3+ only) and the texture sub-menu gains Invisible. Enhanced button reflects the engine's persisted EnhancedMode (synced via new "enhanced" field on plugin.leash.state); click sends toggle_enhanced through the standard plugin.leash.action path. Texture menu now offers Chain / Silk / Invisible; settings body labels the current selection accordingly.
-- v1.1 rev 23: Expose Coffle to ACL 1 (public). Previous policy listed
+- v1.10 rev 26: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 25: Enhanced mode is now applied LOCALLY via llOwnerSay (no kmod_leash_engine round-trip; the engine path needed rev 34's toggle_enhanced handler and never fired). The restrictions FOLLOW THE LEASH, matching the original engine semantics: sync_enhanced() issues @sittp,tploc,tplm,tplure=n only while EnhancedMode is on AND the wearer is leashed, and =y to clear — so they lift automatically when the leash unclips and re-arm on the next clip. EnhancedMode (intent) is owned in-script; the toggle (ACL 3+) flips it and calls sync_enhanced(); the plugin.leash.state handler also calls sync_enhanced() on every Leashed change. SOS emergency Unleash (sos.leash.release on UI_BUS) is caught directly here and clears the restriction immediately — not relying on the engine's Leashed=FALSE broadcast round-trip — guarded to the wearer (id == owner) like the engine's own handler. Idempotent via EnhancedApplied, which defaults TRUE so the first sync at boot (state_entry calls load_enhanced()) forces a clean clear — enforcing the invariant "not leashed => no leash RLV restrictions" even after a bare reset-while-worn that would otherwise strand a stale @sittp. PERSISTED + ON BY DEFAULT: the intent survives via kmod_settings (settings.delta:leash.enhanced) — persist_enhanced() writes on toggle, load_enhanced() restores from LSD at state_entry (LSD survives script reset) and on every settings.sync, defaulting ON when the key is absent (a leash should restrain; notecard "leash.enhanced = 0" or the ACL3+ toggle disables it). Also settable from the settings notecard as "leash.enhanced = 0|1" (kmod_settings rev 21 whitelists the key). Toggle button "Enhance: Y" / "Enhance: N" (was "Enhanced: On/Off"); body "Enhanced mode: Enabled|Disabled" (was "Enhanced: 0|1"). Texture routing (chain/silk/invisible) unchanged, working via button_data context. Turn line relabeled "Turn to face: 0|1" -> "Turn to leasher: Enabled|Disabled" (button stays "Turn: On/Off"); Turn toggle still routes to the engine, which owns the @setrot follow-rotation.
+- v1.10 rev 24: Settings menu surfaces Enhanced (ACL 3+ only) and the texture sub-menu gains Invisible. Enhanced button reflects the engine's persisted EnhancedMode (synced via new "enhanced" field on plugin.leash.state); click sends toggle_enhanced through the standard plugin.leash.action path. Texture menu now offers Chain / Silk / Invisible; settings body labels the current selection accordingly.
+- v1.10 rev 23: Expose Coffle to ACL 1 (public). Previous policy listed
   Coffle for ACL 3/4/5 only; public touchers can now coffle the wearer
   to a third-party avatar via the standard avatar picker. Engine-side
   POL_COFFLE gate at kmod_leash_engine.lsl:594 already reads from this
   LSD policy, so no engine change is required.
-- v1.1 rev 22: All four menus (main / settings / texture / length) now use the project's bottom-nav + top-to-bottom-L-R content convention (canonical: plugin_animate, plugin_leash_object). Length menu was rendering reversed (10/15/20 on top, 1/3/5 below); now reads 1/3/5/10/15/20 top-to-bottom. New nav-count-agnostic reorder_item_buttons helper handles both Back-only menus and the 3-button (<< >> Back) length menu without filler padding — items consume all qualifying slots, no " " survives in the final array.
-- v1.1 rev 21: Add "leash yank" chat subcommand. Was missing from handle_subpath since rev 8 (chat support introduced clip/unclip/turn/length/pass but not yank). Engine-side guards (leasher-only, 5s cooldown) apply unchanged — the chat path just dispatches plugin.leash.action action=yank with id=user, same shape as the menu Yank button.
-- v1.1 rev 20: Destroy dialog after one-shot action dispatch (Yank, Get Holder) instead of re-showing main menu — matches the project's "process finished → dialog gone" convention. Clip/Unclip already followed this; Yank and Get Holder were the outliers.
-- v1.1 rev 19: Architectural split after recurring Mono stack-heap collisions in rev 18 (91.5% / 64KB even after consolidation). Pass/Offer/Coffle avatar picker + offer-reception dialog moved to new plugin_leash_avatar (context ui.core.leash.avatar). Post object picker + sensor scanning moved to new plugin_leash_object (context ui.core.leash.object). Both sub-plugins are hidden from kmod_ui's top menu (no plugin.reg.* write). plugin_leash now: main menu + Settings (length/turn/texture) + Get Holder + state sync + chat dispatch root + direct simple actions (Unclip/Yank/Take). Removed from plugin_leash: showPassMenu, buildAvatarMenu, startSensorScan, displayObjectMenu, showOfferDialog, handleOfferResponse, reorder_item_buttons, sensor/no_sensor events, plugin.leash.offer.pending handler, MenuContext branches for pass/coffle/post, OfferDialog* / SensorMode / SensorCandidates / SensorPage / IsOfferMode / LeashMode / LeashTarget globals. New delegateTo(sub_context, subpath) helper sends ui.menu.start to the appropriate sub-plugin and closes our current session.
-- v1.1 rev 18: Fix O(n²) heap pressure in SensorCandidates construction. Both sites (buildAvatarMenu, sensor event handler) now collect into a local list and assign to the global once after the loop. The local has refcount 1 inside the loop, so Mono can grow it in-place ~O(1) per step; appending directly to a global is O(n) per step because the global slot holds an extra reference. Worst case (96m sensor with hundreds of returns) drops from ~O(N²) heap churn to ~O(N).
-- v1.1 rev 17: Bytecode reduction pass after Mono stack-heap collision in rev 16 (~91.5%). (1) Consolidated showCoffleMenu + showPostMenu into one startSensorScan(mode, type_mask) helper — same shape, only the type bitmask differed. (2) Inlined three single-use helpers: sendSetTexture, cleanupOfferDialog, returnToRoot. (3) Compacted the 7-field plugin.leash.state field-read block by dropping unneeded braces on single-statement if bodies. No behavior change. Aimed to give plugin_leash runtime headroom against heap pressure during link_message dispatch.
-- v1.1 rev 16: Add Texture sub-menu under Settings — wearer picks Chain or Silk for the leash particle stream. New texture field in plugin.leash.state syncs LeashTexture from kmod_leash; Settings dialog body now displays the current selection; texture menu sends set_texture action with the chosen style. Returns to Settings menu after pick so the new selection is visible.
-- v1.1 rev 15: Post sensor mask drops ACTIVE (was PASSIVE|ACTIVE|SCRIPTED).
+- v1.10 rev 22: All four menus (main / settings / texture / length) now use the project's bottom-nav + top-to-bottom-L-R content convention (canonical: plugin_animate, plugin_leash_object). Length menu was rendering reversed (10/15/20 on top, 1/3/5 below); now reads 1/3/5/10/15/20 top-to-bottom. New nav-count-agnostic reorder_item_buttons helper handles both Back-only menus and the 3-button (<< >> Back) length menu without filler padding — items consume all qualifying slots, no " " survives in the final array.
+- v1.10 rev 21: Add "leash yank" chat subcommand. Was missing from handle_subpath since rev 8 (chat support introduced clip/unclip/turn/length/pass but not yank). Engine-side guards (leasher-only, 5s cooldown) apply unchanged — the chat path just dispatches plugin.leash.action action=yank with id=user, same shape as the menu Yank button.
+- v1.10 rev 20: Destroy dialog after one-shot action dispatch (Yank, Get Holder) instead of re-showing main menu — matches the project's "process finished → dialog gone" convention. Clip/Unclip already followed this; Yank and Get Holder were the outliers.
+- v1.10 rev 19: Architectural split after recurring Mono stack-heap collisions in rev 18 (91.5% / 64KB even after consolidation). Pass/Offer/Coffle avatar picker + offer-reception dialog moved to new plugin_leash_avatar (context ui.core.leash.avatar). Post object picker + sensor scanning moved to new plugin_leash_object (context ui.core.leash.object). Both sub-plugins are hidden from kmod_ui's top menu (no plugin.reg.* write). plugin_leash now: main menu + Settings (length/turn/texture) + Get Holder + state sync + chat dispatch root + direct simple actions (Unclip/Yank/Take). Removed from plugin_leash: showPassMenu, buildAvatarMenu, startSensorScan, displayObjectMenu, showOfferDialog, handleOfferResponse, reorder_item_buttons, sensor/no_sensor events, plugin.leash.offer.pending handler, MenuContext branches for pass/coffle/post, OfferDialog* / SensorMode / SensorCandidates / SensorPage / IsOfferMode / LeashMode / LeashTarget globals. New delegateTo(sub_context, subpath) helper sends ui.menu.start to the appropriate sub-plugin and closes our current session.
+- v1.10 rev 18: Fix O(n²) heap pressure in SensorCandidates construction. Both sites (buildAvatarMenu, sensor event handler) now collect into a local list and assign to the global once after the loop. The local has refcount 1 inside the loop, so Mono can grow it in-place ~O(1) per step; appending directly to a global is O(n) per step because the global slot holds an extra reference. Worst case (96m sensor with hundreds of returns) drops from ~O(N²) heap churn to ~O(N).
+- v1.10 rev 17: Bytecode reduction pass after Mono stack-heap collision in rev 16 (~91.5%). (1) Consolidated showCoffleMenu + showPostMenu into one startSensorScan(mode, type_mask) helper — same shape, only the type bitmask differed. (2) Inlined three single-use helpers: sendSetTexture, cleanupOfferDialog, returnToRoot. (3) Compacted the 7-field plugin.leash.state field-read block by dropping unneeded braces on single-statement if bodies. No behavior change. Aimed to give plugin_leash runtime headroom against heap pressure during link_message dispatch.
+- v1.10 rev 16: Add Texture sub-menu under Settings — wearer picks Chain or Silk for the leash particle stream. New texture field in plugin.leash.state syncs LeashTexture from kmod_leash; Settings dialog body now displays the current selection; texture menu sends set_texture action with the chosen style. Returns to Settings menu after pick so the new selection is visible.
+- v1.10 rev 15: Post sensor mask drops ACTIVE (was PASSIVE|ACTIVE|SCRIPTED).
   ACTIVE matches avatars in llSensor, so the post picker was surfacing
   bystanders alongside hitching posts. Posts are stationary, so
   PASSIVE|SCRIPTED is sufficient.
-- v1.1 rev 14: Pass/Offer selection now matches the raw clicked button
+- v1.10 rev 14: Pass/Offer selection now matches the raw clicked button
   label (the listen message) against SensorCandidates instead of parsing
   "sel:<name>" out of the routing context. kmod_dialogs' storage_map
   context lookup was returning "" for avatar-name buttons, so the
@@ -39,7 +40,7 @@ CHANGES:
   label directly bypasses that lookup. handleButtonClick now takes
   (ctx, btn); ctx still routes nav/main/settings/length, btn handles
   name-based selection.
-- v1.1 rev 13: Sort sensor-driven candidate lists by name, and reorder
+- v1.10 rev 13: Sort sensor-driven candidate lists by name, and reorder
   the resulting buttons so they display top-to-bottom-left-to-right.
   Pass/Offer (buildAvatarMenu) now collects all nearby avatars, sorts
   alphabetically via llListSortStrided(SensorCandidates, 2, 0, TRUE),
@@ -48,48 +49,48 @@ CHANGES:
   llDialog's bottom-left-to-top-right grid so the visual order matches
   the sorted body text — this plugin talks to kmod_dialogs directly and
   bypasses kmod_menu's reorder, so it has to do the mapping itself.
-- v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 11: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 11: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
+- v1.10 rev 10: Self-declare menu presence via LSD (plugin.reg.<ctx>).
   Label updates write the same LSD key directly; ui.label.update link_messages
   are gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 9: Chat subcommands for coffle and post. Both reuse the
+- v1.10 rev 9: Chat subcommands for coffle and post. Both reuse the
   existing menu flow (showCoffleMenu / showPostMenu), so "leash coffle"
   and "leash post" each trigger a sensor scan and return a dialog to
   pick from — same UX as the menu buttons, just reachable from chat.
-- v1.1 rev 8: Chat command support (Phase 3). Registers "leash" alias.
+- v1.10 rev 8: Chat command support (Phase 3). Registers "leash" alias.
   "<prefix> leash" opens menu; subcommands: clip, unclip, turn,
   length <m>, pass <username>. Username resolved via llName2Key
   (avatar must be in-sim). kmod_leash does server-side ACL enforcement
   on the resulting plugin.leash.action, so no duplicate gating here.
-- v1.1 rev 7: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 7: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory, plugin.leash.offerpending→
   plugin.leash.offer.pending.
-- v1.1 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 6: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 5: Grant Unclip to ACL 1 (public) policy so a public user who
+- v1.10 rev 5: Grant Unclip to ACL 1 (public) policy so a public user who
   holds the leash can release it. The existing in-code guard still
   restricts the button to the current leasher at public level. Also
   make giveHolderObject tolerant of case and whitespace variations on
   the "Leash holder" inventory item name.
-- v1.1 rev 4: Namespace internal message type strings (kernel.*, ui.*, plugin.*).
-- v1.1 rev 3: Coffle now scans for nearby AVATARS instead of scripted
+- v1.10 rev 4: Namespace internal message type strings (kernel.*, ui.*, plugin.*).
+- v1.10 rev 3: Coffle now scans for nearby AVATARS instead of scripted
   objects. Was scanning SCRIPTED objects, which surfaced random in-world
   scripted props instead of avatars wearing collars. Switched the
   llSensor type to AGENT and updated the empty-result message to say
   "avatars". Post still uses object detection.
-- v1.1 rev 2: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
+- v1.10 rev 2: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
   factory reset clears cached leash state.
-- v1.1 rev 1: Migrate dialog buttons to button_data format with context-based routing.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 1: Migrate dialog buttons to button_data format with context-based routing.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded ALLOWED_ACL_* lists and inAllowedList() with policy reads.
   Button list built from get_policy_buttons() + state-dependent logic.
 --------------------*/

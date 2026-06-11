@@ -1,24 +1,25 @@
 /*--------------------
 PLUGIN: plugin_lock.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Toggle collar lock and RLV detach control labels
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
-- v1.1 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 14: PoC for single-writer settings protocol. persist_locked now sends a `settings.delta:lock.locked:<value>` CSV request to kmod_settings instead of writing LSD directly + emitting a settings.set JSON. kmod_settings is the sole LSD writer; we receive the resulting settings.sync broadcast and apply_settings_sync sees no-op because the in-memory Locked global is already in sync.
-- v1.1 rev 13: Toggle state now written to plugin.state.<ctx> in LSD
+- v1.10 rev 16: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 14: PoC for single-writer settings protocol. persist_locked now sends a `settings.delta:lock.locked:<value>` CSV request to kmod_settings instead of writing LSD directly + emitting a settings.set JSON. kmod_settings is the sole LSD writer; we receive the resulting settings.sync broadcast and apply_settings_sync sees no-op because the in-memory Locked global is already in sync.
+- v1.10 rev 13: Toggle state now written to plugin.state.<ctx> in LSD
   (via idempotent write_plugin_state helper) instead of pushed via
   ui.state.update link_message. kmod_ui rev 17 reads plugin.state.<ctx>
   live at render time, so the state-cache hop is gone. Reset handler
   now also deletes plugin.state.<ctx> alongside the other LSD cleanup.
-- v1.1 rev 12: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 12: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 11: Use the existing state-based label resolution path instead
+- v1.10 rev 11: Use the existing state-based label resolution path instead
   of writing labels to plugin.reg.<ctx> on every toggle. register_self now
   registers a buttonconfig (ui.dialog.buttonconfig.register) for the
   Locked:Y / Locked:N pair once, and emits ui.state.update with the
@@ -27,45 +28,45 @@ CHANGES:
   once at registration and then left alone. Eliminates the LSD write,
   linkset_data fire, debounce, and rebuild that used to happen on every
   single lock/unlock.
-- v1.1 rev 10: apply_settings_sync now plays the toggle sound on settings-
+- v1.10 rev 10: apply_settings_sync now plays the toggle sound on settings-
   driven state changes so notecard-reload lock/unlock events are audibly
   consistent with menu toggles. Paired with kmod_settings rev 9, which
   makes "Reload Settings" actually re-read the notecard — the sound now
   accompanies a real state change (e.g. wearer unlocked via menu, then
   reload re-applies lock.locked=1 from the notecard).
-- v1.1 rev 9: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 9: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>) instead
+- v1.10 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>) instead
   of relying on the kernel to broadcast the plugin list. Label updates write
   the same LSD key directly; ui.label.update link_messages are gone. Reset
   handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx> before
   llResetScript so kmod_ui drops the button as soon as the reset lands.
-- v1.1 rev 7: "lock locked"/"lock unlocked" chat subpaths no longer
+- v1.10 rev 7: "lock locked"/"lock unlocked" chat subpaths no longer
   trigger ui.menu.return (which was reopening root menu after a bare
   chat command). Label update is now sent without menu navigation for
   chat-originated state changes. Toggle (menu-click + bare "lock" chat)
   still returns to root, matching menu-click expectations.
-- v1.1 rev 6: Chat command support (Phase 3). Registers "lock" alias.
+- v1.10 rev 6: Chat command support (Phase 3). Registers "lock" alias.
   "<prefix> lock" toggles (same as menu click); "lock locked" /
   "lock unlocked" set state idempotently. All routes share the same
   btn_allowed("toggle") ACL gate.
-- v1.1 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory.
-- v1.1 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 3: Namespaced internal message types. All type strings now use
+- v1.10 rev 3: Namespaced internal message types. All type strings now use
   dot-delimited namespace convention (e.g. kernel.register, ui.label.update,
   settings.set). No behavioral changes.
-- v1.1 rev 2: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
+- v1.10 rev 2: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE so
   factory reset clears cached lock state.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
+- v1.10 rev 1: Migrate settings reads from JSON broadcast to direct LSD reads.
   Remove apply_settings_delta(); fold side effects into apply_settings_sync()
   via previous-state comparison. Both settings_sync and settings_delta call
   parameterless apply_settings_sync(). Remove settings_get request; call
   apply_settings_sync() directly from state_entry.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL and ACL checks in toggle_lock()
   with policy reads. Uses btn_allowed("toggle") for access control.
 --------------------*/

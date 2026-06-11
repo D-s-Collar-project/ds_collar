@@ -1,66 +1,67 @@
 /*--------------------
 PLUGIN: plugin_public.lsl
 VERSION: 1.10
-REVISION: 15
+REVISION: 16
 PURPOSE: Toggle public access mode directly from main menu
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
-- v1.1 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
-- v1.1 rev 14: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_public_mode sends `settings.delta:public.mode:<v>` instead of a JSON settings.set envelope.
-- v1.1 rev 13: persist_public_mode no longer pre-writes public.mode to LSD
+- v1.10 rev 16: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
+- v1.10 rev 15: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
+- v1.10 rev 14: Migrate to settings.delta CSV write protocol (kmod_settings rev 14 sole writer). persist_public_mode sends `settings.delta:public.mode:<v>` instead of a JSON settings.set envelope.
+- v1.10 rev 13: persist_public_mode no longer pre-writes public.mode to LSD
   before sending settings.set. The pre-write made kmod_settings.handle_set's
   idempotency guard short-circuit (LSD already matches the requested value),
   so broadcast_settings_changed never fired, kmod_auth never re-synced its
   PublicMode global, the per-avatar ACL cache never cleared, and toggling
   Public on/off had no observable effect on stranger access. kmod_settings
   is now the canonical writer for public.mode.
-- v1.1 rev 12: Toggle state now written to plugin.state.<ctx> in LSD
+- v1.10 rev 12: Toggle state now written to plugin.state.<ctx> in LSD
   (via idempotent write_plugin_state helper) instead of pushed via
   ui.state.update link_message. kmod_ui rev 17 reads plugin.state.<ctx>
   live at render time, so the state-cache hop is gone. Reset handler
   now also deletes plugin.state.<ctx> alongside the other LSD cleanup.
-- v1.1 rev 11: write_plugin_reg guards idempotent writes (read-before-
+- v1.10 rev 11: write_plugin_reg guards idempotent writes (read-before-
   write). Same-value re-registrations on state_entry and
   kernel.register.refresh no longer fire linkset_data, so kmod_ui's
   debounced rebuild + session invalidation stops triggering on
   register.refresh cascades — wearer's open menu survives the event.
-- v1.1 rev 10: Switch to state-based label resolution. register_self now
+- v1.10 rev 10: Switch to state-based label resolution. register_self now
   registers a buttonconfig for the Public:Y / Public:N pair via kmod_dialogs
   and emits ui.state.update with the current state. Toggle paths
   (set_public_mode, apply_settings_sync) send ui.state.update;
   plugin.reg.<ctx> is written once at registration and never rewritten on
   toggle. Removes the LSD write + linkset_data fire + debounce + rebuild
   that used to happen on every public-mode flip.
-- v1.1 rev 9: Add dormancy guard in state_entry — script parks itself
+- v1.10 rev 9: Add dormancy guard in state_entry — script parks itself
   if the prim's object description is "COLLAR_UPDATER" so it stays dormant
   when staged in an updater installer prim.
-- v1.1 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>). Label
+- v1.10 rev 8: Self-declare menu presence via LSD (plugin.reg.<ctx>). Label
   updates write the same LSD key directly; ui.label.update link_messages are
   gone. Reset handlers delete plugin.reg.<ctx> and acl.policycontext:<ctx>
   before llResetScript so kmod_ui drops the button immediately.
-- v1.1 rev 7: "public on"/"public off" chat subpaths no longer emit
+- v1.10 rev 7: "public on"/"public off" chat subpaths no longer emit
   ui.menu.return, which was popping up the root menu after a chat-only
   action. set_public_mode now uses send_label_update (label-only); the
   toggle path keeps the full menu-return for menu-click parity.
-- v1.1 rev 6: Chat command support (Phase 3). Registers "public" alias.
+- v1.10 rev 6: Chat command support (Phase 3). Registers "public" alias.
   "<prefix> public" toggles (same as menu click); "public on" /
   "public off" set state idempotently. All routes share the same
   btn_allowed("toggle") ACL gate.
-- v1.1 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
+- v1.10 rev 5: Wire-type rename (Phase 2). kernel.register→kernel.register.declare,
   kernel.registernow→kernel.register.refresh, kernel.reset→kernel.reset.soft,
   kernel.resetall→kernel.reset.factory.
-- v1.1 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
+- v1.10 rev 4: Guard ui.menu.start against raw kmod_chat broadcasts (no acl
   field). Fixes duplicate dialogs when commands are typed in chat.
-- v1.1 rev 3: Namespaced internal message types (kernel.register, settings.set, etc.).
-- v1.1 rev 2: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE.
+- v1.10 rev 3: Namespaced internal message types (kernel.register, settings.set, etc.).
+- v1.10 rev 2: Honor soft_reset / soft_reset_all from KERNEL_LIFECYCLE.
   Without this, factory reset wiped LSD but left PublicModeEnabled cached
   in the script globals, so the menu kept showing "Public: Y" and the
   registered label never updated until the next manual toggle.
-- v1.1 rev 1: Migrate settings reads from JSON broadcast payloads to direct
+- v1.10 rev 1: Migrate settings reads from JSON broadcast payloads to direct
   llLinksetDataRead. Remove apply_settings_delta — apply_settings_sync now
   compares previous state and calls register_self() on change.
-- v1.1 rev 0: Self-declares button visibility policy to LSD on registration.
+- v1.10 rev 0: Self-declares button visibility policy to LSD on registration.
   Replaces hardcoded PLUGIN_MIN_ACL with policy reads via
   get_policy_buttons() and btn_allowed(). Removed PLUGIN_MIN_ACL and
   min_acl from kernel registration message.
