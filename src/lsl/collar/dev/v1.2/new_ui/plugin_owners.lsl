@@ -179,9 +179,13 @@ write_plugin_reg(string label) {
 
 register_self() {
     // Write button visibility policy to LSD
+    // Level 2 (owned wearer) is Runaway-only BY DESIGN: an owned wearer
+    // cannot add owners — additional owners only enter via multi-owner
+    // mode in the settings notecard. Level 4 (unowned wearer) keeps
+    // Add Owner: that's how the first owner is set.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
-        "2", "Add Owner,Runaway",
-        "3", "Add Trustee,Rem Trustee,Release,Runaway: On,Runaway: Off",
+        "2", "Runaway",
+        "3", "Add Trustee,Rem Trustee,Release",
         "4", "Add Owner,Runaway,Add Trustee,Rem Trustee",
         "5", "Transfer,Release,Runaway: On,Runaway: Off,Add Trustee,Rem Trustee"
     ]));

@@ -303,7 +303,10 @@ rebuild_views() {
         integer cn = llGetListLength(cats);
         while (ci < cn) {
             string cname = llList2String(cats, ci);
-            root_pairs += [llList2Json(JSON_ARRAY, [CAT_CTX_PREFIX + cname, cname])];
+            // Category buttons read "Access..." — the ellipsis signals a
+            // drill-down. The category page title stays the bare name
+            // (kmod_menu titles from the session's category field).
+            root_pairs += [llList2Json(JSON_ARRAY, [CAT_CTX_PREFIX + cname, cname + "..."])];
             ci += 1;
         }
         root_pairs += standalone_pairs;

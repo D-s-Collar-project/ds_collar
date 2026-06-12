@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_access.lsl
 VERSION: 1.10
-REVISION: 16
+REVISION: 18
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.10 rev 18: ACL 3 (trustee) loses the Runaway: On/Off toggles — enabling/disabling the wearer's runaway right is an owner decision (level 5 keeps them).
+- v1.10 rev 17: ACL 2 policy fixed to Runaway-only (was "Add Owner,Runaway"). An owned wearer cannot add owners by design — additional owners only enter via multi-owner mode in the settings notecard; level 4 (unowned wearer) keeps Add Owner for setting the first owner. Closes a privilege leak where the owned wearer could open the Add Owner flow.
 - v1.10 rev 16: Dormancy guard widened to the renamed role-split markers ("D/s Collar updater v1.1" / "(updating)" / "(installing)").
 - v1.10 rev 15: Bytecode compaction pass against the 92.9%-of-Mono-budget headroom warning. Two helpers: `open_numbered_dialog(target, ctx, title, prompt, items)` collapses three numbered-list dialog-open sites (show_candidates, show_honorific, show_remove_trustee); `show_confirm(target, ctx, title, body)` extended to take a target and collapse six inline Yes/No dialog-open boilerplates in handle_button (set_select, set_hon, transfer_select, release_owner, trustee_select, runaway_disable_confirm) plus the two pre-existing release/runaway call sites. No behaviour change — same SessionId / MenuContext / message shape. If the analyzer still flags the script as too close to the Mono wall after this, fall back to the split path (extract plugin_access_owner / plugin_access_trustee).
 - v1.10 rev 14: Drop dead `|| msg_type == "settings.delta"` consumer clause — kmod_settings only broadcasts settings.sync; settings.delta is now inbound-CSV-only.
@@ -223,9 +225,13 @@ write_plugin_reg(string label) {
 
 register_self() {
     // Write button visibility policy to LSD
+    // Level 2 (owned wearer) is Runaway-only BY DESIGN: an owned wearer
+    // cannot add owners — additional owners only enter via multi-owner
+    // mode in the settings notecard. Level 4 (unowned wearer) keeps
+    // Add Owner: that's how the first owner is set.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
-        "2", "Add Owner,Runaway",
-        "3", "Add Trustee,Rem Trustee,Release,Runaway: On,Runaway: Off",
+        "2", "Runaway",
+        "3", "Add Trustee,Rem Trustee,Release",
         "4", "Add Owner,Runaway,Add Trustee,Rem Trustee",
         "5", "Transfer,Release,Runaway: On,Runaway: Off,Add Trustee,Rem Trustee"
     ]));
