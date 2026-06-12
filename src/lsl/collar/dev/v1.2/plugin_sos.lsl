@@ -52,11 +52,18 @@ integer btn_allowed(string label) {
 
 // Self-declared menu presence. kmod_ui enumerates via llLinksetDataFindKeys
 // and rebuilds its view tables on linkset_data events touching this key.
+// v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
+// visible at ACL level L). Consumed by kmod_ui's view rebuild.
+string PLUGIN_CATEGORY = "SOS";
+integer PLUGIN_ACL_MASK = 5;
+
 write_plugin_reg(string label) {
-    string k = "plugin.reg." + PLUGIN_CONTEXT;
+    string k = "reg." + PLUGIN_CONTEXT;
     string v = llList2Json(JSON_OBJECT, [
+        "cat",    PLUGIN_CATEGORY,
         "label",  label,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "mask",   PLUGIN_ACL_MASK
     ]);
     // Skip the write (and its linkset_data event) when the stored value
     // is already what we would write. Idempotent re-registrations on
@@ -412,7 +419,7 @@ default {
                     }
                 }
                 // Either no context (broadcast) or matches our context
-                llLinksetDataDelete("plugin.reg." + PLUGIN_CONTEXT);
+                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
                 llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
                 llResetScript();
             }

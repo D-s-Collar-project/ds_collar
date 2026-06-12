@@ -179,14 +179,19 @@ handle_dialog_open(string msg) {
     key user = (key)llJsonGetValue(msg, ["user"]);
 
     // Check for numbered list type
-    if ((llJsonGetValue(msg, ["dialog_type"]) != JSON_INVALID) && llJsonGetValue(msg, ["dialog_type"]) == "numbered_list") {
+    string dialog_type = llJsonGetValue(msg, ["dialog_type"]);
+    if (dialog_type != JSON_INVALID && dialog_type == "numbered_list") {
         handle_numbered_list_dialog(msg, session_id, user);
         return;
     }
 
     // Standard dialog - check for button_data (new format) or buttons (old format)
     list buttons = [];
-    list storage_map = []; // List of JSON objects for storage [{"b":"btn", "c":"ctx"}]
+    // Click map stored as two parallel JSON arrays {"b":[labels],"c":[ctxs]}
+    // so the listen handler resolves a click with one llListFindList on the
+    // labels instead of per-entry JSON object parsing (hot path). buttons
+    // doubles as the labels array.
+    list map_ctxs = [];
 
     if ((llJsonGetValue(msg, ["button_data"]) != JSON_INVALID)) {
         // New format: button_data contains mixed array of strings and objects
@@ -240,24 +245,20 @@ handle_dialog_open(string msg) {
             }
 
             buttons += [button_text];
-            
-            // ROBUST FIX: Store as JSON object to handle special chars and empty contexts safely
-            storage_map += [llList2Json(JSON_OBJECT, ["b", button_text, "c", button_context])];
-            
+            map_ctxs += [button_context];
+
             i++;
         }
     }
     else if ((llJsonGetValue(msg, ["buttons"]) != JSON_INVALID)) {
-        // Old format: buttons is array of strings
+        // Old format: buttons is array of strings (no routing contexts)
         string buttons_json = llJsonGetValue(msg, ["buttons"]);
         buttons = llJson2List(buttons_json);
 
-        // Build storage map for old format
         integer i = 0;
         integer len = llGetListLength(buttons);
         while (i < len) {
-            string btn = llList2String(buttons, i);
-            storage_map += [llList2Json(JSON_OBJECT, ["b", btn, "c", ""])];
+            map_ctxs += [""];
             i++;
         }
     }
@@ -313,8 +314,11 @@ handle_dialog_open(string msg) {
     SessionChannels += [channel];
     SessionListens += [listen_handle];
     SessionTimeouts += [timeout_unix];
-    // Store map as JSON array string
-    SessionButtonMaps += [llList2Json(JSON_ARRAY, storage_map)];
+    // Store map as {"b":[labels],"c":[ctxs]} (parallel arrays)
+    SessionButtonMaps += [llList2Json(JSON_OBJECT, [
+        "b", llList2Json(JSON_ARRAY, buttons),
+        "c", llList2Json(JSON_ARRAY, map_ctxs)
+    ])];
 
     // Show dialog
     llDialog(user, title + "\n\n" + message, buttons, channel);
@@ -393,13 +397,12 @@ handle_numbered_list_dialog(string msg, string session_id, key user) {
         timeout_unix = now() + timeout;
     }
 
-    // Build storage map for numbered list (buttons have no context)
-    list storage_map = [];
+    // Numbered-list buttons carry no routing contexts.
+    list map_ctxs = [];
     integer j = 0;
     integer btn_len = llGetListLength(buttons);
     while (j < btn_len) {
-        string btn = llList2String(buttons, j);
-        storage_map += [llList2Json(JSON_OBJECT, ["b", btn, "c", ""])];
+        map_ctxs += [""];
         j++;
     }
 
@@ -409,7 +412,10 @@ handle_numbered_list_dialog(string msg, string session_id, key user) {
     SessionChannels += [channel];
     SessionListens += [listen_handle];
     SessionTimeouts += [timeout_unix];
-    SessionButtonMaps += [llList2Json(JSON_ARRAY, storage_map)];
+    SessionButtonMaps += [llList2Json(JSON_OBJECT, [
+        "b", llList2Json(JSON_ARRAY, buttons),
+        "c", llList2Json(JSON_ARRAY, map_ctxs)
+    ])];
 
     // Show dialog
     llDialog(user, title + "\n\n" + body, buttons, channel);
@@ -459,27 +465,17 @@ default
             // Verify speaker matches session user
             if (id == session_user) {
                 string session_id = llList2String(SessionIDs, i);
-                
-                // Retrieve JSON button map string
-                string button_map_json = llList2String(SessionButtonMaps, i);
-                
-                // Parse JSON array of objects: [{"b":"btn","c":"ctx"}, ...]
-                list button_map = llJson2List(button_map_json);
 
-                // Look up context for this button
+                // Map is {"b":[labels],"c":[ctxs]} — resolve the click with
+                // one list search instead of per-entry JSON object parsing.
+                string button_map_json = llList2String(SessionButtonMaps, i);
+                list map_labels = llJson2List(llJsonGetValue(button_map_json, ["b"]));
                 string clicked_context = "";
-                integer j = 0;
-                integer map_len = llGetListLength(button_map);
-                while (j < map_len) {
-                    string entry = llList2String(button_map, j);
-                    // Check if button label matches message
-                    if (llJsonGetValue(entry, ["b"]) == message) {
-                        clicked_context = llJsonGetValue(entry, ["c"]);
-                        jump found_context;
-                    }
-                    j++;
+                integer j = llListFindList(map_labels, [message]);
+                if (j != -1) {
+                    string ctx_val = llJsonGetValue(button_map_json, ["c", j]);
+                    if (ctx_val != JSON_INVALID) clicked_context = ctx_val;
                 }
-                @found_context;
 
                 // Send response message with context
                 string response = llList2Json(JSON_OBJECT, [

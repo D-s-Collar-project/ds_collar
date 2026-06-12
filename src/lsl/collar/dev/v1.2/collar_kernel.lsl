@@ -274,7 +274,7 @@ integer prune_dead_plugins() {
 }
 
 // Remove plugins whose scripts no longer exist in inventory.
-// Also sweeps orphaned plugin.reg.<ctx> and acl.policycontext:<ctx> LSD
+// Also sweeps orphaned reg.<ctx> and acl.policycontext:<ctx> LSD
 // entries whose owning script is gone — the plugin can't run its own
 // cleanup in that case, so the kernel prunes on its behalf.
 integer prune_missing_scripts() {
@@ -296,10 +296,10 @@ integer prune_missing_scripts() {
         i -= REG_STRIDE;
     }
 
-    // LSD sweep: any plugin.reg.<ctx> whose embedded script is no longer in
+    // LSD sweep: any reg.<ctx> whose embedded script is no longer in
     // inventory gets deleted, along with its ACL policy sibling. kmod_ui's
     // linkset_data handler picks up the deletions and rebuilds views.
-    list reg_keys = llLinksetDataFindKeys("^plugin\\.reg\\.", 0, -1);
+    list reg_keys = llLinksetDataFindKeys("^reg\\.", 0, -1);
     integer rk_len = llGetListLength(reg_keys);
     integer j = 0;
     while (j < rk_len) {
@@ -307,7 +307,7 @@ integer prune_missing_scripts() {
         string entry = llLinksetDataRead(k);
         string scr = llJsonGetValue(entry, ["script"]);
         if (scr != JSON_INVALID && llGetInventoryType(scr) != INVENTORY_SCRIPT) {
-            string ctx = llGetSubString(k, 11, -1);  // strip "plugin.reg." prefix
+            string ctx = llGetSubString(k, 4, -1);  // strip "reg." prefix
             llLinksetDataDelete(k);
             llLinksetDataDelete("acl.policycontext:" + ctx);
         }
@@ -531,7 +531,7 @@ default
                 LastPingUnix = t;
             }
 
-            // Periodic inventory sweep: also cleans up orphaned plugin.reg.*
+            // Periodic inventory sweep: also cleans up orphaned reg.*
             // and acl.policycontext:* LSD entries (see prune_missing_scripts).
             integer inv_elapsed = t - LastInvSweepUnix;
             if (inv_elapsed < 0) inv_elapsed = 0; // Overflow protection

@@ -5,7 +5,7 @@ REVISION: 0
 PURPOSE: Unified hidden target-picker for all targeted leash flows. Merges the
          former plugin_leash_avatar (Clip/Pass/Offer/Coffle + offer reception)
          and plugin_leash_object (Post). One picker, two sources.
-ARCHITECTURE: Hidden helper of plugin_leash (no plugin.reg.*, so kmod_ui never
+ARCHITECTURE: Hidden helper of plugin_leash (no reg.* entry, so kmod_ui never
               lists it). Receives ui.menu.start with context
               "ui.core.leash.target" + subpath:
                 clip               -> grab immediately (no picker)
@@ -346,7 +346,7 @@ default
         OfferDialogSession = "";
         OfferTarget = NULL_KEY;
         OfferOriginator = NULL_KEY;
-        // NB: deliberately no plugin.reg.* write — hidden from kmod_ui's top
+        // NB: deliberately no reg.* write — hidden from kmod_ui's top
         // menu; only plugin_leash dispatches to us via ui.menu.start.
     }
 

@@ -2,8 +2,23 @@
 MODULE: kmod_ui.lsl
 VERSION: 1.2
 REVISION: 0
-PURPOSE: Session management, LSD policy filtering, and plugin list orchestration
-ARCHITECTURE: Consolidated message bus lanes
+PURPOSE: Session management, categorized per-ACL menu views (LSD-resident),
+         and plugin dispatch orchestration
+ARCHITECTURE: BIND9-style views. Each plugin self-declares one LSD entry
+  reg.<ctx> = {"cat","label","script","mask"} where mask bit L = visible at
+  ACL level L. On any reg.* change a debounced rebuild composes one
+  precomputed view per ACL level and stores it in LSD:
+    ui.view.<acl>      = {"root":[[ctx,label],...], "<Cat>":[[ctx,label],...]}
+    ui.view.<acl>.sos  = [[ctx,label],...]          (ui.sos.* contexts)
+  Root tier = category buttons (context "cat:<Name>", alphabetical) followed
+  by Standalone plugins (alphabetical). cat "Standalone" renders directly in
+  root; empty/missing cat groups under "Other"; ui.sos.* prefix routes to
+  the SOS view regardless of cat. Per touch: one LSD read (the toucher's
+  view) fully describes the menu — no recompute, and views survive a script
+  reset. ACL itself comes from kmod_auth's acl.<uuid>.cache as before.
+  acl.policycontext:<ctx> is NOT used for menu visibility any more — it
+  remains the per-button policy store inside plugins, and dispatch still
+  re-checks it as the authorization gate.
 --------------------*/
 
 
@@ -21,8 +36,6 @@ integer MAX_FUNC_BTNS = 9;
 float TOUCH_RANGE_M = 5.0;
 float LONG_TOUCH_THRESHOLD = 1.5;
 
-/* Plugin list stride removed in v1.1 — no min_acl in plugin data */
-
 integer MAX_SESSIONS = 5;
 integer SESSION_MAX_AGE = 60;  // Seconds before ACL refresh required
 
@@ -33,12 +46,29 @@ integer SESSION_MAX_AGE = 60;  // Seconds before ACL refresh required
 string LSD_ACL_CACHE_PREFIX = "acl.";
 string LSD_ACL_CACHE_SUFFIX = ".cache";
 
-// Per-plugin self-declared menu presence. Written by plugins during
-// registration: plugin.reg.<context> = {"label":"<label>","script":"<script_name>"}.
+// Per-plugin self-declared registry entry. Written by plugins during
+// registration: reg.<context> = {"cat","label","script","mask"}.
 // kmod_ui enumerates via llLinksetDataFindKeys; plugins delete their own
 // entries on soft/factory reset, and the kernel sweeps orphans when scripts
 // are removed from inventory. CROSS-MODULE CONTRACT.
-string LSD_PLUGIN_REG_PREFIX = "plugin.reg.";
+string LSD_REG_PREFIX = "reg.";
+
+// Per-ACL precomputed menu views, owned (derived state) by this module.
+string LSD_VIEW_PREFIX = "ui.view.";
+
+// Category button contexts are "cat:<Name>"; plugin contexts are ui.* so
+// the namespaces can never collide.
+string CAT_CTX_PREFIX = "cat:";
+
+// Reserved category names. "Standalone" renders the plugin directly in the
+// root menu; entries with no/empty cat group under "Other".
+string CAT_STANDALONE = "Standalone";
+string CAT_OTHER = "Other";
+
+// ACL levels that get a view. -1 (blacklist) never has one — absence of a
+// view IS the barred state, handled by the empty-menu message paths.
+integer VIEW_LEVEL_MIN = 0;
+integer VIEW_LEVEL_MAX = 5;
 
 // Debounce window for linkset_data-driven rebuilds. Small enough to feel
 // instantaneous; large enough to collapse the bootstrap burst of N plugins
@@ -48,18 +78,14 @@ float REBUILD_DEBOUNCE = 0.1;
 /* ACL levels (mirrors auth module) */
 integer ACL_BLACKLIST = -1;
 
+// Sentinel for "no cached ACL" (-1 is a real level).
+integer ACL_NONE = -999;
+
 
 /* -------------------- STATE -------------------- */
-// Parallel Lists for Plugins
+// Registered plugin contexts (chat dispatch + click validation). Labels,
+// categories and masks live in the LSD views — not duplicated in heap.
 list PluginContexts;
-list PluginLabels;
-
-// View tables: pre-computed per-(acl_level, context) filtered plugin index lists.
-// Built once when the plugin list is received; zero LSD reads per touch.
-// Parallel to VIEW_ACL_LEVELS; each entry is a JSON array of plugin indices.
-list VIEW_ACL_LEVELS = [-1, 0, 1, 2, 3, 4, 5];  // CONSTANT — do not modify at runtime
-list ViewRootIndices;  // root-menu plugin indices per ACL level
-list ViewSosIndices;   // SOS-menu plugin indices per ACL level
 
 // Parallel Lists for Sessions
 list SessionUsers;
@@ -69,7 +95,8 @@ list SessionPages;
 list SessionTotalPages;
 list SessionIDs;
 list SessionCreatedTimes;
-list SessionContexts;
+list SessionContexts;    // ROOT_CONTEXT or SOS_CONTEXT
+list SessionCategories;  // "" = root tier; "<Cat>" = inside that category
 
 // Parallel Lists for Pending ACL
 list PendingAclAvatars;
@@ -79,15 +106,11 @@ list PendingAclContexts;
 list TouchKeys;
 list TouchStartTimes;
 
-// Debounce flag for linkset_data-driven rebuilds. When a plugin.reg.* write
-// fires, the handler sets this and arms the timer; the timer event calls
-// rebuild_plugin_list_from_lsd() once, regardless of how many writes landed
-// during the debounce window.
+// Debounce flag for linkset_data-driven rebuilds.
 integer ViewsStale = FALSE;
 
 
 /* -------------------- HELPERS -------------------- */
-
 
 string get_msg_type(string msg) {
     string t = llJsonGetValue(msg, ["type"]);
@@ -95,7 +118,6 @@ string get_msg_type(string msg) {
     return t;
 }
 
-// MEMORY OPTIMIZATION: Compact field validation helper
 integer validate_required_fields(string json_str, list field_names) {
     integer i = 0;
     integer len = llGetListLength(field_names);
@@ -115,25 +137,25 @@ string generate_session_id(key user) {
 
 /* -------------------- ACL CACHE MANAGEMENT -------------------- */
 
-// Reads the pre-computed ACL result written by kmod_auth into LSD.
-// kmod_auth populates acl.<uuid>.cache for all named actors on every settings
-// load/change via precompute_known_acl(). This path costs one LSD read and
-// zero link_messages. Falls through to AUTH_BUS only on a true cold miss
-// (unknown user whose entry was never written or has been cleared).
-integer try_cached_session(key user_key, string context_filter) {
+// Parse kmod_auth's per-user ACL cache entry. Returns the level, or
+// ACL_NONE on miss/stale (entry older than the acl.timestamp epoch).
+// Single parser shared by the touch and chat dispatch paths.
+integer read_cached_acl(key user_key) {
     string raw = llLinksetDataRead(LSD_ACL_CACHE_PREFIX + (string)user_key + LSD_ACL_CACHE_SUFFIX);
-    if (raw == "") return FALSE;
+    if (raw == "") return ACL_NONE;
     integer sep = llSubStringIndex(raw, "|");
-    if (sep == -1) return FALSE;
-    // Reject entries older than the last settings change (stale cache,
-    // e.g. if the wipe chain regresses). Fall through to AUTH_BUS query.
+    if (sep == -1) return ACL_NONE;
     integer cache_ts = (integer)llGetSubString(raw, sep + 1, -1);
     integer global_ts = (integer)llLinksetDataRead("acl.timestamp");
-    if (cache_ts < global_ts) return FALSE;
-    integer level = (integer)llGetSubString(raw, 0, sep - 1);
-    integer is_blacklisted = (level == ACL_BLACKLIST);
-    create_session(user_key, level, is_blacklisted, context_filter);
-    send_render_menu(user_key, context_filter);
+    if (cache_ts < global_ts) return ACL_NONE;
+    return (integer)llGetSubString(raw, 0, sep - 1);
+}
+
+integer try_cached_session(key user_key, string context_filter) {
+    integer level = read_cached_acl(user_key);
+    if (level == ACL_NONE) return FALSE;
+    create_session(user_key, level, (level == ACL_BLACKLIST), context_filter);
+    render_session(user_key);
     return TRUE;
 }
 
@@ -147,27 +169,11 @@ integer find_session_idx(key user) {
     return llListFindList(SessionUsers, [user]);
 }
 
-list get_session_filtered_indices(integer session_idx) {
-    integer acl = llList2Integer(SessionACLs, session_idx);
-    string ctx = llList2String(SessionContexts, session_idx);
-    integer view_idx = llListFindList(VIEW_ACL_LEVELS, [acl]);
-    if (view_idx == -1) return [];
-    string json_array;
-    if (ctx == SOS_CONTEXT) {
-        json_array = llList2String(ViewSosIndices, view_idx);
-    }
-    else {
-        json_array = llList2String(ViewRootIndices, view_idx);
-    }
-    if (json_array == "" || json_array == "[]") return [];
-    return llJson2List(json_array);
-}
-
 cleanup_session(key user) {
     integer idx = find_session_idx(user);
     if (idx == -1) return;
 
-    // BUGFIX: Close dialog before cleaning up session
+    // Close dialog before cleaning up session
     string session_id = llList2String(SessionIDs, idx);
     string close_msg = llList2Json(JSON_OBJECT, [
         "type", "ui.dialog.close",
@@ -175,7 +181,6 @@ cleanup_session(key user) {
     ]);
     llMessageLinked(LINK_SET, DIALOG_BUS, close_msg, NULL_KEY);
 
-    // Remove session from parallel lists
     SessionUsers = llDeleteSubList(SessionUsers, idx, idx);
     SessionACLs = llDeleteSubList(SessionACLs, idx, idx);
     SessionBlacklisted = llDeleteSubList(SessionBlacklisted, idx, idx);
@@ -184,6 +189,7 @@ cleanup_session(key user) {
     SessionIDs = llDeleteSubList(SessionIDs, idx, idx);
     SessionCreatedTimes = llDeleteSubList(SessionCreatedTimes, idx, idx);
     SessionContexts = llDeleteSubList(SessionContexts, idx, idx);
+    SessionCategories = llDeleteSubList(SessionCategories, idx, idx);
 }
 
 create_session(key user, integer acl, integer is_blacklisted, string context_filter) {
@@ -197,8 +203,6 @@ create_session(key user, integer acl, integer is_blacklisted, string context_fil
         cleanup_session(oldest_user);
     }
 
-    // Views supply filtered indices — no per-session policy scan needed.
-    // Track session creation time
     string session_id = generate_session_id(user);
     integer created_time = llGetUnixTime();
 
@@ -210,66 +214,142 @@ create_session(key user, integer acl, integer is_blacklisted, string context_fil
     SessionIDs += [session_id];
     SessionCreatedTimes += [created_time];
     SessionContexts += [context_filter];
+    SessionCategories += [""];
 }
 
-/* -------------------- PLUGIN LIST MANAGEMENT -------------------- */
+/* -------------------- VIEW REBUILD (registry -> LSD views) -------------------- */
 
-// Enumerate plugin.reg.* keys from LSD and rebuild the parallel plugin
-// lists + view tables. Called from the debounced timer after a linkset_data
-// event (or from state_entry to prime initial state).
-//
-// Per-plugin cost: one key enumeration + one LSD read + one JSON parse for
-// the label. No large intermediate envelope is ever materialised, so the
-// per-event frame stays flat regardless of plugin count.
-rebuild_plugin_list_from_lsd() {
-    PluginContexts = [];
-    PluginLabels = [];
-    ViewRootIndices = [];
-    ViewSosIndices = [];
+// Enumerate reg.* and recompose one precomputed view per ACL level into LSD.
+// Called from the debounced timer after a linkset_data event (or from
+// state_entry to prime initial state). Visibility is a pure mask test —
+// no policy JSON is parsed here.
+rebuild_views() {
+    // Wipe stale view keys first so categories/levels that disappeared
+    // don't linger.
+    list old = llLinksetDataFindKeys("^ui\\.view\\.", 0, -1);
+    integer oi = 0;
+    integer on = llGetListLength(old);
+    while (oi < on) {
+        llLinksetDataDelete(llList2String(old, oi));
+        oi += 1;
+    }
 
-    list keys = llLinksetDataFindKeys("^plugin\\.reg\\.", 0, -1);
-    integer prefix_len = llStringLength(LSD_PLUGIN_REG_PREFIX);
-    integer n = llGetListLength(keys);
-
-    // Collect into a strided [context, label, ...] list so we can sort by
-    // the label (what the wearer reads on the button) rather than by the
-    // context key (which may differ — e.g. plugin_access's context is
-    // "ui.core.owner" but its label is "Access"; sorting by context puts
-    // Access between Maintenance and Public, which is wrong).
-    list temp = [];
-    integer SORT_STRIDE = 2;
+    // Registry table, strided [label, ctx, cat, mask], label-sorted so
+    // member lists come out in reading order for free.
+    list keys = llLinksetDataFindKeys("^reg\\.", 0, -1);
+    integer prefix_len = llStringLength(LSD_REG_PREFIX);
+    list tab = [];
     integer i = 0;
+    integer n = llGetListLength(keys);
     while (i < n) {
         string k = llList2String(keys, i);
         string entry = llLinksetDataRead(k);
         string label = llJsonGetValue(entry, ["label"]);
         if (label != JSON_INVALID) {
-            temp += [llGetSubString(k, prefix_len, -1), label];
+            string cat = llJsonGetValue(entry, ["cat"]);
+            if (cat == JSON_INVALID) cat = "";
+            integer mask = (integer)llJsonGetValue(entry, ["mask"]);
+            tab += [label, llGetSubString(k, prefix_len, -1), cat, mask];
         }
-        i++;
+        i += 1;
     }
-
-    // Sort by label (stride_index 1). Stable across reboots because label
-    // is set in register_self from a constant string per plugin.
-    if (llGetListLength(temp) > SORT_STRIDE) {
-        temp = llListSortStrided(temp, SORT_STRIDE, 1, TRUE);
+    integer stride = 4;
+    if (llGetListLength(tab) > stride) {
+        tab = llListSortStrided(tab, stride, 0, TRUE);
     }
+    integer rows = llGetListLength(tab) / stride;
 
-    // Split into parallel lists used by build_views / send_render_menu.
-    integer len = llGetListLength(temp);
+    // Contexts cached in heap for chat dispatch + click validation only.
+    PluginContexts = [];
     i = 0;
-    while (i < len) {
-        PluginContexts += [llList2String(temp, i)];
-        PluginLabels   += [llList2String(temp, i + 1)];
-        i += SORT_STRIDE;
+    while (i < rows) {
+        PluginContexts += [llList2String(tab, i * stride + 1)];
+        i += 1;
     }
 
-    build_views();
+    // Compose one view per ACL level.
+    integer lvl = VIEW_LEVEL_MIN;
+    while (lvl <= VIEW_LEVEL_MAX) {
+        list sos_pairs = [];
+        list standalone_pairs = [];   // already label-ordered (tab is sorted)
+        list cats = [];               // distinct visible category names
+
+        i = 0;
+        while (i < rows) {
+            integer base = i * stride;
+            integer mask = llList2Integer(tab, base + 3);
+            if (mask & (1 << lvl)) {
+                string label = llList2String(tab, base);
+                string ctx = llList2String(tab, base + 1);
+                string cat = llList2String(tab, base + 2);
+                if (llSubStringIndex(ctx, SOS_PREFIX) == 0) {
+                    sos_pairs += [llList2Json(JSON_ARRAY, [ctx, label])];
+                }
+                else if (cat == CAT_STANDALONE) {
+                    standalone_pairs += [llList2Json(JSON_ARRAY, [ctx, label])];
+                }
+                else {
+                    if (cat == "") cat = CAT_OTHER;
+                    if (llListFindList(cats, [cat]) == -1) cats += [cat];
+                }
+            }
+            i += 1;
+        }
+
+        // Root tier order: categories A-Z first, then Standalone plugins A-Z.
+        cats = llListSort(cats, 1, TRUE);
+        list root_pairs = [];
+        integer ci = 0;
+        integer cn = llGetListLength(cats);
+        while (ci < cn) {
+            string cname = llList2String(cats, ci);
+            // Category buttons read "Access..." — the ellipsis signals a
+            // drill-down. The category page title stays the bare name
+            // (kmod_menu titles from the session's category field).
+            root_pairs += [llList2Json(JSON_ARRAY, [CAT_CTX_PREFIX + cname, cname + "..."])];
+            ci += 1;
+        }
+        root_pairs += standalone_pairs;
+
+        // Assemble the view object: "root" + one key per category.
+        list obj = [];
+        if (llGetListLength(root_pairs) > 0) {
+            obj += ["root", llList2Json(JSON_ARRAY, root_pairs)];
+        }
+        ci = 0;
+        while (ci < cn) {
+            string cname2 = llList2String(cats, ci);
+            list members = [];
+            i = 0;
+            while (i < rows) {
+                integer b2 = i * stride;
+                if (llList2Integer(tab, b2 + 3) & (1 << lvl)) {
+                    string mctx = llList2String(tab, b2 + 1);
+                    string mcat = llList2String(tab, b2 + 2);
+                    if (mcat == "") mcat = CAT_OTHER;
+                    if (mcat == cname2 && llSubStringIndex(mctx, SOS_PREFIX) != 0
+                        && mcat != CAT_STANDALONE) {
+                        members += [llList2Json(JSON_ARRAY, [mctx, llList2String(tab, b2)])];
+                    }
+                }
+                i += 1;
+            }
+            obj += [cname2, llList2Json(JSON_ARRAY, members)];
+            ci += 1;
+        }
+
+        if (llGetListLength(obj) > 0) {
+            llLinksetDataWrite(LSD_VIEW_PREFIX + (string)lvl, llList2Json(JSON_OBJECT, obj));
+        }
+        if (llGetListLength(sos_pairs) > 0) {
+            llLinksetDataWrite(LSD_VIEW_PREFIX + (string)lvl + ".sos", llList2Json(JSON_ARRAY, sos_pairs));
+        }
+        lvl += 1;
+    }
 }
 
 // Arm the debounce timer. Multiple linkset_data writes within the window
-// collapse to a single rebuild; during bootstrap this absorbs the N plugins
-// registering back-to-back.
+// collapse to a single rebuild.
 schedule_rebuild() {
     if (!ViewsStale) {
         ViewsStale = TRUE;
@@ -277,81 +357,11 @@ schedule_rebuild() {
     }
 }
 
-// Builds the view tables for all ACL levels and both menu contexts.
-// Called once after apply_plugin_list(). Per-touch cost: zero LSD reads.
-build_views() {
-    ViewRootIndices = [];
-    ViewSosIndices = [];
-
-    integer num_levels = llGetListLength(VIEW_ACL_LEVELS);
-    integer plugin_count = llGetListLength(PluginContexts);
-
-    // Per-level CSV accumulators of matching plugin indices. Two strings per
-    // level instead of two lists, keeping heap pressure down during the fan-out.
-    list root_csv = [];
-    list sos_csv  = [];
-    integer lv = 0;
-    while (lv < num_levels) {
-        root_csv += [""];
-        sos_csv  += [""];
-        lv++;
-    }
-
-    // Iterate plugins once — read each policy from LSD a single time and
-    // fan out across levels from the cached string. Previous version read
-    // the same policy num_levels times (7×), which dominated heap churn on
-    // plugin_list arrival.
-    integer i = 0;
-    while (i < plugin_count) {
-        string ctx = llList2String(PluginContexts, i);
-        string policy = llLinksetDataRead("acl.policycontext:" + ctx);
-        if (policy != "") {
-            integer is_sos_plugin = (llSubStringIndex(ctx, SOS_PREFIX) == 0);
-            lv = 0;
-            while (lv < num_levels) {
-                integer acl = llList2Integer(VIEW_ACL_LEVELS, lv);
-                if (llJsonGetValue(policy, [(string)acl]) != JSON_INVALID) {
-                    if (is_sos_plugin) {
-                        string cur = llList2String(sos_csv, lv);
-                        if (cur == "") cur = (string)i;
-                        else cur += "," + (string)i;
-                        sos_csv = llListReplaceList(sos_csv, [cur], lv, lv);
-                    }
-                    else {
-                        string cur = llList2String(root_csv, lv);
-                        if (cur == "") cur = (string)i;
-                        else cur += "," + (string)i;
-                        root_csv = llListReplaceList(root_csv, [cur], lv, lv);
-                    }
-                }
-                lv++;
-            }
-        }
-        i++;
-    }
-
-    // Convert CSVs to JSON arrays for per-touch view lookup. Guard empty
-    // strings: llCSV2List("") returns [""] (a phantom entry), not [].
-    lv = 0;
-    while (lv < num_levels) {
-        string r = llList2String(root_csv, lv);
-        string s = llList2String(sos_csv, lv);
-        if (r == "") ViewRootIndices += ["[]"];
-        else ViewRootIndices += [llList2Json(JSON_ARRAY, llCSV2List(r))];
-        if (s == "") ViewSosIndices += ["[]"];
-        else ViewSosIndices += [llList2Json(JSON_ARRAY, llCSV2List(s))];
-        lv++;
-    }
-}
-
-// apply_plugin_acl_list removed in v1.1 — ACL filtering via LSD policies
-
 /* -------------------- MENU RENDERING (delegated to kmod_menu.lsl) -------------------- */
 
 // Returns "[Honorific] Name" for the primary owner (single- or multi-owner mode),
 // or "" when no owner is set.
 string get_primary_owner_display() {
-    // Single-owner mode
     string owner_uuid = llLinksetDataRead("access.owner");
     if (owner_uuid != "" && owner_uuid != NULL_KEY) {
         string owner_name = llLinksetDataRead("access.ownername");
@@ -359,7 +369,6 @@ string get_primary_owner_display() {
         if (honorific != "") return honorific + " " + owner_name;
         return owner_name;
     }
-    // Multi-owner mode — use first owner
     string names_csv = llLinksetDataRead("access.ownernames");
     if (names_csv != "") {
         list names_list = llCSV2List(names_csv);
@@ -385,16 +394,44 @@ send_message(key user, string message_text) {
     llMessageLinked(LINK_SET, UI_BUS, msg, NULL_KEY);
 }
 
-send_render_menu(key user, string menu_type) {
+// Render the session's current tier from the LSD view. One LSD read per
+// render; pairs are [ctx,label] JSON arrays straight from the view.
+render_session(key user) {
     integer session_idx = find_session_idx(user);
-    if (session_idx == -1) {
-        return;
+    if (session_idx == -1) return;
+
+    integer acl = llList2Integer(SessionACLs, session_idx);
+    string menu_type = llList2String(SessionContexts, session_idx);
+    string category = llList2String(SessionCategories, session_idx);
+
+    string arr = "";
+    if (menu_type == SOS_CONTEXT) {
+        arr = llLinksetDataRead(LSD_VIEW_PREFIX + (string)acl + ".sos");
+    }
+    else {
+        string view = llLinksetDataRead(LSD_VIEW_PREFIX + (string)acl);
+        if (view != "") {
+            string sub;
+            if (category == "") sub = llJsonGetValue(view, ["root"]);
+            else sub = llJsonGetValue(view, [category]);
+            if (sub != JSON_INVALID) arr = sub;
+        }
     }
 
-    list filtered_indices = get_session_filtered_indices(session_idx);
-    integer plugin_count = llGetListLength(filtered_indices);
+    list entries = [];
+    if (arr != "" && arr != "[]") entries = llJson2List(arr);
+    integer entry_count = llGetListLength(entries);
 
-    if (plugin_count == 0) {
+    if (entry_count == 0) {
+        // A category page can only be empty after a rebuild race (the
+        // button existed when rendered). Fall back to the root tier.
+        if (category != "" && menu_type != SOS_CONTEXT) {
+            SessionCategories = llListReplaceList(SessionCategories, [""], session_idx, session_idx);
+            SessionPages = llListReplaceList(SessionPages, [0], session_idx, session_idx);
+            render_session(user);
+            return;
+        }
+
         integer user_acl = llList2Integer(SessionACLs, session_idx);
         integer is_blacklisted = llList2Integer(SessionBlacklisted, session_idx);
 
@@ -429,57 +466,45 @@ send_render_menu(key user, string menu_type) {
     }
 
     integer current_page = llList2Integer(SessionPages, session_idx);
-
-    integer total_pages = (plugin_count + MAX_FUNC_BTNS - 1) / MAX_FUNC_BTNS;
+    integer total_pages = (entry_count + MAX_FUNC_BTNS - 1) / MAX_FUNC_BTNS;
     if (current_page >= total_pages) current_page = 0;
     if (current_page < 0) current_page = total_pages - 1;
 
-    // Update session state
     SessionPages = llListReplaceList(SessionPages, [current_page], session_idx, session_idx);
     SessionTotalPages = llListReplaceList(SessionTotalPages, [total_pages], session_idx, session_idx);
 
-    // Build button data with context and state
     list button_data = [];
     integer start_idx = current_page * MAX_FUNC_BTNS;
     integer end_idx = start_idx + MAX_FUNC_BTNS;
-    if (end_idx > plugin_count) {
-        end_idx = plugin_count;
-    }
+    if (end_idx > entry_count) end_idx = entry_count;
 
     integer i = start_idx;
     while (i < end_idx) {
-        integer plugin_idx = llList2Integer(filtered_indices, i);
-
-        string context = llList2String(PluginContexts, plugin_idx);
-        string label = llList2String(PluginLabels, plugin_idx);
-
+        string pair = llList2String(entries, i);
         // button_data carries context + default label. For toggleable
         // buttons (registered buttonconfig in kmod_dialogs), kmod_dialogs
         // reads the live state from plugin.<short>.state in LSD and
         // overrides the label at render time.
-        string btn_obj = llList2Json(JSON_OBJECT, [
-            "context", context,
-            "label", label
-        ]);
-        button_data += [btn_obj];
-        i++;
+        button_data += [llList2Json(JSON_OBJECT, [
+            "context", llJsonGetValue(pair, [0]),
+            "label", llJsonGetValue(pair, [1])
+        ])];
+        i += 1;
     }
 
-    string buttons_json = llList2Json(JSON_ARRAY, button_data);
     string session_id = llList2String(SessionIDs, session_idx);
 
     // DESIGN DECISION: Navigation row is ALWAYS present (DO NOT CHANGE)
-    integer has_nav = 1;
-
     string msg = llList2Json(JSON_OBJECT, [
         "type", "ui.menu.render",
         "user", (string)user,
         "session_id", session_id,
         "menu_type", menu_type,
+        "category", category,
         "page", current_page,
         "total_pages", total_pages,
-        "buttons", buttons_json,
-        "has_nav", has_nav
+        "buttons", llList2Json(JSON_ARRAY, button_data),
+        "has_nav", 1
     ]);
 
     llMessageLinked(LINK_SET, UI_BUS, msg, NULL_KEY);
@@ -490,8 +515,6 @@ send_render_menu(key user, string menu_type) {
 // Match a requested context to the longest registered plugin context that
 // is either an exact match or a dot-boundary prefix. Returns the matched
 // plugin context, or "" if none matches.
-// Example: requested "ui.core.animate.pose.nadu" against registered
-// ["ui.core.animate", "ui.core.lock"] returns "ui.core.animate".
 string resolve_plugin_context(string requested) {
     integer exact = llListFindList(PluginContexts, [requested]);
     if (exact != -1) return requested;
@@ -510,14 +533,12 @@ string resolve_plugin_context(string requested) {
                 best_len = plen;
             }
         }
-        i++;
+        i += 1;
     }
     return best;
 }
 
 // Compute the subpath remainder after stripping a matched plugin context.
-// resolve_plugin_context("ui.core.animate.pose.nadu", "ui.core.animate")
-// returns "pose.nadu". Exact matches return "".
 string extract_subpath(string requested, string plugin_context) {
     integer plen = llStringLength(plugin_context);
     if (llStringLength(requested) <= plen + 1) return "";
@@ -525,9 +546,8 @@ string extract_subpath(string requested, string plugin_context) {
 }
 
 // Dispatch ui.menu.start to a specific plugin, with ACL from an existing session.
-// Policy is re-checked here (LSD read) to catch changes since session creation.
-// The subpath field carries namespaced subcommand args (e.g. "pose.nadu");
-// plugins that ignore it keep menu-only behaviour.
+// Policy is re-checked here (LSD read) as the authorization gate — the view
+// mask only governs visibility.
 dispatch_to_plugin(key user, string context, string subpath, integer session_idx) {
     integer user_acl = llList2Integer(SessionACLs, session_idx);
     string policy = llLinksetDataRead("acl.policycontext:" + context);
@@ -551,9 +571,7 @@ dispatch_to_plugin(key user, string context, string subpath, integer session_idx
 
 handle_button_click(key user, string button, string context) {
     integer session_idx = find_session_idx(user);
-    if (session_idx == -1) {
-        return;
-    }
+    if (session_idx == -1) return;
 
     // Blacklist gate
     integer is_blacklisted = llList2Integer(SessionBlacklisted, session_idx);
@@ -565,14 +583,21 @@ handle_button_click(key user, string button, string context) {
 
     integer current_page = llList2Integer(SessionPages, session_idx);
     integer total_pages = llList2Integer(SessionTotalPages, session_idx);
-    string session_context = llList2String(SessionContexts, session_idx);
 
-    // Handle navigation buttons (no context)
+    // Navigation buttons (no context)
     if (button == "<<") {
         current_page -= 1;
         if (current_page < 0) current_page = total_pages - 1;
         SessionPages = llListReplaceList(SessionPages, [current_page], session_idx, session_idx);
-        send_render_menu(user, session_context);
+        render_session(user);
+        return;
+    }
+
+    if (button == ">>") {
+        current_page += 1;
+        if (current_page >= total_pages) current_page = 0;
+        SessionPages = llListReplaceList(SessionPages, [current_page], session_idx, session_idx);
+        render_session(user);
         return;
     }
 
@@ -581,16 +606,24 @@ handle_button_click(key user, string button, string context) {
         return;
     }
 
-    if (button == ">>") {
-        current_page += 1;
-        if (current_page >= total_pages) current_page = 0;
-        SessionPages = llListReplaceList(SessionPages, [current_page], session_idx, session_idx);
-        send_render_menu(user, session_context);
+    // Back on a category page returns to the root tier.
+    if (button == "Back" && context == "") {
+        SessionCategories = llListReplaceList(SessionCategories, [""], session_idx, session_idx);
+        SessionPages = llListReplaceList(SessionPages, [0], session_idx, session_idx);
+        render_session(user);
         return;
     }
 
-    // Plugin button clicked - use context directly for fast lookup.
-    // Menu buttons always carry an exact plugin context; no subpath.
+    // Category button: descend into the category tier.
+    if (llGetSubString(context, 0, 3) == CAT_CTX_PREFIX) {
+        SessionCategories = llListReplaceList(SessionCategories, [llGetSubString(context, 4, -1)], session_idx, session_idx);
+        SessionPages = llListReplaceList(SessionPages, [0], session_idx, session_idx);
+        render_session(user);
+        return;
+    }
+
+    // Plugin button: dispatch. The session keeps its category so the
+    // plugin's Back (ui.menu.return) lands on the page it launched from.
     if (context != "") {
         integer i = llListFindList(PluginContexts, [context]);
         if (i != -1) {
@@ -602,9 +635,8 @@ handle_button_click(key user, string button, string context) {
 
 /* -------------------- MESSAGE HANDLERS -------------------- */
 
-// Called after a rebuild actually applies (not on every debounced tick).
-// Closes any open dialogs and drops all sessions so the next touch re-creates
-// them against the freshly enumerated plugin list.
+// Called after a rebuild actually applies. Closes any open dialogs and drops
+// all sessions so the next touch re-creates them against the fresh views.
 invalidate_all_sessions() {
     if (llGetListLength(SessionUsers) == 0) return;
 
@@ -617,7 +649,7 @@ invalidate_all_sessions() {
             "session_id", session_id
         ]);
         llMessageLinked(LINK_SET, DIALOG_BUS, close_msg, NULL_KEY);
-        i++;
+        i += 1;
     }
 
     SessionUsers = [];
@@ -628,6 +660,7 @@ invalidate_all_sessions() {
     SessionIDs = [];
     SessionCreatedTimes = [];
     SessionContexts = [];
+    SessionCategories = [];
 
     PendingAclAvatars = [];
     PendingAclContexts = [];
@@ -644,13 +677,13 @@ handle_acl_result(string msg) {
     if (idx == -1) return;
 
     string requested_context = llList2String(PendingAclContexts, idx);
-    
+
     PendingAclAvatars = llDeleteSubList(PendingAclAvatars, idx, idx);
     PendingAclContexts = llDeleteSubList(PendingAclContexts, idx, idx);
 
     if (requested_context == ROOT_CONTEXT || requested_context == SOS_CONTEXT) {
         create_session(avatar, level, is_blacklisted, requested_context);
-        send_render_menu(avatar, requested_context);
+        render_session(avatar);
     }
     else {
         // Plugin context from chat dispatch — create root session for navigation,
@@ -673,19 +706,19 @@ handle_start(string msg, key user_key) {
     if (llJsonGetValue(msg, ["acl"]) != JSON_INVALID) return;
 
     if (llJsonGetValue(msg, ["context"]) == JSON_INVALID) {
-        start_root_session(user_key);
+        start_session(user_key, ROOT_CONTEXT);
         return;
     }
 
     string context = llJsonGetValue(msg, ["context"]);
 
     if (context == ROOT_CONTEXT) {
-        start_root_session(user_key);
+        start_session(user_key, ROOT_CONTEXT);
         return;
     }
 
     if (context == SOS_CONTEXT) {
-        start_sos_session(user_key);
+        start_session(user_key, SOS_CONTEXT);
         return;
     }
 
@@ -696,7 +729,7 @@ handle_start(string msg, key user_key) {
     if (matched == "") {
         // Unrecognized context — unresolved alias or typo. Fall back to root
         // menu so the user gets something useful rather than silence.
-        start_root_session(user_key);
+        start_session(user_key, ROOT_CONTEXT);
         return;
     }
     string subpath = extract_subpath(context, matched);
@@ -709,22 +742,12 @@ handle_start(string msg, key user_key) {
     }
 
     // LSD cache hit — create root session for navigation then dispatch.
-    // Stale entries (timestamp older than the global epoch) are skipped
-    // here too so chat dispatch matches touch on freshness semantics.
-    string raw = llLinksetDataRead(LSD_ACL_CACHE_PREFIX + (string)user_key + LSD_ACL_CACHE_SUFFIX);
-    if (raw != "") {
-        integer sep = llSubStringIndex(raw, "|");
-        if (sep != -1) {
-            integer cache_ts = (integer)llGetSubString(raw, sep + 1, -1);
-            integer global_ts = (integer)llLinksetDataRead("acl.timestamp");
-            if (cache_ts >= global_ts) {
-                integer level = (integer)llGetSubString(raw, 0, sep - 1);
-                create_session(user_key, level, (level == ACL_BLACKLIST), ROOT_CONTEXT);
-                session_idx = find_session_idx(user_key);
-                if (session_idx != -1) dispatch_to_plugin(user_key, matched, subpath, session_idx);
-                return;
-            }
-        }
+    integer level = read_cached_acl(user_key);
+    if (level != ACL_NONE) {
+        create_session(user_key, level, (level == ACL_BLACKLIST), ROOT_CONTEXT);
+        session_idx = find_session_idx(user_key);
+        if (session_idx != -1) dispatch_to_plugin(user_key, matched, subpath, session_idx);
+        return;
     }
 
     // Cold miss — queue ACL query, store original requested context so the
@@ -739,40 +762,23 @@ handle_start(string msg, key user_key) {
     ]), NULL_KEY);
 }
 
-start_root_session(key user_key) {
+// Open a menu session (root or SOS) for a user: cached ACL when fresh,
+// AUTH_BUS round-trip otherwise.
+start_session(key user_key, string context_filter) {
     integer idx = find_pending_acl_idx(user_key);
     if (idx != -1) return;
 
-    if (try_cached_session(user_key, ROOT_CONTEXT)) {
+    if (try_cached_session(user_key, context_filter)) {
         return;
     }
 
     PendingAclAvatars += [user_key];
-    PendingAclContexts += [ROOT_CONTEXT];
+    PendingAclContexts += [context_filter];
 
-    string acl_query = llList2Json(JSON_OBJECT, [
+    llMessageLinked(LINK_SET, AUTH_BUS, llList2Json(JSON_OBJECT, [
         "type", "auth.acl.query",
         "avatar", (string)user_key
-    ]);
-    llMessageLinked(LINK_SET, AUTH_BUS, acl_query, NULL_KEY);
-}
-
-start_sos_session(key user_key) {
-    integer idx = find_pending_acl_idx(user_key);
-    if (idx != -1) return;
-
-    if (try_cached_session(user_key, SOS_CONTEXT)) {
-        return;
-    }
-
-    PendingAclAvatars += [user_key];
-    PendingAclContexts += [SOS_CONTEXT];
-
-    string acl_query = llList2Json(JSON_OBJECT, [
-        "type", "auth.acl.query",
-        "avatar", (string)user_key
-    ]);
-    llMessageLinked(LINK_SET, AUTH_BUS, acl_query, NULL_KEY);
+    ]), NULL_KEY);
 }
 
 handle_return(string msg) {
@@ -789,33 +795,22 @@ handle_return(string msg) {
         if (age > SESSION_MAX_AGE) {
             string session_context = llList2String(SessionContexts, session_idx);
             cleanup_session(user_key);
-
-            if (session_context == SOS_CONTEXT) {
-                start_sos_session(user_key);
-            }
-            else {
-                start_root_session(user_key);
-            }
+            start_session(user_key, session_context);
         }
         else {
-            string session_context = llList2String(SessionContexts, session_idx);
-            send_render_menu(user_key, session_context);
+            // Land on the tier the plugin was launched from (its category
+            // page, or root for Standalone plugins).
+            render_session(user_key);
         }
     }
     else {
-        start_root_session(user_key);
+        start_session(user_key, ROOT_CONTEXT);
     }
 }
 
-// handle_update_state removed in rev 16 — toggle state now lives in LSD
-// (plugin.<short>.state) and kmod_dialogs reads it at render time.
-
-// handle_plugin_acl_bus removed in v1.1 — ACL filtering via LSD policies
-
 // Force-close a user's open dialog and drop their session. Cached ACL is
 // dropped along with the session, so the next touch re-auths from scratch.
-// Primary caller: plugin_tpe on TPE acceptance (wearer's stale ACL must not
-// keep navigating the menu after tpe.mode has been raised to ACL_NOACCESS).
+// Primary caller: plugin_tpe on TPE acceptance.
 handle_close(string msg) {
     string user_key_str = llJsonGetValue(msg, ["user"]);
     if (user_key_str == JSON_INVALID) return;
@@ -829,7 +824,6 @@ handle_dialog_response(string msg) {
     string button = llJsonGetValue(msg, ["button"]);
     key user = (key)llJsonGetValue(msg, ["user"]);
 
-    // Extract context (may be empty string for navigation buttons)
     string context = "";
     string tmp = llJsonGetValue(msg, ["context"]);
     if (tmp != JSON_INVALID) {
@@ -860,10 +854,8 @@ handle_dialog_timeout(string msg) {
 default
 {
     state_entry() {
-
         PluginContexts = [];
-        PluginLabels = [];
-        
+
         SessionUsers = [];
         SessionACLs = [];
         SessionBlacklisted = [];
@@ -872,19 +864,17 @@ default
         SessionIDs = [];
         SessionCreatedTimes = [];
         SessionContexts = [];
-
-        ViewRootIndices = [];
-        ViewSosIndices = [];
+        SessionCategories = [];
 
         PendingAclAvatars = [];
         PendingAclContexts = [];
-        
+
         TouchKeys = [];
         TouchStartTimes = [];
 
         // Advertise root menu context so kmod_chat can build a 'menu' alias.
-        // The root context itself is NOT a plugin and does not get a
-        // plugin.reg.* LSD entry — it only exists for kmod_chat's alias table.
+        // The root context itself is NOT a plugin and does not get a reg.*
+        // LSD entry — it only exists for kmod_chat's alias table.
         llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
             "type",    "kernel.register.declare",
             "context", ROOT_CONTEXT,
@@ -893,11 +883,11 @@ default
         ]), NULL_KEY);
 
         // Prime an initial rebuild. If plugins have already written their
-        // plugin.reg.* entries, we'll pick them up on the first timer tick;
-        // late registrations stream in via the linkset_data event.
+        // reg.* entries, we'll pick them up on the first timer tick; late
+        // registrations stream in via the linkset_data event.
         schedule_rebuild();
     }
-    
+
     touch_start(integer num_detected) {
         integer i = 0;
         while (i < num_detected) {
@@ -947,14 +937,14 @@ default
                 TouchStartTimes = llDeleteSubList(TouchStartTimes, idx, idx);
 
                 if (duration >= LONG_TOUCH_THRESHOLD && toucher == wearer) {
-                    start_sos_session(toucher);
+                    start_session(toucher, SOS_CONTEXT);
                 }
                 else {
                     // Provide feedback if non-wearer attempted long-touch (SOS is wearer-only)
                     if (duration >= LONG_TOUCH_THRESHOLD && toucher != wearer) {
                         send_message(toucher, "Long-touch SOS is only available to the wearer.");
                     }
-                    start_root_session(toucher);
+                    start_session(toucher, ROOT_CONTEXT);
                 }
             }
 
@@ -989,12 +979,12 @@ default
             else if (msg_type == "auth.acl.update") {
                 // ACL roles changed (ownership, trustees, public, TPE, etc.)
                 // Invalidate all active sessions so they re-create with fresh ACL
-                // on next touch. This prevents stale ACL from granting wrong buttons.
+                // on next touch.
                 integer si = llGetListLength(SessionUsers) - 1;
                 while (si >= 0) {
                     key sess_user = llList2Key(SessionUsers, si);
                     cleanup_session(sess_user);
-                    si--;
+                    si -= 1;
                 }
             }
             return;
@@ -1016,16 +1006,17 @@ default
             return;
         }
     }
-    
-    // Plugin registry changes: any plugin.reg.* write/delete arms a debounced
-    // rebuild. A full LSD reset (factory wipe) also forces a rebuild so we
-    // don't hold onto dangling indices.
+
+    // Registry changes: any reg.* write/delete arms a debounced rebuild.
+    // Our own ui.view.* writes don't match the prefix, so the rebuild can't
+    // retrigger itself. A full LSD reset (factory wipe) also forces a
+    // rebuild so we don't hold onto dangling state.
     linkset_data(integer action, string name, string value) {
         if (action == LINKSETDATA_RESET) {
             schedule_rebuild();
             return;
         }
-        if (llSubStringIndex(name, LSD_PLUGIN_REG_PREFIX) == 0) {
+        if (llSubStringIndex(name, LSD_REG_PREFIX) == 0) {
             schedule_rebuild();
         }
     }
@@ -1034,7 +1025,7 @@ default
         if (ViewsStale) {
             ViewsStale = FALSE;
             llSetTimerEvent(0.0);
-            rebuild_plugin_list_from_lsd();
+            rebuild_views();
             invalidate_all_sessions();
         }
     }

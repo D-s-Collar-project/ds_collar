@@ -159,7 +159,7 @@ needed in kmod_settings — preserves the JSON-free invariant). Envelope:
 
 Strict arity. Trailing/extra separators are malformed and silently rejected.
 is_writable_key gates which keys this protocol may mutate — plugin
-registration keys (plugin.reg.*) and ACL policy keys (acl.policycontext:*)
+registration keys (reg.*) and ACL policy keys (acl.policycontext:*)
 remain plugin-owned and are NOT eligible. After every successful delta/delete,
 broadcast_settings_changed fires settings.sync so consumers re-read; seed is
 silent so bootstrap seeding (every plugin populating its defaults) does not

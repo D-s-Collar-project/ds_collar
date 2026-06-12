@@ -122,9 +122,14 @@ integer btn_allowed(string label) {
 
 /* -------------------- LIFECYCLE -------------------- */
 
+// v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
+// visible at ACL level L). Consumed by kmod_ui's view rebuild.
+string PLUGIN_CATEGORY = "Avatar";
+integer PLUGIN_ACL_MASK = 62;
+
 write_plugin_reg(string label) {
-    string k = "plugin.reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, ["label", label, "script", llGetScriptName()]);
+    string k = "reg." + PLUGIN_CONTEXT;
+    string v = llList2Json(JSON_OBJECT, ["cat", PLUGIN_CATEGORY, "label", label, "script", llGetScriptName(), "mask", PLUGIN_ACL_MASK]);
     if (llLinksetDataRead(k) == v) return;
     llLinksetDataWrite(k, v);
 }
@@ -734,7 +739,7 @@ default {
                 // Release viewer-side restrictions BEFORE reset — kmod_rlv may
                 // reset in parallel and drop its Claims without emitting @=y.
                 release_persisted_locks();
-                llLinksetDataDelete("plugin.reg." + PLUGIN_CONTEXT);
+                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
                 llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
                 llResetScript();
             }

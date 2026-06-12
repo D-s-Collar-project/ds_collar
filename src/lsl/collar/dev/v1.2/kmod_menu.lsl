@@ -91,19 +91,33 @@ render_menu(string msg) {
     string buttons_json = llJsonGetValue(msg, ["buttons"]);
     integer has_nav = (integer)llJsonGetValue(msg, ["has_nav"]);
 
+    // Category tier (kmod_ui sets "category" when rendering inside one):
+    // nav swaps Close for Back (returns to the root tier) and the title is
+    // the category name.
+    string category = "";
+    string cat_tmp = llJsonGetValue(msg, ["category"]);
+    if (cat_tmp != JSON_INVALID) category = cat_tmp;
+
     list button_data_list = llJson2List(buttons_json);
     list reordered = reorder_buttons_for_display(button_data_list);
 
+    // Nav row sits at slots 0-2 (bottom row) per the dialog convention.
+    string nav_exit = "Close";
+    if (category != "") nav_exit = "Back";
+
     list final_button_data = [];
     if (has_nav) {
-        final_button_data = ["<<", ">>", "Close"] + reordered;
+        final_button_data = ["<<", ">>", nav_exit] + reordered;
     }
     else {
-        final_button_data = ["Close"] + reordered;
+        final_button_data = [nav_exit] + reordered;
     }
 
     string title = "";
-    if (menu_type == ROOT_CONTEXT) {
+    if (category != "") {
+        title = category;
+    }
+    else if (menu_type == ROOT_CONTEXT) {
         title = "Main Menu";
     }
     else if (menu_type == SOS_CONTEXT) {
@@ -118,14 +132,11 @@ render_menu(string msg) {
     }
 
     string body_text = "";
-    if (menu_type == ROOT_CONTEXT) {
-        body_text = "Select an option:";
-    }
-    else if (menu_type == SOS_CONTEXT) {
+    if (menu_type == SOS_CONTEXT) {
         body_text = "Emergency options:";
     }
     else {
-        body_text = "Choose:";
+        body_text = "Select an option:";
     }
 
     string final_button_data_json = llList2Json(JSON_ARRAY, final_button_data);

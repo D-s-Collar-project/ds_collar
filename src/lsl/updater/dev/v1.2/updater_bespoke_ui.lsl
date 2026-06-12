@@ -100,7 +100,7 @@ list bespoke_subsystems() {
         "HUD",            "control_hud",
         "Animations",     "plugin_animate",
         "Bell",           "plugin_bell",
-        "Access",         "plugin_access,plugin_blacklist",
+        "Access",         "plugin_owners,plugin_blacklist",
         "Chat",           "plugin_chat,kmod_chat",
         "Leashing",       "kmod_leash_engine,kmod_particles,plugin_leash,plugin_leash_target,leash_holder",
         "Locking",        "plugin_lock",

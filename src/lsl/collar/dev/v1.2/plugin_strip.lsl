@@ -144,9 +144,14 @@ list prealloc(integer n) {
 
 /* -------------------- LIFECYCLE -------------------- */
 
+// v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
+// visible at ACL level L). Consumed by kmod_ui's view rebuild.
+string PLUGIN_CATEGORY = "Avatar";
+integer PLUGIN_ACL_MASK = 62;
+
 write_plugin_reg(string label) {
-    string k = "plugin.reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, ["label", label, "script", llGetScriptName()]);
+    string k = "reg." + PLUGIN_CONTEXT;
+    string v = llList2Json(JSON_OBJECT, ["cat", PLUGIN_CATEGORY, "label", label, "script", llGetScriptName(), "mask", PLUGIN_ACL_MASK]);
     if (llLinksetDataRead(k) == v) return;
     llLinksetDataWrite(k, v);
 }
@@ -708,7 +713,7 @@ default {
             if (msg_type == "kernel.register.refresh") register_self();
             else if (msg_type == "kernel.ping") send_pong();
             else if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
-                llLinksetDataDelete("plugin.reg." + PLUGIN_CONTEXT);
+                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
                 llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
                 llResetScript();
             }
