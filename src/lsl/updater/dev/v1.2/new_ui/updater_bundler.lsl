@@ -542,7 +542,14 @@ start_next_query() {
     if (Mode == "install" && TypePhase == "scripts") {
         if (CandIdx < n) {
             string name = llList2String(Candidates, CandIdx);
-            llRemoteLoadScriptPin(CollarKey, name, CollarPin, FALSE, 0);
+            // Source must exist in THIS prim — diagnosable warning instead
+            // of the runtime "Could not find script" shout.
+            if (llGetInventoryType(name) == INVENTORY_SCRIPT) {
+                llRemoteLoadScriptPin(CollarKey, name, CollarPin, FALSE, 0);
+            }
+            else {
+                llOwnerSay("updater_bundler: '" + name + "' is not in this prim's inventory — skipped (staging error?).");
+            }
             CandIdx += 1;
             // Tail-call into ourselves for the next ship. The 3s sleep
             // in llRemoteLoadScriptPin keeps the event queue from
@@ -700,6 +707,13 @@ default {
 
     changed(integer change) {
         if (change & CHANGED_OWNER) llResetScript();
+        // Staging guard: v1.2 collar scripts have no dormancy guard, so a
+        // script dropped into this prim AFTER rez boots and runs (state_entry
+        // parking only covers the rez/reset path). Left running, the staged
+        // set acts like a live collar inside the updater — kmod_remote even
+        // answers collar scans, hijacking update/install sessions. Park on
+        // every inventory change so drop-ins go dormant immediately.
+        if (change & CHANGED_INVENTORY) park_staged_collar_scripts();
     }
 
     link_message(integer sender, integer num, string msg, key id) {
@@ -954,7 +968,14 @@ default {
             if (replied_name != PendingName) return;
             PendingName = "";
             if (verdict == "GIVE") {
-                llRemoteLoadScriptPin(CollarKey, replied_name, CollarPin, FALSE, 0);
+                // Source must exist in THIS prim — diagnosable warning
+                // instead of the runtime "Could not find script" shout.
+                if (llGetInventoryType(replied_name) == INVENTORY_SCRIPT) {
+                    llRemoteLoadScriptPin(CollarKey, replied_name, CollarPin, FALSE, 0);
+                }
+                else {
+                    llOwnerSay("updater_bundler: '" + replied_name + "' is not in this prim's inventory — skipped (staging error?).");
+                }
             }
             CandIdx += 1;
             start_next_query();
