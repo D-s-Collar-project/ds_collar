@@ -1,7 +1,9 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: Drop the empty state_entry (stateless renderer; other handlers satisfy the at-least-one-event rule) — clears the empty-event-body analyzer hint.
 PURPOSE: Menu rendering and visual presentation service
 ARCHITECTURE: Consolidated message bus lanes
 --------------------*/
@@ -167,12 +169,10 @@ show_message(string msg) {
 
 /* -------------------- EVENTS -------------------- */
 
+// Stateless renderer — no init needed, so no state_entry; the state's
+// other handlers satisfy LSL's at-least-one-event requirement.
 default
 {
-    state_entry() {
-
-    }
-
     link_message(integer sender_num, integer num, string msg, key id) {
         string msg_type = get_msg_type(msg);
         if (msg_type == "") return;
