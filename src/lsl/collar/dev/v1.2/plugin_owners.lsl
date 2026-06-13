@@ -1,9 +1,11 @@
 /*--------------------
 PLUGIN: plugin_owners.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+CHANGES:
+- v1.2 rev 1: Read the user-record roster (kmod_settings rev 2): owners/trustees enumerate from user.<uuid> records (rank-ordered; rank 0 = primary owner) instead of the retired access.owner-/trustee- parallel CSVs. Multi-owner remains the explicit notecard-only access.multiowner policy flag (commitment semantics). Names/honorifics come from the records. Mutation messages and all menu flows unchanged.
 --------------------*/
 
 
@@ -21,25 +23,25 @@ string PLUGIN_LABEL = "Owners";
 integer MAX_NUMBERED_LIST_ITEMS = 11;  // 12 dialog buttons - 1 Back button
 
 /* -------------------- SETTINGS KEYS -------------------- */
-string KEY_MULTI_OWNER_MODE   = "access.multiowner";
-string KEY_OWNER              = "access.owner";              // single-owner uuid
-string KEY_OWNER_NAME         = "access.ownername";          // single-owner display name
-string KEY_OWNER_HONORIFIC    = "access.ownerhonorific";
-string KEY_OWNER_UUIDS        = "access.owneruuids";         // multi-owner CSV (notecard)
-string KEY_OWNER_NAMES        = "access.ownernames";
-string KEY_OWNER_HONORIFICS   = "access.ownerhonorifics";
-string KEY_TRUSTEE_UUIDS      = "access.trusteeuuids";
-string KEY_TRUSTEE_NAMES      = "access.trusteenames";
-string KEY_TRUSTEE_HONORIFICS = "access.trusteehonorifics";
+// The roster lives in user.<uuid> = "<acl>,<rank>,<name>,<honorific>"
+// records (kmod_settings rev 2): acl 5 owner / 3 trustee / -1 blacklist;
+// rank orders owners (0 = primary). This plugin enumerates them read-only
+// in apply_settings_sync; mutations go through the settings.owner.* /
+// settings.trustee.* messages as before.
 string KEY_RUNAWAY_ENABLED    = "access.enablerunaway";
+// Multi-owner POLICY flag — notecard-only (commitment semantics: ownership
+// restructuring is a deliberate card edit, not a menu click); gates all
+// menu owner-editing. NOT derived from the owner count.
+string KEY_MULTI_OWNER_MODE   = "access.multiowner";
 
 /* -------------------- STATE -------------------- */
-integer MultiOwnerMode;
-key OwnerKey;
-list OwnerKeys;            // multi-owner list (read-only from notecard)
-string OwnerHonorific;
-list OwnerHonorifics;      // parallel to OwnerKeys (multi-owner)
-list OwnerNames;           // parallel to OwnerKeys (multi-owner)
+// Roster cache, rebuilt from user.* records on settings.sync. OwnerKeys is
+// rank-ordered (index 0 = primary); trustee lists are parallel.
+integer MultiOwnerMode;        // the access.multiowner policy flag
+key OwnerKey;                  // primary owner (rank 0), NULL_KEY if none
+string OwnerName;              // primary owner's record name
+string OwnerHonorific;         // primary owner's honorific
+list OwnerKeys;                // all owner uuids, rank-ordered
 list TrusteeKeys;
 list TrusteeHonorifics;
 list TrusteeNames;
@@ -72,15 +74,6 @@ integer lsd_int(string lsd_key, integer fallback) {
     string v = llLinksetDataRead(lsd_key);
     if (v == "") return fallback;
     return (integer)v;
-}
-
-// llCSV2List("") returns [""] (length 1), not []. This wrapper returns a
-// truly empty list when the LSD key is unset/empty so length-based UIs
-// don't show phantom entries.
-list csv_read(string lsd_key) {
-    string raw = llLinksetDataRead(lsd_key);
-    if (raw == "") return [];
-    return llCSV2List(raw);
 }
 
 string gen_session() {
@@ -231,42 +224,58 @@ apply_settings_sync() {
     seed_def(KEY_RUNAWAY_ENABLED, "1");
     MultiOwnerMode = FALSE;
     OwnerKey = NULL_KEY;
-    OwnerKeys = [];
+    OwnerName = "";
     OwnerHonorific = "";
-    OwnerHonorifics = [];
-    OwnerNames = [];
+    OwnerKeys = [];
     TrusteeKeys = [];
     TrusteeHonorifics = [];
     TrusteeNames = [];
 
-    string tmp = llLinksetDataRead(KEY_MULTI_OWNER_MODE);
-    if (tmp != "") MultiOwnerMode = (integer)tmp;
-
-    if (MultiOwnerMode) {
-        // Multi-owner: parallel CSVs (read-only, notecard managed)
-        OwnerKeys       = csv_read(KEY_OWNER_UUIDS);
-        OwnerNames      = csv_read(KEY_OWNER_NAMES);
-        OwnerHonorifics = csv_read(KEY_OWNER_HONORIFICS);
-        if (llGetListLength(OwnerKeys) > 0) {
-            OwnerKey = (key)llList2String(OwnerKeys, 0);
-            if (llGetListLength(OwnerHonorifics) > 0) {
-                OwnerHonorific = llList2String(OwnerHonorifics, 0);
-            }
+    // Enumerate user.* records into rank-ordered owner/trustee caches.
+    // Strided [rank, uuid, name, honorific] accumulators, sorted on rank.
+    list owners = [];
+    list trustees = [];
+    list ks = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string k = llList2String(ks, i);
+        string rec = llLinksetDataRead(k);
+        integer acl = (integer)rec;
+        if (acl == 5 || acl == 3) {
+            list f = llCSV2List(rec);
+            list row = [(integer)llList2String(f, 1), llGetSubString(k, 5, -1),
+                        llList2String(f, 2), llList2String(f, 3)];
+            if (acl == 5) owners += row;
+            else trustees += row;
         }
+        i += 1;
     }
-    else {
-        // Single-owner: scalar trio
-        string raw = llLinksetDataRead(KEY_OWNER);
-        if (raw != "") {
-            OwnerKey = (key)raw;
-            OwnerHonorific = llLinksetDataRead(KEY_OWNER_HONORIFIC);
-        }
-    }
+    if (llGetListLength(owners) > 4) owners = llListSortStrided(owners, 4, 0, TRUE);
+    if (llGetListLength(trustees) > 4) trustees = llListSortStrided(trustees, 4, 0, TRUE);
 
-    // Trustees (always parallel CSVs)
-    TrusteeKeys       = csv_read(KEY_TRUSTEE_UUIDS);
-    TrusteeNames      = csv_read(KEY_TRUSTEE_NAMES);
-    TrusteeHonorifics = csv_read(KEY_TRUSTEE_HONORIFICS);
+    n = llGetListLength(owners);
+    i = 0;
+    while (i < n) {
+        OwnerKeys += [llList2String(owners, i + 1)];
+        i += 4;
+    }
+    if (n > 0) {
+        OwnerKey = (key)llList2String(owners, 1);
+        OwnerName = llList2String(owners, 2);
+        OwnerHonorific = llList2String(owners, 3);
+    }
+    // Policy flag, not a derived count — see KEY_MULTI_OWNER_MODE.
+    MultiOwnerMode = (integer)llLinksetDataRead(KEY_MULTI_OWNER_MODE);
+
+    n = llGetListLength(trustees);
+    i = 0;
+    while (i < n) {
+        TrusteeKeys       += [llList2String(trustees, i + 1)];
+        TrusteeNames      += [llList2String(trustees, i + 2)];
+        TrusteeHonorifics += [llList2String(trustees, i + 3)];
+        i += 4;
+    }
 
     RunawayEnabled = lsd_int(KEY_RUNAWAY_ENABLED, TRUE);
 }
@@ -324,8 +333,10 @@ show_main() {
             body += "Owners: " + (string)llGetListLength(OwnerKeys) + "\n";
         }
         else {
-            string display_name = llLinksetDataRead(KEY_OWNER_NAME);
-            if (display_name == "") display_name = get_name(OwnerKey);
+            string display_name = OwnerName;
+            if (display_name == "" || display_name == "(loading...)") {
+                display_name = get_name(OwnerKey);
+            }
             body += "Owner: " + display_name;
             if (OwnerHonorific != "") body += " (" + OwnerHonorific + ")";
         }

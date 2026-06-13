@@ -1,23 +1,28 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 2
 PURPOSE: Notecard parser, validation guards, and LSD settings store
-ARCHITECTURE: Two-mode access model. Single-owner mode uses scalar keys
-              (access.owner, access.ownername, access.ownerhonorific) and
-              is set via the menu UI. Multi-owner mode uses parallel CSVs
-              (access.owneruuids/names/honorifics) and is set ONLY via the
-              settings notecard. Mode is selected by access.multiowner.
-              Trustees and blacklist always use CSVs. Display names are
-              resolved asynchronously via llRequestDisplayName.
-              kmod_settings is the SOLE LSD WRITER for keys listed in
-              MANAGED_SETTINGS_KEYS — plugins request writes via the
-              CSV-envelope settings.delta / settings.delete protocol on
-              SETTINGS_BUS. The notecard is authoritative only for keys it
-              itself provides: a card-ownership manifest records what the card
-              set last parse, so on reload the card re-asserts its current keys
-              and clears ones it has dropped, while runtime-set keys the card
-              never listed survive (last-writer-wins between reloads).
+CHANGES:
+- v1.2 rev 2: User-record roster (/etc/passwd model). The 13 role-segregated keys (the access.owner- and access.trustee- parallel CSVs, access.multiowner, the blacklist.blklist- pair) are replaced by one record per person: user.<uuid> = "<acl>,<rank>,<name>,<honorific>" (acl 5/3/-1; rank orders owners, 0 = primary, and correlates card honorifics). Role exclusivity is structural (one record per uuid; a role write overwrites). access.multiowner KEPT as an explicit notecard-only POLICY flag (commitment semantics, never derived from count): off ⇒ the parser refuses extra card owners ("there can be only one"), on ⇒ several owner records permitted; runtime writes refused; preserved by reset-config. access.isowned kept as the derived fast flag. Card syntax unchanged: roster lines build records (uuid+honorific lines order-independent via EOF application; *names lines accepted-and-ignored; place access.multiowner BEFORE the owner lines). Name policy: username at write when in-region, else placeholder + async upgrade (display name for owners/trustees, username for blacklist); handle_name_response collapses to a single record-field update. Reset-config preserves owner records dynamically. CLEAN BREAK: no legacy keys, no migration — existing collars re-seed from the notecard.
+- v1.2 rev 1: Blacklist display names parallel CSV (superseded by rev 2's records).
+ARCHITECTURE: People live in user.<uuid> records (see USER RECORDS below);
+              wearer and public are not records — they derive from
+              access.isowned / tpe.mode / public.mode. Multi-owner is
+              defined ONLY by the settings notecard listing several owners;
+              the menu manages at most one (refusals guard the >1 case).
+              Display names resolve asynchronously via llRequestDisplayName
+              (owners/trustees) or llRequestUsername (blacklist).
+              kmod_settings is the SOLE LSD WRITER for user.* records and
+              for keys listed in MANAGED_SETTINGS_KEYS — plugins request
+              writes via the CSV-envelope settings.delta / settings.delete
+              protocol on SETTINGS_BUS, and roster changes via the dedicated
+              owner/trustee/blacklist messages. The notecard is
+              authoritative only for keys it itself provides: a
+              card-ownership manifest records what the card set last parse,
+              so on reload the card re-asserts its current keys and clears
+              ones it has dropped, while runtime-set keys the card never
+              listed survive (last-writer-wins between reloads).
 --------------------*/
 
 
@@ -26,27 +31,46 @@ integer KERNEL_LIFECYCLE = 500;
 integer SETTINGS_BUS = 800;
 
 /* -------------------- SETTINGS KEYS -------------------- */
-// Sentinel and mode
+// Owned-state flag (derived from owner records; kept as a fast scalar for
+// auth's wearer 2/4 split and external consumers).
 string KEY_ISOWNED          = "access.isowned";
+
+/* -------------------- USER RECORDS -------------------- */
+// The people roster. One LSD key per person (/etc/passwd style):
+//   user.<uuid> = "<acl>,<rank>,<name>,<honorific>"
+// acl: 5 owner / 3 trustee / -1 blacklist (wearer and public are not
+// records — they derive from isowned/tpe.mode/public.mode). rank orders
+// owners (0 = primary) and correlates card honorifics; name and honorific
+// are comma-stripped at write. Role exclusivity is structural: one record
+// per uuid, a role write overwrites the previous role. kmod_settings is
+// the sole writer of user.* (records replace the former parallel-CSV
+// rosters: access.owner*/trustee* and blacklist.blklist*).
+string USER_PREFIX = "user.";
+
+// Multi-owner POLICY flag — notecard-only. Multiple owner records are
+// permitted ONLY while this is 1. With it off (default), "there can be
+// only one": the parser refuses extra card owners and the menu manages
+// the single owner. Deliberately a stored flag, NOT derived from the
+// owner count: the collar is a token of commitment, so restructuring its
+// ownership must be an explicit act on the settings card — never an
+// emergent state, never a menu click.
 string KEY_MULTI_OWNER_MODE = "access.multiowner";
 
-// Single-owner mode (scalars)
-string KEY_OWNER            = "access.owner";
-string KEY_OWNER_NAME       = "access.ownername";
-string KEY_OWNER_HONORIFIC  = "access.ownerhonorific";
-
-// Multi-owner mode (parallel CSVs, notecard only)
-string KEY_OWNER_UUIDS        = "access.owneruuids";
-string KEY_OWNER_NAMES        = "access.ownernames";
-string KEY_OWNER_HONORIFICS   = "access.ownerhonorifics";
-
-// Trustees (parallel CSVs)
-string KEY_TRUSTEE_UUIDS      = "access.trusteeuuids";
-string KEY_TRUSTEE_NAMES      = "access.trusteenames";
-string KEY_TRUSTEE_HONORIFICS = "access.trusteehonorifics";
-
-// Blacklist (CSV of UUIDs only)
-string KEY_BLACKLIST          = "blacklist.blklistuuid";
+// Card-syntax tokens. The settings notecard keeps its established line
+// syntax; these lines now BUILD user records instead of writing LSD keys
+// of their own. *names lines are accepted-and-ignored (names resolve
+// automatically).
+string CARD_MULTI_OWNER     = "access.multiowner";
+string CARD_OWNER           = "access.owner";
+string CARD_OWNER_NAME      = "access.ownername";
+string CARD_OWNER_HON       = "access.ownerhonorific";
+string CARD_OWNER_UUIDS     = "access.owneruuids";
+string CARD_OWNER_NAMES     = "access.ownernames";
+string CARD_OWNER_HONS      = "access.ownerhonorifics";
+string CARD_TRUSTEE_UUIDS   = "access.trusteeuuids";
+string CARD_TRUSTEE_NAMES   = "access.trusteenames";
+string CARD_TRUSTEE_HONS    = "access.trusteehonorifics";
+string CARD_BLACKLIST       = "blacklist.blklistuuid";
 
 // Other access flags
 string KEY_RUNAWAY_ENABLED    = "access.enablerunaway";
@@ -96,11 +120,17 @@ list ResetConfigValues = [];
 
 integer MaxListLen = 64;
 
-// Pending display-name queries: parallel lists.
-// Role values: "owner_scalar", "owner_csv", "trustee_csv"
+// Pending name queries (display-name or username): parallel lists. The
+// response updates the matching user record's name field directly, so no
+// role tag is needed.
 list NameQueryIds   = [];
 list NameQueryUuids = [];
-list NameQueryRoles = [];
+
+// Card honorifics buffered during a parse: the card's honorific lines may
+// precede or follow the uuid lines, so they're applied by rank at EOF
+// (apply_card_honorifics) instead of inline.
+list CardOwnerHons   = [];
+list CardTrusteeHons = [];
 
 /* -------------------- HELPERS -------------------- */
 
@@ -135,6 +165,96 @@ list list_remove_at(list source_list, integer idx) {
     return llDeleteSubList(source_list, idx, idx);
 }
 
+/* -------------------- USER RECORD PRIMITIVES -------------------- */
+
+// CSV field sanitizer — record fields may not contain commas.
+string san_field(string s) {
+    return llDumpList2String(llParseString2List(s, [","], []), " ");
+}
+
+string user_read(string uuid_str) {
+    return llLinksetDataRead(USER_PREFIX + uuid_str);
+}
+
+user_write(string uuid_str, integer acl, integer rank, string name_str, string hon) {
+    llLinksetDataWrite(USER_PREFIX + uuid_str, llDumpList2String(
+        [(string)acl, (string)rank, san_field(name_str), san_field(hon)], ","));
+}
+
+user_delete(string uuid_str) {
+    llLinksetDataDelete(USER_PREFIX + uuid_str);
+}
+
+// Role of a uuid: 5/3/-1, or 0 when no record. The acl is the record's
+// leading field, so the integer cast parses it straight off the raw value.
+integer user_role(string uuid_str) {
+    string rec = user_read(uuid_str);
+    if (rec == "") return 0;
+    return (integer)rec;
+}
+
+// Update one field (2 = name, 3 = honorific) of an existing record.
+user_set_field(string uuid_str, integer field_idx, string value) {
+    string rec = user_read(uuid_str);
+    if (rec == "") return;
+    list f = llCSV2List(rec);
+    f = llListReplaceList(f, [san_field(value)], field_idx, field_idx);
+    llLinksetDataWrite(USER_PREFIX + uuid_str, llDumpList2String(f, ","));
+}
+
+list user_keys() {
+    return llLinksetDataFindKeys("^user\\.", 0, -1);
+}
+
+// All uuids holding a role, rank-ordered (rank 0 first — the primary
+// owner, and card-honorific correlation order for trustees).
+list role_uuids(integer acl) {
+    list ranked = [];   // strided [rank, uuid]
+    list ks = user_keys();
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string k = llList2String(ks, i);
+        string rec = llLinksetDataRead(k);
+        if ((integer)rec == acl) {
+            list f = llCSV2List(rec);
+            ranked += [(integer)llList2String(f, 1), llGetSubString(k, 5, -1)];
+        }
+        i += 1;
+    }
+    if (llGetListLength(ranked) > 2) {
+        ranked = llListSortStrided(ranked, 2, 0, TRUE);
+    }
+    list uuids = [];
+    n = llGetListLength(ranked);
+    i = 1;
+    while (i < n) {
+        uuids += [llList2String(ranked, i)];
+        i += 2;
+    }
+    return uuids;
+}
+
+integer role_count(integer acl) {
+    return llGetListLength(role_uuids(acl));
+}
+
+delete_role(integer acl) {
+    list ks = user_keys();
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string k = llList2String(ks, i);
+        if ((integer)llLinksetDataRead(k) == acl) {
+            llLinksetDataDelete(k);
+        }
+        i += 1;
+    }
+}
+
+// Multi-owner is an explicit POLICY flag (notecard-only), not a derived
+// count — see KEY_MULTI_OWNER_MODE. Gates the menu owner.set/clear
+// handlers and the parser's extra-owner refusal.
 integer is_multi_owner_mode() {
     return (integer)llLinksetDataRead(KEY_MULTI_OWNER_MODE);
 }
@@ -258,20 +378,12 @@ handle_settings_seed_csv(string msg) {
 /* -------------------- LSD CLEAR & FACTORY RESET -------------------- */
 
 clear_owner_keys() {
-    // Clear both single and multi-owner key sets, plus the sentinel.
+    delete_role(5);
     llLinksetDataDelete(KEY_ISOWNED);
-    llLinksetDataDelete(KEY_OWNER);
-    llLinksetDataDelete(KEY_OWNER_NAME);
-    llLinksetDataDelete(KEY_OWNER_HONORIFIC);
-    llLinksetDataDelete(KEY_OWNER_UUIDS);
-    llLinksetDataDelete(KEY_OWNER_NAMES);
-    llLinksetDataDelete(KEY_OWNER_HONORIFICS);
 }
 
 clear_trustee_keys() {
-    llLinksetDataDelete(KEY_TRUSTEE_UUIDS);
-    llLinksetDataDelete(KEY_TRUSTEE_NAMES);
-    llLinksetDataDelete(KEY_TRUSTEE_HONORIFICS);
+    delete_role(3);
 }
 
 /* -------------------- CARD-OWNERSHIP MANIFEST -------------------- */
@@ -293,7 +405,7 @@ apply_card_manifest_clear() {
         string tok = llList2String(old_manifest, i);
         if      (tok == "@owner")     clear_owner_keys();
         else if (tok == "@trustees")  clear_trustee_keys();
-        else if (tok == "@blacklist") llLinksetDataDelete(KEY_BLACKLIST);
+        else if (tok == "@blacklist") delete_role(-1);
         else                          llLinksetDataDelete(tok);
     }
 }
@@ -327,207 +439,189 @@ factory_reset() {
 
 /* -------------------- VALIDATION HELPERS -------------------- */
 
-// Returns TRUE if any external owner exists (not the wearer, not NULL_KEY)
+// Returns TRUE if any external owner exists. Records never contain the
+// wearer or NULL_KEY (guarded at every write), so any owner record counts.
 integer has_external_owner() {
-    key wearer = llGetOwner();
-
-    if (is_multi_owner_mode()) {
-        list uuids = csv_read(KEY_OWNER_UUIDS);
-        integer i;
-        integer len = llGetListLength(uuids);
-        for (i = 0; i < len; i++) {
-            key owner = (key)llList2String(uuids, i);
-            if (owner != wearer && owner != NULL_KEY) return TRUE;
-        }
-        return FALSE;
-    }
-
-    key primary = (key)llLinksetDataRead(KEY_OWNER);
-    if (primary != NULL_KEY && primary != wearer) return TRUE;
-    return FALSE;
+    return role_count(5) > 0;
 }
 
-integer is_owner(string who) {
-    if (is_multi_owner_mode()) {
-        return (llListFindList(csv_read(KEY_OWNER_UUIDS), [who]) != -1);
-    }
-    return (llLinksetDataRead(KEY_OWNER) == who);
-}
-
-integer is_trustee(string who) {
-    return (llListFindList(csv_read(KEY_TRUSTEE_UUIDS), [who]) != -1);
-}
 
 /* -------------------- ASYNC NAME RESOLUTION -------------------- */
 
-request_name(string uuid_str, string role) {
+// Display-name upgrade for owners/trustees.
+request_name(string uuid_str) {
     if (uuid_str == "" || (key)uuid_str == NULL_KEY) return;
     key qid = llRequestDisplayName((key)uuid_str);
     NameQueryIds   += [qid];
     NameQueryUuids += [uuid_str];
-    NameQueryRoles += [role];
 }
 
+// Username variant — the blacklist's human-readable fallback for avatars
+// who may be absent (usernames are stable; display names can churn).
+// Replies route through the same dataserver → handle_name_response path.
+request_username(string uuid_str) {
+    if (uuid_str == "" || (key)uuid_str == NULL_KEY) return;
+    key qid = llRequestUsername((key)uuid_str);
+    NameQueryIds   += [qid];
+    NameQueryUuids += [uuid_str];
+}
+
+// One response path for every role: a resolved name just updates the
+// record's name field, if the record still exists. The four per-roster
+// branches of the CSV era collapsed into this.
 handle_name_response(key query_id, string name) {
     integer idx = llListFindList(NameQueryIds, [query_id]);
     if (idx == -1) return;
 
     string uuid_str = llList2String(NameQueryUuids, idx);
-    string role     = llList2String(NameQueryRoles, idx);
 
     NameQueryIds   = list_remove_at(NameQueryIds, idx);
     NameQueryUuids = list_remove_at(NameQueryUuids, idx);
-    NameQueryRoles = list_remove_at(NameQueryRoles, idx);
 
     if (name == "") return;
+    if (user_read(uuid_str) == "") return;
 
-    if (role == "owner_scalar") {
-        // Confirm the uuid still matches before writing
-        if (llLinksetDataRead(KEY_OWNER) == uuid_str) {
-            llLinksetDataWrite(KEY_OWNER_NAME, name);
-            broadcast_settings_changed();
-        }
-        return;
-    }
-
-    if (role == "owner_csv") {
-        list uuids = csv_read(KEY_OWNER_UUIDS);
-        integer slot = llListFindList(uuids, [uuid_str]);
-        if (slot == -1) return;
-        list names = csv_read(KEY_OWNER_NAMES);
-        while (llGetListLength(names) <= slot) names += [NAME_LOADING];
-        names = llListReplaceList(names, [name], slot, slot);
-        csv_write(KEY_OWNER_NAMES, names);
-        broadcast_settings_changed();
-        return;
-    }
-
-    if (role == "trustee_csv") {
-        list uuids = csv_read(KEY_TRUSTEE_UUIDS);
-        integer slot = llListFindList(uuids, [uuid_str]);
-        if (slot == -1) return;
-        list names = csv_read(KEY_TRUSTEE_NAMES);
-        while (llGetListLength(names) <= slot) names += [NAME_LOADING];
-        names = llListReplaceList(names, [name], slot, slot);
-        csv_write(KEY_TRUSTEE_NAMES, names);
-        broadcast_settings_changed();
-    }
+    user_set_field(uuid_str, 2, name);
+    broadcast_settings_changed();
 }
 
 /* -------------------- INTERNAL MUTATORS -------------------- */
 
-// Single-owner: write the scalar trio. Also sets isowned and clears any
-// stale multi-owner CSV data.
-integer set_single_owner(string uuid_str, string honorific) {
+// Menu owner set: single-owner semantics — replaces the current owner
+// record. Role exclusivity is structural: user_write overwrites whatever
+// role the uuid previously held. Name: username when resolvable in-region,
+// else "(loading...)"; either way an async display-name upgrade is fired.
+integer set_owner_record(string uuid_str, string honorific) {
     if (uuid_str == "" || (key)uuid_str == NULL_KEY) return FALSE;
     if ((key)uuid_str == llGetOwner()) {
         llRegionSayTo(llGetOwner(), 0, "ERROR: Cannot add wearer as owner (role separation required)");
         return FALSE;
     }
 
-    // Role exclusivity: drop from trustees and blacklist
-    remove_trustee_internal(uuid_str);
-    remove_blacklist_internal(uuid_str);
+    delete_role(5);
 
-    // Clear multi-owner CSVs (we are in single-owner mode now)
-    llLinksetDataDelete(KEY_OWNER_UUIDS);
-    llLinksetDataDelete(KEY_OWNER_NAMES);
-    llLinksetDataDelete(KEY_OWNER_HONORIFICS);
-    llLinksetDataDelete(KEY_MULTI_OWNER_MODE);
-
-    llLinksetDataWrite(KEY_OWNER, uuid_str);
-    llLinksetDataWrite(KEY_OWNER_NAME, NAME_LOADING);
-    llLinksetDataWrite(KEY_OWNER_HONORIFIC, honorific);
+    string nm = llGetUsername((key)uuid_str);
+    if (nm == "") nm = NAME_LOADING;
+    user_write(uuid_str, 5, 0, nm, honorific);
     llLinksetDataWrite(KEY_ISOWNED, "1");
 
-    request_name(uuid_str, "owner_scalar");
+    request_name(uuid_str);
     return TRUE;
 }
 
-clear_single_owner() {
-    llLinksetDataDelete(KEY_OWNER);
-    llLinksetDataDelete(KEY_OWNER_NAME);
-    llLinksetDataDelete(KEY_OWNER_HONORIFIC);
+clear_owner_records() {
+    delete_role(5);
     llLinksetDataDelete(KEY_ISOWNED);
 }
 
 integer add_trustee_internal(string uuid_str, string honorific) {
     if (uuid_str == "" || (key)uuid_str == NULL_KEY) return FALSE;
     if ((key)uuid_str == llGetOwner()) return FALSE;
-    if (is_owner(uuid_str)) return FALSE;
+    if (user_role(uuid_str) == 5) return FALSE;
+    if (user_role(uuid_str) == 3) return FALSE;
+    if (role_count(3) >= MaxListLen) return FALSE;
 
-    list uuids = csv_read(KEY_TRUSTEE_UUIDS);
-    if (llListFindList(uuids, [uuid_str]) != -1) return FALSE;
-    if (llGetListLength(uuids) >= MaxListLen) return FALSE;
+    // Overwrites a blacklist record for this uuid, if any (exclusivity).
+    string nm = llGetUsername((key)uuid_str);
+    if (nm == "") nm = NAME_LOADING;
+    user_write(uuid_str, 3, role_count(3), nm, honorific);
 
-    remove_blacklist_internal(uuid_str);
-
-    list names = csv_read(KEY_TRUSTEE_NAMES);
-    list hons  = csv_read(KEY_TRUSTEE_HONORIFICS);
-
-    uuids += [uuid_str];
-    names += [NAME_LOADING];
-    hons  += [honorific];
-
-    csv_write(KEY_TRUSTEE_UUIDS,      uuids);
-    csv_write(KEY_TRUSTEE_NAMES,      names);
-    csv_write(KEY_TRUSTEE_HONORIFICS, hons);
-
-    request_name(uuid_str, "trustee_csv");
+    request_name(uuid_str);
     return TRUE;
 }
 
 integer remove_trustee_internal(string uuid_str) {
-    list uuids = csv_read(KEY_TRUSTEE_UUIDS);
-    integer idx = llListFindList(uuids, [uuid_str]);
-    if (idx == -1) return FALSE;
-
-    list names = csv_read(KEY_TRUSTEE_NAMES);
-    list hons  = csv_read(KEY_TRUSTEE_HONORIFICS);
-
-    uuids = list_remove_at(uuids, idx);
-    if (idx < llGetListLength(names)) names = list_remove_at(names, idx);
-    if (idx < llGetListLength(hons))  hons  = list_remove_at(hons,  idx);
-
-    csv_write(KEY_TRUSTEE_UUIDS,      uuids);
-    csv_write(KEY_TRUSTEE_NAMES,      names);
-    csv_write(KEY_TRUSTEE_HONORIFICS, hons);
+    if (user_role(uuid_str) != 3) return FALSE;
+    user_delete(uuid_str);
     return TRUE;
 }
 
-integer add_blacklist_internal(string uuid_str) {
+integer add_blacklist_internal(string uuid_str, string name_str) {
     if (uuid_str == "" || (key)uuid_str == NULL_KEY) return FALSE;
     if ((key)uuid_str == llGetOwner()) return FALSE;
-    if (is_owner(uuid_str)) return FALSE;
-    if (is_trustee(uuid_str)) return FALSE;
+    if (user_role(uuid_str) == 5) return FALSE;
+    if (user_role(uuid_str) == 3) return FALSE;
+    if (user_role(uuid_str) == -1) return FALSE;
+    if (role_count(-1) >= MaxListLen) return FALSE;
 
-    list bl = csv_read(KEY_BLACKLIST);
-    if (llListFindList(bl, [uuid_str]) != -1) return FALSE;
-    if (llGetListLength(bl) >= MaxListLen) return FALSE;
+    // Name chain: provided (picker resolves while the avatar is in-region)
+    // → username → UUID placeholder + async username upgrade.
+    string nm = san_field(name_str);
+    if (nm == "") nm = llGetUsername((key)uuid_str);
+    if (nm == "") {
+        nm = uuid_str;
+        request_username(uuid_str);
+    }
 
-    bl += [uuid_str];
-    csv_write(KEY_BLACKLIST, bl);
+    user_write(uuid_str, -1, 0, nm, "");
     return TRUE;
 }
 
 integer remove_blacklist_internal(string uuid_str) {
-    list bl = csv_read(KEY_BLACKLIST);
-    integer idx = llListFindList(bl, [uuid_str]);
-    if (idx == -1) return FALSE;
-    bl = list_remove_at(bl, idx);
-    csv_write(KEY_BLACKLIST, bl);
+    if (user_role(uuid_str) != -1) return FALSE;
+    user_delete(uuid_str);
     return TRUE;
 }
 
-/* -------------------- NOTECARD-ONLY KEYS -------------------- */
+/* -------------------- CARD ROSTER BUILDERS -------------------- */
 
-// Keys that may only be set via notecard, not the runtime API
-integer is_notecard_only_key(string k) {
-    if (k == KEY_MULTI_OWNER_MODE) return TRUE;
-    if (k == KEY_OWNER_UUIDS)      return TRUE;
-    if (k == KEY_OWNER_NAMES)      return TRUE;
-    if (k == KEY_OWNER_HONORIFICS) return TRUE;
-    return FALSE;
+// Append an owner from the card. rank = current owner count, so card
+// order is preserved (rank 0 = primary). With multi-owner mode OFF
+// (default), "there can be only one": extra card owners are refused.
+card_add_owner(string uuid_str) {
+    key u = (key)uuid_str;
+    if (u == NULL_KEY || u == llGetOwner()) return;
+    if (user_role(uuid_str) == 5) return;
+
+    if (!is_multi_owner_mode() && role_count(5) >= 1) {
+        llRegionSayTo(llGetOwner(), 0,
+            "WARNING: Multi-owner mode is off — additional card owner ignored. Set access.multiowner = 1 BEFORE the owner lines to allow several owners.");
+        return;
+    }
+
+    string nm = llGetUsername(u);
+    if (nm == "") nm = NAME_LOADING;
+    user_write(uuid_str, 5, role_count(5), nm, "");
+    llLinksetDataWrite(KEY_ISOWNED, "1");
+    request_name(uuid_str);
+}
+
+card_add_trustee(string uuid_str) {
+    key u = (key)uuid_str;
+    if (u == NULL_KEY || u == llGetOwner()) return;
+    if (user_role(uuid_str) == 5) return;
+    if (user_role(uuid_str) == 3) return;
+    if (role_count(3) >= MaxListLen) return;
+
+    string nm = llGetUsername(u);
+    if (nm == "") nm = NAME_LOADING;
+    user_write(uuid_str, 3, role_count(3), nm, "");
+    request_name(uuid_str);
+}
+
+// Apply card honorific lines at EOF, by rank, so the card's uuid and
+// honorific lines work in either order.
+apply_card_honorifics() {
+    list owners = role_uuids(5);
+    integer n = llGetListLength(CardOwnerHons);
+    if (n > llGetListLength(owners)) n = llGetListLength(owners);
+    integer i = 0;
+    while (i < n) {
+        user_set_field(llList2String(owners, i), 3, llList2String(CardOwnerHons, i));
+        i += 1;
+    }
+
+    list trustees = role_uuids(3);
+    n = llGetListLength(CardTrusteeHons);
+    if (n > llGetListLength(trustees)) n = llGetListLength(trustees);
+    i = 0;
+    while (i < n) {
+        user_set_field(llList2String(trustees, i), 3, llList2String(CardTrusteeHons, i));
+        i += 1;
+    }
+
+    CardOwnerHons = [];
+    CardTrusteeHons = [];
 }
 
 /* -------------------- NOTECARD PARSING -------------------- */
@@ -546,134 +640,95 @@ parse_notecard_line(string line) {
     // Provenance: record which manifest token this card line contributes, so a
     // later reload that drops the line clears it (runtime-only keys, never
     // recorded here, survive). Owner/trustee/blacklist collapse to family units.
-    if (key_name == KEY_OWNER || key_name == KEY_OWNER_HONORIFIC
-        || key_name == KEY_OWNER_UUIDS || key_name == KEY_OWNER_NAMES
-        || key_name == KEY_OWNER_HONORIFICS) {
+    if (key_name == CARD_OWNER || key_name == CARD_OWNER_HON
+        || key_name == CARD_OWNER_UUIDS || key_name == CARD_OWNER_NAMES
+        || key_name == CARD_OWNER_HONS) {
         record_card_key("@owner");
     }
-    else if (key_name == KEY_TRUSTEE_UUIDS || key_name == KEY_TRUSTEE_NAMES
-        || key_name == KEY_TRUSTEE_HONORIFICS) {
+    else if (key_name == CARD_TRUSTEE_UUIDS || key_name == CARD_TRUSTEE_NAMES
+        || key_name == CARD_TRUSTEE_HONS) {
         record_card_key("@trustees");
     }
-    else if (key_name == KEY_BLACKLIST) {
+    else if (key_name == CARD_BLACKLIST) {
         record_card_key("@blacklist");
     }
     else if (llSubStringIndex(key_name, ".") != -1) {
         record_card_key(key_name);
     }
 
-    // Multi-owner mode flag
-    if (key_name == KEY_MULTI_OWNER_MODE) {
+    // Multi-owner policy flag (notecard-only). Card convention: place it
+    // BEFORE the owner lines — the parser enforces single-owner as it
+    // reads, so a late flag can't retroactively admit dropped owners.
+    if (key_name == CARD_MULTI_OWNER) {
         llLinksetDataWrite(KEY_MULTI_OWNER_MODE, normalize_bool(value));
         return;
     }
 
-    // Single-owner scalar (notecard can also use single-owner mode)
-    if (key_name == KEY_OWNER) {
-        key u = (key)value;
-        if (u == NULL_KEY || u == llGetOwner()) return;
-        llLinksetDataWrite(KEY_OWNER, value);
-        if (llLinksetDataRead(KEY_OWNER_NAME) == "") {
-            llLinksetDataWrite(KEY_OWNER_NAME, NAME_LOADING);
-        }
-        llLinksetDataWrite(KEY_ISOWNED, "1");
-        request_name(value, "owner_scalar");
+    // No-op roster lines: *names resolve automatically — accept and ignore.
+    if (key_name == CARD_OWNER_NAMES) return;
+    if (key_name == CARD_TRUSTEE_NAMES) return;
+    if (key_name == CARD_OWNER_NAME) return;
+
+    // Owner lines — each uuid becomes a rank-ordered owner record.
+    if (key_name == CARD_OWNER) {
+        card_add_owner(value);
         return;
     }
-
-    if (key_name == KEY_OWNER_HONORIFIC) {
-        llLinksetDataWrite(KEY_OWNER_HONORIFIC, value);
-        return;
-    }
-
-    // Multi-owner CSVs (notecard only)
-    if (key_name == KEY_OWNER_UUIDS) {
+    if (key_name == CARD_OWNER_UUIDS) {
         list uuids = llCSV2List(value);
         if (llGetListLength(uuids) > MaxListLen) {
             uuids = llList2List(uuids, 0, MaxListLen - 1);
         }
-        list valid = [];
         integer i;
         integer len = llGetListLength(uuids);
         for (i = 0; i < len; i++) {
-            key u = (key)llList2String(uuids, i);
-            if (u != NULL_KEY && u != llGetOwner()) {
-                valid += [(string)u];
-                request_name((string)u, "owner_csv");
-            }
-        }
-        csv_write(KEY_OWNER_UUIDS, valid);
-        // Initialize names CSV with placeholders
-        list placeholders = [];
-        integer pi = 0;
-        integer plen = llGetListLength(valid);
-        while (pi < plen) {
-            placeholders += [NAME_LOADING];
-            pi += 1;
-        }
-        csv_write(KEY_OWNER_NAMES, placeholders);
-        if (llGetListLength(valid) > 0) {
-            llLinksetDataWrite(KEY_ISOWNED, "1");
+            card_add_owner(llList2String(uuids, i));
         }
         return;
     }
 
-    if (key_name == KEY_OWNER_HONORIFICS) {
-        list hons = llCSV2List(value);
-        csv_write(KEY_OWNER_HONORIFICS, hons);
+    // Honorific lines are buffered and applied by rank at EOF, so the
+    // card's uuid and honorific lines work in either order.
+    if (key_name == CARD_OWNER_HON) {
+        CardOwnerHons = [value];
+        return;
+    }
+    if (key_name == CARD_OWNER_HONS) {
+        CardOwnerHons = llCSV2List(value);
+        return;
+    }
+    if (key_name == CARD_TRUSTEE_HONS) {
+        CardTrusteeHons = llCSV2List(value);
         return;
     }
 
-    // Trustees CSVs
-    if (key_name == KEY_TRUSTEE_UUIDS) {
+    // Trustee uuids
+    if (key_name == CARD_TRUSTEE_UUIDS) {
         list uuids = llCSV2List(value);
         if (llGetListLength(uuids) > MaxListLen) {
             uuids = llList2List(uuids, 0, MaxListLen - 1);
         }
-        list valid = [];
         integer i;
         integer len = llGetListLength(uuids);
         for (i = 0; i < len; i++) {
-            key u = (key)llList2String(uuids, i);
-            if (u != NULL_KEY && u != llGetOwner() && !is_owner((string)u)) {
-                valid += [(string)u];
-                request_name((string)u, "trustee_csv");
-            }
+            card_add_trustee(llList2String(uuids, i));
         }
-        csv_write(KEY_TRUSTEE_UUIDS, valid);
-        list placeholders = [];
-        integer pi = 0;
-        integer plen = llGetListLength(valid);
-        while (pi < plen) {
-            placeholders += [NAME_LOADING];
-            pi += 1;
-        }
-        csv_write(KEY_TRUSTEE_NAMES, placeholders);
         return;
     }
 
-    if (key_name == KEY_TRUSTEE_HONORIFICS) {
-        list hons = llCSV2List(value);
-        csv_write(KEY_TRUSTEE_HONORIFICS, hons);
-        return;
-    }
-
-    // Blacklist CSV
-    if (key_name == KEY_BLACKLIST) {
+    // Blacklist uuids. NOTE: like TPE-after-owner, exclusivity checks here
+    // see only roles defined EARLIER in the card — list owners/trustees
+    // before the blacklist line (established card convention).
+    if (key_name == CARD_BLACKLIST) {
         list bl = llCSV2List(value);
         if (llGetListLength(bl) > MaxListLen) {
             bl = llList2List(bl, 0, MaxListLen - 1);
         }
-        list valid = [];
         integer i;
         integer len = llGetListLength(bl);
         for (i = 0; i < len; i++) {
-            key u = (key)llList2String(bl, i);
-            if (u != NULL_KEY && u != llGetOwner() && !is_owner((string)u) && !is_trustee((string)u)) {
-                valid += [(string)u];
-            }
+            add_blacklist_internal(llList2String(bl, i), "");
         }
-        csv_write(KEY_BLACKLIST, valid);
         return;
     }
 
@@ -698,7 +753,10 @@ parse_notecard_line(string line) {
         return;
     }
 
-    // Generic plugin scalars (any other dotted key) — write through
+    // Generic plugin scalars (any other dotted key) — write through.
+    // user.* records are kmod_settings-internal: a card may only define
+    // people via the roster lines above, never by raw record writes.
+    if (llSubStringIndex(key_name, USER_PREFIX) == 0) return;
     if (llSubStringIndex(key_name, ".") != -1) {
         llLinksetDataWrite(key_name, value);
     }
@@ -710,6 +768,8 @@ integer start_notecard_reading() {
     // sentinel first. Boot/restart paths fall through this guard so a
     // hostile notecard cannot self-arm a wiped collar.
     CardProvided = [];   // reset provenance accumulator for this parse
+    CardOwnerHons = [];
+    CardTrusteeHons = [];
     if (llLinksetDataRead(KEY_SENTINEL) != "") return FALSE;
 
     if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) {
@@ -750,21 +810,16 @@ handle_settings_get() {
 handle_set(string msg) {
     string key_name = llJsonGetValue(msg, ["key"]);
     if (key_name == JSON_INVALID) return;
-    if (is_notecard_only_key(key_name)) return;
 
     string value = llJsonGetValue(msg, ["value"]);
     if (value == JSON_INVALID) return;
 
-    // Refuse direct writes to managed access lists
-    if (key_name == KEY_OWNER
-        || key_name == KEY_OWNER_NAME
-        || key_name == KEY_OWNER_HONORIFIC
-        || key_name == KEY_TRUSTEE_UUIDS
-        || key_name == KEY_TRUSTEE_NAMES
-        || key_name == KEY_TRUSTEE_HONORIFICS
-        || key_name == KEY_BLACKLIST) {
-        return;
-    }
+    // Refuse direct roster writes: user.* records mutate ONLY through the
+    // dedicated owner/trustee/blacklist handlers, and the legacy roster
+    // key names no longer exist as LSD keys. The multi-owner policy flag
+    // is notecard-only (commitment semantics — never runtime-settable).
+    if (llSubStringIndex(key_name, USER_PREFIX) == 0) return;
+    if (key_name == KEY_MULTI_OWNER_MODE) return;
 
     // Boolean normalization
     if (key_name == KEY_PUBLIC_ACCESS
@@ -804,7 +859,7 @@ handle_set_owner(string msg) {
     string honorific = llJsonGetValue(msg, ["honorific"]);
     if (uuid_str == JSON_INVALID || honorific == JSON_INVALID) return;
 
-    if (set_single_owner(uuid_str, honorific)) {
+    if (set_owner_record(uuid_str, honorific)) {
         broadcast_settings_changed();
     }
 }
@@ -814,7 +869,7 @@ handle_clear_owner() {
         llRegionSayTo(llGetOwner(), 0, "ERROR: Cannot clear owner via menu in multi-owner mode (notecard managed)");
         return;
     }
-    clear_single_owner();
+    clear_owner_records();
     broadcast_settings_changed();
 }
 
@@ -841,7 +896,12 @@ handle_blacklist_add(string msg) {
     string uuid_str = llJsonGetValue(msg, ["uuid"]);
     if (uuid_str == JSON_INVALID) return;
 
-    if (add_blacklist_internal(uuid_str)) {
+    // Optional display name captured by the sender at add-time (the avatar
+    // is in-region during the picker flow, so resolution is reliable there).
+    string name_str = llJsonGetValue(msg, ["name"]);
+    if (name_str == JSON_INVALID) name_str = "";
+
+    if (add_blacklist_internal(uuid_str, name_str)) {
         broadcast_settings_changed();
     }
 }
@@ -868,17 +928,18 @@ handle_runaway() {
 // re-parse. Trust assumption: wearer is consenting and the notecard is fine.
 // Abuse-recovery is the Runaway path, not this.
 handle_reset_config() {
-    ResetConfigKeys = [
-        KEY_OWNER,
-        KEY_OWNER_NAME,
-        KEY_OWNER_HONORIFIC,
-        KEY_OWNER_UUIDS,
-        KEY_OWNER_NAMES,
-        KEY_OWNER_HONORIFICS,
-        KEY_MULTI_OWNER_MODE,
-        KEY_ISOWNED,
-        KEY_LOCKED
-    ];
+    // Preserve the owner block (every acl-5 user record) + flags. Keys are
+    // enumerated dynamically; the snapshot/restore loops below are generic.
+    ResetConfigKeys = [KEY_ISOWNED, KEY_MULTI_OWNER_MODE, KEY_LOCKED];
+    list ks = user_keys();
+    integer ki;
+    integer kn = llGetListLength(ks);
+    for (ki = 0; ki < kn; ki++) {
+        string uk = llList2String(ks, ki);
+        if ((integer)llLinksetDataRead(uk) == 5) {
+            ResetConfigKeys += [uk];
+        }
+    }
     ResetConfigValues = [];
 
     integer i;
@@ -1006,6 +1067,10 @@ default
             }
             else {
                 IsLoadingNotecard = FALSE;
+
+                // Card honorific lines apply by rank now that every card
+                // uuid line has been processed (order-independent cards).
+                apply_card_honorifics();
 
                 if (InResetConfig) {
                     // Reset Config in flight: restore preserved keys for any

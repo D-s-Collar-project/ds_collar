@@ -1,7 +1,9 @@
 /*--------------------
 PLUGIN: plugin_status.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: Owner/trustee display enumerates the user-record roster (user.<uuid>, rank-ordered) instead of the retired access.owner-/trustee- keys; mode label stays on the notecard-only access.multiowner policy flag.
 PURPOSE: Read-only collar status display for owners and observers
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
@@ -19,16 +21,9 @@ string PLUGIN_CONTEXT = "ui.core.status";
 string PLUGIN_LABEL = "Status";
 
 /* -------------------- SETTINGS KEYS -------------------- */
+// Rosters enumerate from user.<uuid> records (see role_lines). The mode
+// label reads the notecard-only multi-owner policy flag.
 string KEY_MULTI_OWNER_MODE  = "access.multiowner";
-string KEY_OWNER             = "access.owner";
-string KEY_OWNER_NAME        = "access.ownername";
-string KEY_OWNER_HONORIFIC   = "access.ownerhonorific";
-string KEY_OWNER_UUIDS       = "access.owneruuids";
-string KEY_OWNER_NAMES       = "access.ownernames";
-string KEY_OWNER_HONORIFICS  = "access.ownerhonorifics";
-string KEY_TRUSTEE_UUIDS     = "access.trusteeuuids";
-string KEY_TRUSTEE_NAMES     = "access.trusteenames";
-string KEY_TRUSTEE_HONORIFICS = "access.trusteehonorifics";
 string KEY_PUBLIC_ACCESS     = "public.mode";
 string KEY_LOCKED            = "lock.locked";
 string KEY_TPE_MODE          = "tpe.mode";
@@ -45,14 +40,6 @@ string SessionId = "";
 
 string generate_session_id() {
     return PLUGIN_CONTEXT + "_" + (string)llGetUnixTime();
-}
-
-// llCSV2List("") returns [""] (length 1), not []. This wrapper returns a
-// truly empty list when the LSD key is unset/empty.
-list csv_read(string lsd_key) {
-    string raw = llLinksetDataRead(lsd_key);
-    if (raw == "") return [];
-    return llCSV2List(raw);
 }
 
 /* -------------------- LIFECYCLE MANAGEMENT -------------------- */
@@ -120,66 +107,60 @@ send_pong() {
 
 /* -------------------- STATUS REPORT BUILDING -------------------- */
 
+// Format every "<Honorific> Name" line for one role from the user-record
+// roster (user.<uuid> = "<acl>,<rank>,<name>,<honorific>"), rank-sorted.
+string role_lines(integer want_acl) {
+    list rows = [];   // strided [rank, name, honorific]
+    list ks = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string rec = llLinksetDataRead(llList2String(ks, i));
+        if ((integer)rec == want_acl) {
+            list f = llCSV2List(rec);
+            rows += [(integer)llList2String(f, 1), llList2String(f, 2), llList2String(f, 3)];
+        }
+        i += 1;
+    }
+    if (llGetListLength(rows) > 3) rows = llListSortStrided(rows, 3, 0, TRUE);
+
+    string out = "";
+    n = llGetListLength(rows);
+    i = 0;
+    while (i < n) {
+        string nm = llList2String(rows, i + 1);
+        string hn = llList2String(rows, i + 2);
+        if (hn != "") out += "  " + hn + " " + nm + "\n";
+        else          out += "  " + nm + "\n";
+        i += 3;
+    }
+    return out;
+}
+
 // Reads all data fresh from LSD on each call. No cache, no async name
-// resolution — kmod_settings keeps names current in LSD.
+// resolution — kmod_settings keeps record names current.
 string build_status_report() {
     string status_text = "Collar Status:\n\n";
 
-    integer multi_mode = (integer)llLinksetDataRead(KEY_MULTI_OWNER_MODE);
-
-    // Owner information
-    if (multi_mode) {
-        list uuids = csv_read(KEY_OWNER_UUIDS);
-        list names = csv_read(KEY_OWNER_NAMES);
-        list hons  = csv_read(KEY_OWNER_HONORIFICS);
-        integer owner_count = llGetListLength(uuids);
-
-        if (owner_count > 0) {
-            status_text += "Owners:\n";
-            integer i;
-            for (i = 0; i < owner_count; i++) {
-                string nm = "";
-                if (i < llGetListLength(names)) nm = llList2String(names, i);
-                string hn = "";
-                if (i < llGetListLength(hons)) hn = llList2String(hons, i);
-                if (hn != "") status_text += "  " + hn + " " + nm + "\n";
-                else          status_text += "  " + nm + "\n";
-            }
+    // Owner information (mode label = the notecard-only policy flag)
+    string owner_block = role_lines(5);
+    if (owner_block != "") {
+        if ((integer)llLinksetDataRead(KEY_MULTI_OWNER_MODE)) {
+            status_text += "Owners:\n" + owner_block;
         }
         else {
-            status_text += "Owners: Uncommitted\n";
+            // Single-owner: one line, inline label
+            status_text += "Owner:" + llGetSubString(owner_block, 2, -1);
         }
     }
     else {
-        string owner_uuid = llLinksetDataRead(KEY_OWNER);
-        if (owner_uuid != "") {
-            string nm = llLinksetDataRead(KEY_OWNER_NAME);
-            string hn = llLinksetDataRead(KEY_OWNER_HONORIFIC);
-            if (hn != "") status_text += "Owner: " + hn + " " + nm + "\n";
-            else          status_text += "Owner: " + nm + "\n";
-        }
-        else {
-            status_text += "Owner: Uncommitted\n";
-        }
+        status_text += "Owner: Uncommitted\n";
     }
 
     // Trustee information
-    list trustee_uuids = csv_read(KEY_TRUSTEE_UUIDS);
-    list trustee_names = csv_read(KEY_TRUSTEE_NAMES);
-    list trustee_hons  = csv_read(KEY_TRUSTEE_HONORIFICS);
-    integer trustee_count = llGetListLength(trustee_uuids);
-
-    if (trustee_count > 0) {
-        status_text += "Trustees:\n";
-        integer i;
-        for (i = 0; i < trustee_count; i++) {
-            string nm = "";
-            if (i < llGetListLength(trustee_names)) nm = llList2String(trustee_names, i);
-            string hn = "";
-            if (i < llGetListLength(trustee_hons)) hn = llList2String(trustee_hons, i);
-            if (hn != "") status_text += "  " + hn + " " + nm + "\n";
-            else          status_text += "  " + nm + "\n";
-        }
+    string trustee_block = role_lines(3);
+    if (trustee_block != "") {
+        status_text += "Trustees:\n" + trustee_block;
     }
     else {
         status_text += "Trustees: none\n";

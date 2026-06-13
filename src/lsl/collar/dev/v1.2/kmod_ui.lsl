@@ -1,7 +1,9 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: User-record roster (kmod_settings rev 2): dropped the local acl.<uuid>.cache fast path + acl.timestamp staleness check entirely — every session start now round-trips auth.acl.query (one link-message hop, no staleness window, single ACL implementation in kmod_auth).
 PURPOSE: Session management, categorized per-ACL menu views (LSD-resident),
          and plugin dispatch orchestration
 ARCHITECTURE: BIND9-style views. Each plugin self-declares one LSD entry
@@ -39,13 +41,6 @@ float LONG_TOUCH_THRESHOLD = 1.5;
 integer MAX_SESSIONS = 5;
 integer SESSION_MAX_AGE = 60;  // Seconds before ACL refresh required
 
-// Per-user ACL cache prefix written by kmod_auth.lsl.
-// Reading "acl.<avatar_uuid>.cache" skips the AUTH_BUS round-trip on touch.
-// Value format: "<level>|<unix_timestamp>" — must match kmod_auth.lsl's store_cached_acl().
-// CROSS-MODULE CONTRACT: this format must match LSD_ACL_CACHE_PREFIX/SUFFIX in kmod_auth.lsl.
-string LSD_ACL_CACHE_PREFIX = "acl.";
-string LSD_ACL_CACHE_SUFFIX = ".cache";
-
 // Per-plugin self-declared registry entry. Written by plugins during
 // registration: reg.<context> = {"cat","label","script","mask"}.
 // kmod_ui enumerates via llLinksetDataFindKeys; plugins delete their own
@@ -74,13 +69,6 @@ integer VIEW_LEVEL_MAX = 5;
 // instantaneous; large enough to collapse the bootstrap burst of N plugins
 // registering back-to-back into a single rebuild.
 float REBUILD_DEBOUNCE = 0.1;
-
-/* ACL levels (mirrors auth module) */
-integer ACL_BLACKLIST = -1;
-
-// Sentinel for "no cached ACL" (-1 is a real level).
-integer ACL_NONE = -999;
-
 
 /* -------------------- STATE -------------------- */
 // Registered plugin contexts (chat dispatch + click validation). Labels,
@@ -135,29 +123,10 @@ string generate_session_id(key user) {
     return "ui_" + (string)user + "_" + (string)llGetUnixTime();
 }
 
-/* -------------------- ACL CACHE MANAGEMENT -------------------- */
-
-// Parse kmod_auth's per-user ACL cache entry. Returns the level, or
-// ACL_NONE on miss/stale (entry older than the acl.timestamp epoch).
-// Single parser shared by the touch and chat dispatch paths.
-integer read_cached_acl(key user_key) {
-    string raw = llLinksetDataRead(LSD_ACL_CACHE_PREFIX + (string)user_key + LSD_ACL_CACHE_SUFFIX);
-    if (raw == "") return ACL_NONE;
-    integer sep = llSubStringIndex(raw, "|");
-    if (sep == -1) return ACL_NONE;
-    integer cache_ts = (integer)llGetSubString(raw, sep + 1, -1);
-    integer global_ts = (integer)llLinksetDataRead("acl.timestamp");
-    if (cache_ts < global_ts) return ACL_NONE;
-    return (integer)llGetSubString(raw, 0, sep - 1);
-}
-
-integer try_cached_session(key user_key, string context_filter) {
-    integer level = read_cached_acl(user_key);
-    if (level == ACL_NONE) return FALSE;
-    create_session(user_key, level, (level == ACL_BLACKLIST), context_filter);
-    render_session(user_key);
-    return TRUE;
-}
+/* -------------------- PENDING ACL -------------------- */
+// Every session start round-trips auth.acl.query → auth.acl.result (one
+// link-message hop against the user-record roster — no local cache, no
+// staleness window; kmod_auth is the single ACL implementation).
 
 integer find_pending_acl_idx(key avatar_key) {
     return llListFindList(PendingAclAvatars, [avatar_key]);
@@ -359,30 +328,31 @@ schedule_rebuild() {
 
 /* -------------------- MENU RENDERING (delegated to kmod_menu.lsl) -------------------- */
 
-// Returns "[Honorific] Name" for the primary owner (single- or multi-owner mode),
-// or "" when no owner is set.
+// Returns "[Honorific] Name" for the primary owner (the lowest-rank acl-5
+// user record), or "" when no owner is set.
 string get_primary_owner_display() {
-    string owner_uuid = llLinksetDataRead("access.owner");
-    if (owner_uuid != "" && owner_uuid != NULL_KEY) {
-        string owner_name = llLinksetDataRead("access.ownername");
-        string honorific  = llLinksetDataRead("access.ownerhonorific");
-        if (honorific != "") return honorific + " " + owner_name;
-        return owner_name;
-    }
-    string names_csv = llLinksetDataRead("access.ownernames");
-    if (names_csv != "") {
-        list names_list = llCSV2List(names_csv);
-        string first_name = llList2String(names_list, 0);
-        if (first_name != "") {
-            string hons_csv = llLinksetDataRead("access.ownerhonorifics");
-            if (hons_csv != "") {
-                string first_hon = llList2String(llCSV2List(hons_csv), 0);
-                if (first_hon != "") return first_hon + " " + first_name;
+    string best_name = "";
+    string best_hon = "";
+    integer best_rank = 0x7FFFFFFF;
+    list ks = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string rec = llLinksetDataRead(llList2String(ks, i));
+        if ((integer)rec == 5) {
+            list f = llCSV2List(rec);
+            integer rank = (integer)llList2String(f, 1);
+            if (rank < best_rank) {
+                best_rank = rank;
+                best_name = llList2String(f, 2);
+                best_hon = llList2String(f, 3);
             }
-            return first_name;
         }
+        i += 1;
     }
-    return "";
+    if (best_name == "") return "";
+    if (best_hon != "") return best_hon + " " + best_name;
+    return best_name;
 }
 
 send_message(key user, string message_text) {
@@ -734,24 +704,15 @@ handle_start(string msg, key user_key) {
     }
     string subpath = extract_subpath(context, matched);
 
-    // Existing session — dispatch immediately using cached ACL.
+    // Existing session — dispatch immediately using the session's ACL.
     integer session_idx = find_session_idx(user_key);
     if (session_idx != -1) {
         dispatch_to_plugin(user_key, matched, subpath, session_idx);
         return;
     }
 
-    // LSD cache hit — create root session for navigation then dispatch.
-    integer level = read_cached_acl(user_key);
-    if (level != ACL_NONE) {
-        create_session(user_key, level, (level == ACL_BLACKLIST), ROOT_CONTEXT);
-        session_idx = find_session_idx(user_key);
-        if (session_idx != -1) dispatch_to_plugin(user_key, matched, subpath, session_idx);
-        return;
-    }
-
-    // Cold miss — queue ACL query, store original requested context so the
-    // subpath is preserved when handle_acl_result resumes dispatch.
+    // No session — queue ACL query, storing the original requested context
+    // so the subpath is preserved when handle_acl_result resumes dispatch.
     integer pending_idx = find_pending_acl_idx(user_key);
     if (pending_idx != -1) return;
     PendingAclAvatars += [user_key];
@@ -762,15 +723,11 @@ handle_start(string msg, key user_key) {
     ]), NULL_KEY);
 }
 
-// Open a menu session (root or SOS) for a user: cached ACL when fresh,
-// AUTH_BUS round-trip otherwise.
+// Open a menu session (root or SOS) for a user via the auth round-trip;
+// handle_acl_result creates the session and renders when the level lands.
 start_session(key user_key, string context_filter) {
     integer idx = find_pending_acl_idx(user_key);
     if (idx != -1) return;
-
-    if (try_cached_session(user_key, context_filter)) {
-        return;
-    }
 
     PendingAclAvatars += [user_key];
     PendingAclContexts += [context_filter];

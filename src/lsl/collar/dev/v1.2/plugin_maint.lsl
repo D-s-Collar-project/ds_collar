@@ -1,7 +1,9 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: Settings view enumerates owners/trustees from the user-record roster (user.<uuid>, rank-ordered, fmt_role_person_lines) instead of the retired access.owner-/trustee- keys; mode label stays on the notecard-only access.multiowner policy flag.
 PURPOSE: Maintenance and utility functions for collar management
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 --------------------*/
@@ -50,13 +52,6 @@ string generate_session_id() {
     return "maint_" + (string)llGetKey() + "_" + (string)llGetUnixTime();
 }
 
-// llCSV2List("") returns [""] (length 1), not []. This wrapper returns a
-// truly empty list when the LSD key is unset/empty.
-list csv_read(string lsd_key) {
-    string raw = llLinksetDataRead(lsd_key);
-    if (raw == "") return [];
-    return llCSV2List(raw);
-}
 
 /* -------------------- LSD POLICY HELPER -------------------- */
 list get_policy_buttons(string ctx, integer acl) {
@@ -205,25 +200,34 @@ string fmt_relay_mode(string raw) {
     return "OFF";
 }
 
-// Format parallel CSV lists (uuids, names, honorifics) into one block.
-// Returns the formatted block, or fallback_str if uuids is empty.
-string fmt_csv_person_lines(string uuids_csv, string names_csv, string hons_csv, string fallback_str) {
-    // Guard: llCSV2List("") returns [""] (length 1), not [].
-    if (uuids_csv == "") return fallback_str;
-    list uuids = llCSV2List(uuids_csv);
-    list names = llCSV2List(names_csv);
-    list hons  = llCSV2List(hons_csv);
-    integer count = llGetListLength(uuids);
+// Format every "<Honorific> Name (uuid)" line for one role from the
+// user-record roster (user.<uuid> = "<acl>,<rank>,<name>,<honorific>"),
+// rank-sorted. Returns the block, or fallback_str when the role is empty.
+string fmt_role_person_lines(integer want_acl, string fallback_str) {
+    list rows = [];   // strided [rank, uuid, name, honorific]
+    list ks = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string k = llList2String(ks, i);
+        string rec = llLinksetDataRead(k);
+        if ((integer)rec == want_acl) {
+            list f = llCSV2List(rec);
+            rows += [(integer)llList2String(f, 1), llGetSubString(k, 5, -1),
+                     llList2String(f, 2), llList2String(f, 3)];
+        }
+        i += 1;
+    }
+    integer count = llGetListLength(rows) / 4;
     if (count == 0) return fallback_str;
+    if (count > 1) rows = llListSortStrided(rows, 4, 0, TRUE);
 
     string block = "";
-    integer i = 0;
+    i = 0;
     while (i < count) {
-        string p_uuid = llList2String(uuids, i);
-        string p_name = "";
-        if (i < llGetListLength(names)) p_name = llList2String(names, i);
-        string p_hon = "";
-        if (i < llGetListLength(hons)) p_hon = llList2String(hons, i);
+        string p_uuid = llList2String(rows, i * 4 + 1);
+        string p_name = llList2String(rows, i * 4 + 2);
+        string p_hon  = llList2String(rows, i * 4 + 3);
         if (p_hon != "") block += "  " + p_hon + " " + p_name + " (" + p_uuid + ")\n";
         else             block += "  " + p_name + " (" + p_uuid + ")\n";
         i += 1;
@@ -251,39 +255,21 @@ do_view_settings() {
 
     string output = "\n=== Collar Settings ===\n";
 
-    // --- Owner(s) ---
-    if (multi) {
-        string owner_block = fmt_csv_person_lines(
-            llLinksetDataRead("access.owneruuids"),
-            llLinksetDataRead("access.ownernames"),
-            llLinksetDataRead("access.ownerhonorifics"),
-            "");
-        if (owner_block == "") {
-            output += "Owners: Uncommitted\n";
-        }
-        else {
-            output += "Owners:\n" + owner_block;
-        }
+    // --- Owner(s) — from the user-record roster ---
+    string owner_block = fmt_role_person_lines(5, "");
+    if (owner_block == "") {
+        output += "Owner: Uncommitted\n";
+    }
+    else if (multi) {
+        output += "Owners:\n" + owner_block;
     }
     else {
-        string owner_uuid = llLinksetDataRead("access.owner");
-        if (owner_uuid != "") {
-            string p_name = llLinksetDataRead("access.ownername");
-            string p_hon  = llLinksetDataRead("access.ownerhonorific");
-            if (p_hon != "") output += "Owner: " + p_hon + " " + p_name + " (" + owner_uuid + ")\n";
-            else             output += "Owner: " + p_name + " (" + owner_uuid + ")\n";
-        }
-        else {
-            output += "Owner: Uncommitted\n";
-        }
+        // Single-owner: one entry, inline label (strip the leading indent).
+        output += "Owner:" + llGetSubString(owner_block, 2, -1);
     }
 
     // --- Trustees ---
-    string trustee_block = fmt_csv_person_lines(
-        llLinksetDataRead("access.trusteeuuids"),
-        llLinksetDataRead("access.trusteenames"),
-        llLinksetDataRead("access.trusteehonorifics"),
-        "");
+    string trustee_block = fmt_role_person_lines(3, "");
     if (trustee_block == "") {
         output += "Trustees: none\n";
     }
@@ -311,79 +297,23 @@ do_view_settings() {
 do_display_access_list() {
     string output = "=== Access Control List ===\n\n";
 
-    integer multi_mode = (integer)llLinksetDataRead("access.multiowner");
-
-    // Owner(s)
-    if (multi_mode) {
+    // Owner(s) — from the user-record roster.
+    if ((integer)llLinksetDataRead("access.multiowner")) {
         output += "OWNERS:\n";
-        list uuids = csv_read("access.owneruuids");
-        list names = csv_read("access.ownernames");
-        list hons  = csv_read("access.ownerhonorifics");
-        integer count = llGetListLength(uuids);
-        if (count > 0) {
-            integer i;
-            for (i = 0; i < count; i++) {
-                string nm = "";
-                if (i < llGetListLength(names)) nm = llList2String(names, i);
-                string hn = "Owner";
-                if (i < llGetListLength(hons) && llList2String(hons, i) != "") {
-                    hn = llList2String(hons, i);
-                }
-                output += "  " + hn + " " + nm + " - " + llList2String(uuids, i) + "\n";
-            }
-        }
-        else {
-            output += "  (none)\n";
-        }
     }
     else {
         output += "OWNER:\n";
-        string owner_uuid = llLinksetDataRead("access.owner");
-        if (owner_uuid != "") {
-            string nm  = llLinksetDataRead("access.ownername");
-            string hn  = llLinksetDataRead("access.ownerhonorific");
-            if (hn == "") hn = "Owner";
-            output += "  " + hn + " " + nm + " - " + owner_uuid + "\n";
-        }
-        else {
-            output += "  (none)\n";
-        }
     }
+    string owner_block = fmt_role_person_lines(5, "  (none)\n");
+    output += owner_block;
 
     // Trustees
     output += "\nTRUSTEES:\n";
-    list t_uuids = csv_read("access.trusteeuuids");
-    list t_names = csv_read("access.trusteenames");
-    list t_hons  = csv_read("access.trusteehonorifics");
-    integer t_count = llGetListLength(t_uuids);
-    if (t_count > 0) {
-        integer i;
-        for (i = 0; i < t_count; i++) {
-            string nm = "";
-            if (i < llGetListLength(t_names)) nm = llList2String(t_names, i);
-            string hn = "Trustee";
-            if (i < llGetListLength(t_hons) && llList2String(t_hons, i) != "") {
-                hn = llList2String(t_hons, i);
-            }
-            output += "  " + hn + " " + nm + " - " + llList2String(t_uuids, i) + "\n";
-        }
-    }
-    else {
-        output += "  (none)\n";
-    }
+    output += fmt_role_person_lines(3, "  (none)\n");
 
-    // Blacklist (CSV of UUIDs)
+    // Blacklist
     output += "\nBLACKLISTED:\n";
-    list blacklist = csv_read("blacklist.blklistuuid");
-    if (llGetListLength(blacklist) > 0) {
-        integer i;
-        for (i = 0; i < llGetListLength(blacklist); i++) {
-            output += "  " + llList2String(blacklist, i) + "\n";
-        }
-    }
-    else {
-        output += "  (none)\n";
-    }
+    output += fmt_role_person_lines(-1, "  (none)\n");
 
     llRegionSayTo(CurrentUser, 0, output);
 }

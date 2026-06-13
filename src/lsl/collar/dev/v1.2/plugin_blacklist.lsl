@@ -1,9 +1,12 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 2
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+CHANGES:
+- v1.2 rev 2: Read the user-record roster (kmod_settings rev 2): blacklist = user.<uuid> records with acl -1, enumerated name-sorted into parallel Blacklist/BlacklistNames caches on settings.sync. Names come from the record (no fallback chain needed). Mutation messages unchanged.
+- v1.2 rev 1: Show Blklst button (policy-gated, ACL 2-5); names captured at add-time ("name" field on settings.blacklist.add); sensor radius 5 → 20 m.
 --------------------*/
 
 
@@ -31,17 +34,23 @@ integer MAX_NUMBERED_LIST_ITEMS = 11;  // 12 dialog buttons - 1 Back button
 */
 
 /* -------------------- SETTINGS KEYS -------------------- */
-string KEY_BLACKLIST = "blacklist.blklistuuid";
+// The roster lives in user.<uuid> = "<acl>,<rank>,<name>,<honorific>"
+// records (kmod_settings rev 2); blacklist entries carry acl -1. This
+// plugin enumerates them read-only (see apply_settings_sync); mutations
+// go through the settings.blacklist.add/remove messages as before.
 
 /* -------------------- UI CONSTANTS -------------------- */
 string BTN_BACK = "Back";
 string BTN_ADD = "+Blacklist";
 string BTN_REMOVE = "-Blacklist";
-float BLACKLIST_RADIUS = 5.0;
+string BTN_SHOW = "Show Blklst";
+float BLACKLIST_RADIUS = 20.0;
 
 /* -------------------- STATE -------------------- */
-// Settings cache
+// Roster cache (rebuilt from user.* records on settings.sync): parallel
+// uuid/name lists, name-sorted for stable display order.
 list Blacklist = [];
+list BlacklistNames = [];
 
 // Session management
 key CurrentUser = NULL_KEY;
@@ -76,18 +85,10 @@ integer btn_allowed(string label) {
     return (llListFindList(gPolicyButtons, [label]) != -1);
 }
 
+// Entry labels for list/remove dialogs — the names cached from the user
+// records by apply_settings_sync, parallel to Blacklist.
 list blacklist_names() {
-    list out = [];
-    integer i = 0;
-    integer count = llGetListLength(Blacklist);
-    while (i < count) {
-        key k = (key)llList2String(Blacklist, i);
-        string nm = llGetDisplayName(k);
-        if (nm == "") nm = (string)k;
-        out += [nm];
-        i += 1;
-    }
-    return out;
+    return BlacklistNames;
 }
 
 /* -------------------- LIFECYCLE -------------------- */
@@ -118,10 +119,10 @@ write_plugin_reg(string label) {
 register_self() {
     // Write button visibility policy to LSD (Owned+ can manage blacklist)
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
-        "2", "+Blacklist,-Blacklist",
-        "3", "+Blacklist,-Blacklist",
-        "4", "+Blacklist,-Blacklist",
-        "5", "+Blacklist,-Blacklist"
+        "2", "+Blacklist,-Blacklist,Show Blklst",
+        "3", "+Blacklist,-Blacklist,Show Blklst",
+        "4", "+Blacklist,-Blacklist,Show Blklst",
+        "5", "+Blacklist,-Blacklist,Show Blklst"
     ]));
 
     // Self-declared menu presence for kmod_ui.
@@ -154,15 +155,42 @@ send_pong() {
 /* -------------------- SETTINGS MANAGEMENT -------------------- */
 
 apply_settings_sync() {
-    string raw = llLinksetDataRead(KEY_BLACKLIST);
-    if (raw == "") Blacklist = [];
-    else           Blacklist = llCSV2List(raw);
+    // Enumerate blacklist records (acl -1), name-sorted via a strided
+    // [name, uuid] sort so display order is stable and human-friendly.
+    list ranked = [];
+    list ks = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string k = llList2String(ks, i);
+        string rec = llLinksetDataRead(k);
+        if ((integer)rec == -1) {
+            list f = llCSV2List(rec);
+            ranked += [llList2String(f, 2), llGetSubString(k, 5, -1)];
+        }
+        i += 1;
+    }
+    if (llGetListLength(ranked) > 2) {
+        ranked = llListSortStrided(ranked, 2, 0, TRUE);
+    }
+    Blacklist = [];
+    BlacklistNames = [];
+    n = llGetListLength(ranked);
+    i = 0;
+    while (i < n) {
+        BlacklistNames += [llList2String(ranked, i)];
+        Blacklist += [llList2String(ranked, i + 1)];
+        i += 2;
+    }
 }
 
-send_blacklist_add(string uuid_str) {
+// name_str: resolved at add-time while the avatar is in-region (display
+// name, username fallback); kmod_settings persists it parallel to the UUID.
+send_blacklist_add(string uuid_str, string name_str) {
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type", "settings.blacklist.add",
-        "uuid", uuid_str
+        "uuid", uuid_str,
+        "name", name_str
     ]), NULL_KEY);
 }
 
@@ -186,6 +214,7 @@ show_main_menu() {
     list button_data = [btn(BTN_BACK, "back")];
     if (btn_allowed("+Blacklist")) button_data += [btn(BTN_ADD, "add")];
     if (btn_allowed("-Blacklist")) button_data += [btn(BTN_REMOVE, "remove")];
+    if (btn_allowed("Show Blklst")) button_data += [btn(BTN_SHOW, "show")];
 
     SessionId = generate_session_id();
     MenuContext = "main";
@@ -237,6 +266,46 @@ handle_subpath(key user, integer acl_level, string subpath) {
 
     gPolicyButtons = [];
     llRegionSayTo(user, 0, "Unknown blacklist subcommand: " + subpath);
+}
+
+// Read-only listing of the blacklist (Show Blklst). Names from the
+// persisted CSV via blacklist_names(); truncated near llDialog's ~511-byte
+// body cap with a "… and N more" summary line. Back returns to main.
+show_list_menu() {
+    integer count = llGetListLength(Blacklist);
+    string body = "Blacklisted avatars: " + (string)count + "\n";
+
+    if (count == 0) {
+        body += "\n(none)";
+    }
+    else {
+        list names = blacklist_names();
+        integer i = 0;
+        while (i < count) {
+            string line = "\n• " + llList2String(names, i);
+            if (llStringLength(body) + llStringLength(line) > 440) {
+                body += "\n… and " + (string)(count - i) + " more";
+                i = count;
+            }
+            else {
+                body += line;
+                i += 1;
+            }
+        }
+    }
+
+    SessionId = generate_session_id();
+    MenuContext = "show";
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "session_id", SessionId,
+        "user", (string)CurrentUser,
+        "title", "Blacklist",
+        "body", body,
+        "button_data", llList2Json(JSON_ARRAY, [btn(BTN_BACK, "back")]),
+        "timeout", 60
+    ]), NULL_KEY);
 }
 
 show_remove_menu() {
@@ -362,6 +431,10 @@ handle_dialog_response(string msg) {
             show_remove_menu();
             return;
         }
+        if (cmd == "show") {
+            show_list_menu();
+            return;
+        }
     }
 
     // Remove menu - numbered selection
@@ -381,7 +454,12 @@ handle_dialog_response(string msg) {
         if (idx >= 0 && idx < llGetListLength(CandidateKeys)) {
             string entry = llList2String(CandidateKeys, idx);
             if (entry != "") {
-                send_blacklist_add(entry);
+                // Resolve the name NOW, while the avatar is in-region from
+                // the sensor pass (display name, username fallback) — this
+                // is what kmod_settings persists alongside the UUID.
+                string nm = llGetDisplayName((key)entry);
+                if (nm == "") nm = llGetUsername((key)entry);
+                send_blacklist_add(entry, nm);
                 llRegionSayTo(CurrentUser, 0, "Added to blacklist.");
             }
         }

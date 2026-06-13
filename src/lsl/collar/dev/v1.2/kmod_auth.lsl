@@ -1,9 +1,17 @@
 /*--------------------
 MODULE: kmod_auth.lsl
 VERSION: 1.2
-REVISION: 0
-PURPOSE: Authoritative ACL engine - OPTIMIZED
-ARCHITECTURE: Dispatch table pattern with linkset data cache and JSON templates
+REVISION: 1
+PURPOSE: Authoritative ACL engine over the user-record roster
+CHANGES:
+- v1.2 rev 1: Rebuilt on user.<uuid> records (kmod_settings rev 2). ACL for a named actor is ONE LSD read (the record's leading acl field); wearer/stranger paths read the isowned/tpe/public scalars. Deleted: the in-memory roster mirror + apply_settings_sync re-reads, enforce_role_exclusivity (structural now), the JSON list-compare change detection, the acl.<uuid>.cache layer (TTL cache, store/clear, precompute_known_acl), acl.timestamp, and the write-only acl.owners/trustees/blacklist/public/wearertpe debris keys. auth.acl.update now fires from a debounced linkset_data watch on user.* / public.mode / tpe.mode / access.isowned. Query queueing until the first settings.sync is kept (boot-order safety). Response templates and the auth.acl.query/result protocol are unchanged.
+ARCHITECTURE: Dispatch table pattern with JSON response templates. The
+  roster lives in LSD as user.<uuid> = "<acl>,<rank>,<name>,<honorific>"
+  records (written solely by kmod_settings); this module only reads them.
+  Consumers with a hot path (kmod_ui, kmod_chat) compute ACL from the same
+  records directly — kmod_auth remains the authoritative responder for
+  async auth.acl.query traffic (plugins, external HUD queries) and the
+  sole broadcaster of auth.acl.update on roster/flag changes.
 --------------------*/
 
 
@@ -22,40 +30,21 @@ integer ACL_UNOWNED       = 4;
 integer ACL_PRIMARY_OWNER = 5;
 
 /* -------------------- SETTINGS KEYS -------------------- */
-string KEY_MULTI_OWNER_MODE = "access.multiowner";
-string KEY_OWNER            = "access.owner";          // single-owner scalar
-string KEY_OWNER_UUIDS      = "access.owneruuids";     // multi-owner CSV
-string KEY_TRUSTEE_UUIDS    = "access.trusteeuuids";
-string KEY_BLACKLIST        = "blacklist.blklistuuid";
-string KEY_PUBLIC_ACCESS    = "public.mode";
-string KEY_TPE_MODE         = "tpe.mode";
+// User records (written by kmod_settings): user.<uuid> =
+// "<acl>,<rank>,<name>,<honorific>". The leading field parses straight
+// off the raw value with an integer cast. CROSS-MODULE CONTRACT.
+string USER_PREFIX = "user.";
 
-/* -------------------- LINKSET DATA KEYS -------------------- */
-string LSD_KEY_ACL_OWNERS    = "acl.owners";
-string LSD_KEY_ACL_TRUSTEES  = "acl.trustees";
-string LSD_KEY_ACL_BLACKLIST = "acl.blacklist";
-string LSD_KEY_ACL_PUBLIC    = "acl.public";
-string LSD_KEY_ACL_TPE       = "acl.wearertpe";
-string LSD_KEY_ACL_TIMESTAMP = "acl.timestamp";
+string KEY_ISOWNED       = "access.isowned";
+string KEY_PUBLIC_ACCESS = "public.mode";
+string KEY_TPE_MODE      = "tpe.mode";
 
-// Per-user ACL query cache prefix. Full key = "acl." + (string)avatar_uuid + ".cache".
-// Value format: "<level>|<unix_timestamp>" — e.g. "5|1712345678".
-// kmod_ui.lsl reads this prefix directly to skip the AUTH_BUS round-trip on touch.
-// CROSS-MODULE CONTRACT: this format must match LSD_ACL_CACHE_PREFIX/SUFFIX in kmod_ui.lsl.
-string LSD_ACL_CACHE_PREFIX = "acl.";
-string LSD_ACL_CACHE_SUFFIX = ".cache";
-
-// kmod_auth is the sole writer of the ACL query cache. The actual write site
-// uses a dynamic key ("acl." + uuid + ".cache") which is invisible to static
-// analysis; declared here for cross-script attribution.
-// @lsl-ide lsd-owns: *.cache
-
-/* -------------------- CACHE CONSTANTS -------------------- */
-integer CACHE_TTL = 60;  // Cache query results for 60 seconds
-integer CACHE_MAX_USERS = 800;  // Safety limit for cache size
+// Debounce for the linkset_data-driven auth.acl.update broadcast: a card
+// parse writes many records back-to-back; one broadcast covers the burst.
+float ACL_UPDATE_DEBOUNCE = 0.2;
 
 /* -------------------- JSON RESPONSE TEMPLATES -------------------- */
-// Pre-built templates for fast response construction (30-40% faster than llList2Json)
+// Pre-built templates for fast response construction
 string JSON_TEMPLATE_BLACKLIST = "";
 string JSON_TEMPLATE_UNAUTHORIZED = "";
 string JSON_TEMPLATE_NOACCESS = "";
@@ -65,42 +54,28 @@ string JSON_TEMPLATE_TRUSTEE = "";
 string JSON_TEMPLATE_UNOWNED = "";
 string JSON_TEMPLATE_PRIMARY = "";
 
-/* -------------------- STATE (CACHED SETTINGS) -------------------- */
-integer MultiOwnerMode = FALSE;
-key OwnerKey = NULL_KEY;
-list OwnerKeys = [];
-list TrusteeList = [];
-list Blacklist = [];
-integer PublicMode = FALSE;
-integer TpeMode = FALSE;
-
+/* -------------------- STATE -------------------- */
+// Queries arriving before the first settings.sync (fresh boot, card still
+// parsing) are queued so early touches can't read a half-built roster.
 integer SettingsReady = FALSE;
-list PendingQueries = [];  // [avatar_key, correlation_id, avatar_key, correlation_id, ...]
+list PendingQueries = [];  // [avatar_key, correlation_id, ...]
 integer PENDING_STRIDE = 2;
 integer MAX_PENDING_QUERIES = 50;
 
-/* Plugin ACL registry removed in v1.1 rev 1 — superseded by LSD policies */
+// Debounce flag for the auth.acl.update broadcast.
+integer AclUpdatePending = FALSE;
 
-/* -------------------- HELPER FUNCTIONS -------------------- */
+/* -------------------- RECORD HELPERS -------------------- */
 
-integer list_has_key(list search_list, key k) {
-    return (llListFindList(search_list, [(string)k]) != -1);
+// Role of a uuid: 5/3/-1, or 0 when no record.
+integer user_role(key avatar) {
+    string rec = llLinksetDataRead(USER_PREFIX + (string)avatar);
+    if (rec == "") return 0;
+    return (integer)rec;
 }
-
-/* -------------------- OWNER CHECKING -------------------- */
 
 integer has_owner() {
-    if (MultiOwnerMode) {
-        return (llGetListLength(OwnerKeys) > 0);
-    }
-    return (OwnerKey != NULL_KEY);
-}
-
-integer is_owner(key av) {
-    if (MultiOwnerMode) {
-        return list_has_key(OwnerKeys, av);
-    }
-    return (av == OwnerKey);
+    return (integer)llLinksetDataRead(KEY_ISOWNED);
 }
 
 /* -------------------- JSON TEMPLATE INITIALIZATION -------------------- */
@@ -187,275 +162,73 @@ init_json_templates() {
     ]);
 }
 
-/* -------------------- LINKSET DATA CACHE MANAGEMENT -------------------- */
-
-// Build cache key for a user's ACL query result
-string get_cache_key(key avatar) {
-    return LSD_ACL_CACHE_PREFIX + (string)avatar + LSD_ACL_CACHE_SUFFIX;
-}
-
-// Try to retrieve cached ACL result (returns TRUE if cache hit)
-// Uses sliding window: TTL resets on each access for active sessions
-integer get_cached_acl(key avatar, string correlation_id) {
-    string cache_key = get_cache_key(avatar);
-    string cached = llLinksetDataRead(cache_key);
-    
-    if (cached == "") return FALSE;  // Cache miss
-    
-    // Parse cached data: "level|timestamp"
-    list parts = llParseString2List(cached, ["|"], []);
-    if (llGetListLength(parts) != 2) {
-        llLinksetDataDelete(cache_key);  // Corrupted
-        return FALSE;
-    }
-    
-    integer cached_time = llList2Integer(parts, 1);
-    integer now = llGetUnixTime();
-    
-    // Check if expired
-    if ((now - cached_time) > CACHE_TTL) {
-        llLinksetDataDelete(cache_key);
-        return FALSE;
-    }
-    
-    // Cache hit! Reset TTL (sliding window - keeps active sessions cached)
-    integer level = llList2Integer(parts, 0);
-    string updated_cache = (string)level + "|" + (string)now;
-    llLinksetDataWrite(cache_key, updated_cache);
-    
-    // Send response
-    send_acl_from_level(avatar, level, correlation_id);
-    return TRUE;
-}
-
-// Store ACL query result in cache
-store_cached_acl(key avatar, integer level) {
-    // Check cache size limit
-    integer cache_count = llLinksetDataCountKeys();
-    if (cache_count > CACHE_MAX_USERS) {
-        // Cache full - don't add more (let TTL naturally prune old entries)
-        return;
-    }
-    
-    string cache_key = get_cache_key(avatar);
-    string cache_value = (string)level + "|" + (string)llGetUnixTime();
-    llLinksetDataWrite(cache_key, cache_value);
-}
-
-// Clear all cached ACL query results
-clear_acl_query_cache() {
-    // OPTIMIZED: Use regex search instead of iterating all keys
-    // This pushes the search workload to the simulator (C++)
-    list keys = llLinksetDataFindKeys("^acl\\.[0-9a-f-]+\\.cache$", 0, 0);
-    integer i = 0;
-    while (i < llGetListLength(keys)) {
-        llLinksetDataDelete(llList2String(keys, i));
-        i++;
-    }
-}
-
-// Persist ACL role lists to linkset data
-persist_acl_cache() {
-    list owners_payload = [];
-    if (MultiOwnerMode) {
-        owners_payload = OwnerKeys;
-    }
-    else if (OwnerKey != NULL_KEY) {
-        owners_payload = [(string)OwnerKey];
-    }
-
-    string owners_json = llList2Json(JSON_ARRAY, owners_payload);
-    string trustees_json = llList2Json(JSON_ARRAY, TrusteeList);
-    string blacklist_json = llList2Json(JSON_ARRAY, Blacklist);
-
-    llLinksetDataWrite(LSD_KEY_ACL_OWNERS, owners_json);
-    llLinksetDataWrite(LSD_KEY_ACL_TRUSTEES, trustees_json);
-    llLinksetDataWrite(LSD_KEY_ACL_BLACKLIST, blacklist_json);
-    llLinksetDataWrite(LSD_KEY_ACL_PUBLIC, (string)PublicMode);
-    llLinksetDataWrite(LSD_KEY_ACL_TPE, (string)TpeMode);
-
-    integer timestamp = llGetUnixTime();
-    llLinksetDataWrite(LSD_KEY_ACL_TIMESTAMP, (string)timestamp);
-
-    // Clear query cache since ACL data changed.
-    // precompute_known_acl() will re-populate for all named actors immediately after.
-    clear_acl_query_cache();
-}
-
 /* -------------------- JSON TEMPLATE RESPONSE BUILDER -------------------- */
 
-// Fast response construction using pre-built templates
 send_acl_from_template(string template, key avatar, integer owner_set, string correlation_id) {
     string msg = template;
-    
-    // Replace placeholders
+
     msg = llJsonSetValue(msg, ["avatar"], (string)avatar);
-    
-    // Replace owner_set if needed
+
     if (llSubStringIndex(msg, "OWNER_SET_PLACEHOLDER") != -1) {
         msg = llJsonSetValue(msg, ["owner_set"], (string)owner_set);
     }
-    
-    // Add correlation ID if provided
+
     if (correlation_id != "") {
         msg = llJsonSetValue(msg, ["id"], correlation_id);
     }
-    
+
     llMessageLinked(LINK_SET, AUTH_BUS, msg, NULL_KEY);
-}
-
-/* -------------------- DISPATCH TABLE - PER-ACL HANDLERS -------------------- */
-
-// Blacklisted user - immediate denial, no policy computation needed
-process_blacklist_query(key avatar, string correlation_id) {
-    send_acl_from_template(JSON_TEMPLATE_BLACKLIST, avatar, 0, correlation_id);
-    store_cached_acl(avatar, ACL_BLACKLIST);
-}
-
-// Unauthorized stranger - not blacklisted, just no access (public off)
-process_unauthorized_query(key avatar, string correlation_id) {
-    integer owner_set = has_owner();
-    send_acl_from_template(JSON_TEMPLATE_UNAUTHORIZED, avatar, owner_set, correlation_id);
-    // Do NOT cache unauthorized strangers — their ACL can change at any time
-    // if they are later added as owner/trustee, or public mode is toggled.
-}
-
-// TPE wearer - locked out
-process_noaccess_query(key avatar, string correlation_id) {
-    integer owner_set = has_owner();
-    send_acl_from_template(JSON_TEMPLATE_NOACCESS, avatar, owner_set, correlation_id);
-    store_cached_acl(avatar, ACL_NOACCESS);
-}
-
-// Public access user
-process_public_query(key avatar, string correlation_id) {
-    integer owner_set = has_owner();
-    send_acl_from_template(JSON_TEMPLATE_PUBLIC, avatar, owner_set, correlation_id);
-    store_cached_acl(avatar, ACL_PUBLIC);
-}
-
-// Owned wearer
-process_owned_query(key avatar, string correlation_id) {
-    send_acl_from_template(JSON_TEMPLATE_OWNED, avatar, 1, correlation_id);
-    store_cached_acl(avatar, ACL_OWNED);
-}
-
-// Trustee
-process_trustee_query(key avatar, string correlation_id) {
-    integer owner_set = has_owner();
-    send_acl_from_template(JSON_TEMPLATE_TRUSTEE, avatar, owner_set, correlation_id);
-    store_cached_acl(avatar, ACL_TRUSTEE);
-}
-
-// Unowned wearer (full control)
-process_unowned_query(key avatar, string correlation_id) {
-    send_acl_from_template(JSON_TEMPLATE_UNOWNED, avatar, 0, correlation_id);
-    store_cached_acl(avatar, ACL_UNOWNED);
-}
-
-// Primary owner
-process_primary_owner_query(key avatar, string correlation_id) {
-    send_acl_from_template(JSON_TEMPLATE_PRIMARY, avatar, 1, correlation_id);
-    store_cached_acl(avatar, ACL_PRIMARY_OWNER);
-}
-
-// Pre-populate acl_cache_<uuid> in LSD for all known actors after any settings load or change.
-// Eliminates AUTH_BUS round-trips for wearer, owners, and trustees on every subsequent touch.
-// Unknown users (strangers) still fall through to the AUTH_BUS cold-miss path on first contact.
-precompute_known_acl() {
-    route_acl_query(llGetOwner(), "");
-    integer pi = 0;
-    if (MultiOwnerMode) {
-        while (pi < llGetListLength(OwnerKeys)) {
-            route_acl_query((key)llList2String(OwnerKeys, pi), "");
-            pi++;
-        }
-    }
-    else if (OwnerKey != NULL_KEY) {
-        route_acl_query(OwnerKey, "");
-    }
-    integer ti = 0;
-    while (ti < llGetListLength(TrusteeList)) {
-        route_acl_query((key)llList2String(TrusteeList, ti), "");
-        ti++;
-    }
 }
 
 /* -------------------- ACL LEVEL COMPUTATION (DISPATCH ROUTER) -------------------- */
 
-// Determine ACL level and route to appropriate handler
+// Determine ACL level from the user record + flags and answer. One LSD
+// read for named actors; wearer/stranger paths read the scalars.
 route_acl_query(key avatar, string correlation_id) {
-    key wearer = llGetOwner();
+    integer role = user_role(avatar);
+
+    // Blacklist first (most restrictive).
+    if (role == ACL_BLACKLIST) {
+        send_acl_from_template(JSON_TEMPLATE_BLACKLIST, avatar, 0, correlation_id);
+        return;
+    }
+
+    // Owner (highest privilege).
+    if (role == ACL_PRIMARY_OWNER) {
+        send_acl_from_template(JSON_TEMPLATE_PRIMARY, avatar, 1, correlation_id);
+        return;
+    }
+
     integer owner_set = has_owner();
-    integer is_wearer = (avatar == wearer);
-    
-    // FAST PATH 1: Blacklist check (most restrictive, check first)
-    if (list_has_key(Blacklist, avatar)) {
-        process_blacklist_query(avatar, correlation_id);
-        return;
-    }
-    
-    // FAST PATH 2: Owner check (highest privilege)
-    if (is_owner(avatar)) {
-        process_primary_owner_query(avatar, correlation_id);
-        return;
-    }
-    
-    // FAST PATH 3: Wearer paths
-    if (is_wearer) {
-        if (TpeMode) {
-            process_noaccess_query(avatar, correlation_id);
+
+    // Wearer paths (the wearer never has a record).
+    if (avatar == llGetOwner()) {
+        if ((integer)llLinksetDataRead(KEY_TPE_MODE)) {
+            send_acl_from_template(JSON_TEMPLATE_NOACCESS, avatar, owner_set, correlation_id);
             return;
         }
         if (owner_set) {
-            process_owned_query(avatar, correlation_id);
+            send_acl_from_template(JSON_TEMPLATE_OWNED, avatar, 1, correlation_id);
             return;
         }
-        process_unowned_query(avatar, correlation_id);
-        return;
-    }
-    
-    // FAST PATH 4: Trustee check
-    if (list_has_key(TrusteeList, avatar)) {
-        process_trustee_query(avatar, correlation_id);
-        return;
-    }
-    
-    // FAST PATH 5: Public mode check
-    if (PublicMode) {
-        process_public_query(avatar, correlation_id);
-        return;
-    }
-    
-    // DEFAULT: Unauthorized stranger (not blacklisted, just no access)
-    process_unauthorized_query(avatar, correlation_id);
-}
-
-// Helper for cache hits - reconstruct response from cached level
-send_acl_from_level(key avatar, integer level, string correlation_id) {
-    integer owner_set = has_owner();
-    
-    if (level == ACL_BLACKLIST) {
-        send_acl_from_template(JSON_TEMPLATE_BLACKLIST, avatar, 0, correlation_id);
-    }
-    else if (level == ACL_NOACCESS) {
-        send_acl_from_template(JSON_TEMPLATE_NOACCESS, avatar, owner_set, correlation_id);
-    }
-    else if (level == ACL_PUBLIC) {
-        send_acl_from_template(JSON_TEMPLATE_PUBLIC, avatar, owner_set, correlation_id);
-    }
-    else if (level == ACL_OWNED) {
-        send_acl_from_template(JSON_TEMPLATE_OWNED, avatar, 1, correlation_id);
-    }
-    else if (level == ACL_TRUSTEE) {
-        send_acl_from_template(JSON_TEMPLATE_TRUSTEE, avatar, owner_set, correlation_id);
-    }
-    else if (level == ACL_UNOWNED) {
         send_acl_from_template(JSON_TEMPLATE_UNOWNED, avatar, 0, correlation_id);
+        return;
     }
-    else if (level == ACL_PRIMARY_OWNER) {
-        send_acl_from_template(JSON_TEMPLATE_PRIMARY, avatar, 1, correlation_id);
+
+    // Trustee.
+    if (role == ACL_TRUSTEE) {
+        send_acl_from_template(JSON_TEMPLATE_TRUSTEE, avatar, owner_set, correlation_id);
+        return;
     }
+
+    // Public mode.
+    if ((integer)llLinksetDataRead(KEY_PUBLIC_ACCESS)) {
+        send_acl_from_template(JSON_TEMPLATE_PUBLIC, avatar, owner_set, correlation_id);
+        return;
+    }
+
+    // Unauthorized stranger (not blacklisted, just no access).
+    send_acl_from_template(JSON_TEMPLATE_UNAUTHORIZED, avatar, owner_set, correlation_id);
 }
 
 /* -------------------- ACL CHANGE BROADCAST -------------------- */
@@ -467,176 +240,6 @@ broadcast_acl_change(string scope, key avatar) {
         "avatar", (string)avatar
     ]);
     llMessageLinked(LINK_SET, AUTH_BUS, msg, NULL_KEY);
-}
-
-/* Plugin ACL management removed in v1.1 rev 1 — superseded by LSD policies */
-
-/* -------------------- ROLE EXCLUSIVITY VALIDATION -------------------- */
-
-enforce_role_exclusivity() {
-    integer i;
-    
-    if (MultiOwnerMode) {
-        i = 0;
-        while (i < llGetListLength(OwnerKeys)) {
-            string owner = llList2String(OwnerKeys, i);
-            
-            integer idx = llListFindList(TrusteeList, [owner]);
-            if (idx != -1) {
-                TrusteeList = llDeleteSubList(TrusteeList, idx, idx);
-            }
-            
-            idx = llListFindList(Blacklist, [owner]);
-            if (idx != -1) {
-                Blacklist = llDeleteSubList(Blacklist, idx, idx);
-            }
-            i = i + 1;
-        }
-    }
-    else {
-        if (OwnerKey != NULL_KEY) {
-            string owner = (string)OwnerKey;
-            
-            integer idx = llListFindList(TrusteeList, [owner]);
-            if (idx != -1) {
-                TrusteeList = llDeleteSubList(TrusteeList, idx, idx);
-            }
-            
-            idx = llListFindList(Blacklist, [owner]);
-            if (idx != -1) {
-                Blacklist = llDeleteSubList(Blacklist, idx, idx);
-            }
-        }
-    }
-    
-    i = 0;
-    while (i < llGetListLength(TrusteeList)) {
-        string trustee = llList2String(TrusteeList, i);
-        
-        integer idx = llListFindList(Blacklist, [trustee]);
-        if (idx != -1) {
-            Blacklist = llDeleteSubList(Blacklist, idx, idx);
-        }
-        i = i + 1;
-    }
-}
-
-/* -------------------- SETTINGS CONSUMPTION -------------------- */
-
-apply_settings_sync() {
-    // Save previous state for change detection
-    integer prev_multi = MultiOwnerMode;
-    key prev_owner = OwnerKey;
-    list prev_owners = OwnerKeys;
-    list prev_trustees = TrusteeList;
-    list prev_blacklist = Blacklist;
-    integer prev_public = PublicMode;
-    integer prev_tpe = TpeMode;
-
-    // Reset state before reading from LSD
-    MultiOwnerMode = FALSE;
-    OwnerKey = NULL_KEY;
-    OwnerKeys = [];
-    TrusteeList = [];
-    Blacklist = [];
-    PublicMode = FALSE;
-    TpeMode = FALSE;
-
-    string tmp = llLinksetDataRead(KEY_MULTI_OWNER_MODE);
-    if (tmp != "") {
-        MultiOwnerMode = (integer)tmp;
-    }
-
-    // Read owners according to mode
-    if (MultiOwnerMode) {
-        string raw = llLinksetDataRead(KEY_OWNER_UUIDS);
-        if (raw != "") {
-            OwnerKeys = llCSV2List(raw);
-            if (llGetListLength(OwnerKeys) > 0) {
-                OwnerKey = (key)llList2String(OwnerKeys, 0);
-            }
-        }
-    }
-    else {
-        string raw = llLinksetDataRead(KEY_OWNER);
-        if (raw != "") {
-            OwnerKey = (key)raw;
-        }
-    }
-
-    string trustees_raw = llLinksetDataRead(KEY_TRUSTEE_UUIDS);
-    if (trustees_raw != "") {
-        TrusteeList = llCSV2List(trustees_raw);
-    }
-
-    string bl_raw = llLinksetDataRead(KEY_BLACKLIST);
-    if (bl_raw != "") {
-        Blacklist = llCSV2List(bl_raw);
-    }
-
-    tmp = llLinksetDataRead(KEY_PUBLIC_ACCESS);
-    if (tmp != "") {
-        PublicMode = (integer)tmp;
-    }
-
-    tmp = llLinksetDataRead(KEY_TPE_MODE);
-    if (tmp != "") {
-        TpeMode = (integer)tmp;
-    }
-
-    enforce_role_exclusivity();
-
-    /*
-     * Detect whether any ACL-relevant state changed.
-     *
-     * NOTE: LSL's == / != operators on lists compare length only, not
-     * content — [1,2,3,4] == [0,0,0,0] returns TRUE. Serializing both
-     * sides to a JSON array and comparing the resulting strings is the
-     * idiomatic LSL workaround for content equality. This path runs on
-     * settings.sync / settings.delta only (user-driven role changes, a
-     * few times per minute at peak), so the serialization cost is not
-     * measurable in practice.
-     */
-    integer acl_changed = FALSE;
-    if (MultiOwnerMode != prev_multi) acl_changed = TRUE;
-    if (OwnerKey != prev_owner) acl_changed = TRUE;
-    if (PublicMode != prev_public) acl_changed = TRUE;
-    if (TpeMode != prev_tpe) acl_changed = TRUE;
-    if (llList2Json(JSON_ARRAY, OwnerKeys) != llList2Json(JSON_ARRAY, prev_owners)) {
-        acl_changed = TRUE;
-    }
-    if (llList2Json(JSON_ARRAY, TrusteeList) != llList2Json(JSON_ARRAY, prev_trustees)) {
-        acl_changed = TRUE;
-    }
-    if (llList2Json(JSON_ARRAY, Blacklist) != llList2Json(JSON_ARRAY, prev_blacklist)) {
-        acl_changed = TRUE;
-    }
-
-    if (acl_changed) {
-        persist_acl_cache();
-        broadcast_acl_change("global", NULL_KEY);
-        precompute_known_acl();
-    }
-
-    // On first load, always persist and broadcast even if "unchanged" (defaults)
-    if (!SettingsReady) {
-        if (!acl_changed) {
-            persist_acl_cache();
-            broadcast_acl_change("global", NULL_KEY);
-            precompute_known_acl();
-        }
-        SettingsReady = TRUE;
-    }
-
-    // Drain pending queries
-    integer i = 0;
-    while (i < llGetListLength(PendingQueries)) {
-        key av = llList2Key(PendingQueries, i);
-        string corr_id = llList2String(PendingQueries, i + 1);
-        route_acl_query(av, corr_id);
-        i = i + PENDING_STRIDE;
-    }
-    PendingQueries = [];
 }
 
 /* -------------------- MESSAGE HANDLERS -------------------- */
@@ -658,34 +261,21 @@ handle_acl_query(string msg) {
         return;
     }
 
-    // Try cache first (70-90% hit rate for UI interactions)
-    if (get_cached_acl(av, correlation_id)) {
-        return;  // Cache hit - response already sent
-    }
-
-    // Cache miss - compute and cache result
     route_acl_query(av, correlation_id);
 }
-
-/* handle_register_acl, handle_filter_plugins, handle_plugin_acl_list_request
-   removed in v1.1 rev 1 — superseded by LSD policies */
 
 /* -------------------- EVENTS -------------------- */
 
 default
 {
     state_entry() {
-
         SettingsReady = FALSE;
         PendingQueries = [];
+        AclUpdatePending = FALSE;
 
-        // Initialize JSON templates for fast response construction
         init_json_templates();
-
-        // Read settings directly from linkset data
-        apply_settings_sync();
     }
-    
+
     link_message(integer sender, integer num, string msg, key id) {
         string msg_type = llJsonGetValue(msg, ["type"]);
         if (msg_type == JSON_INVALID) return;
@@ -701,12 +291,50 @@ default
             }
         }
         else if (num == SETTINGS_BUS) {
+            // First sync marks the roster usable (card parse done or no
+            // card); queued boot-time queries drain against final state.
             if (msg_type == "settings.sync") {
-                apply_settings_sync();
+                if (!SettingsReady) {
+                    SettingsReady = TRUE;
+                    broadcast_acl_change("global", NULL_KEY);
+                }
+                integer i = 0;
+                while (i < llGetListLength(PendingQueries)) {
+                    route_acl_query(llList2Key(PendingQueries, i),
+                        llList2String(PendingQueries, i + 1));
+                    i = i + PENDING_STRIDE;
+                }
+                PendingQueries = [];
             }
         }
     }
-    
+
+    // Roster/flag changes: any user.* record write/delete (or a flip of the
+    // isowned/tpe/public scalars) arms a debounced auth.acl.update so
+    // session-holding consumers (kmod_ui) invalidate. Card-parse bursts
+    // collapse into a single broadcast.
+    linkset_data(integer action, string name, string value) {
+        if (action == LINKSETDATA_RESET) return;
+        integer relevant = (llSubStringIndex(name, USER_PREFIX) == 0);
+        if (!relevant) relevant = (name == KEY_ISOWNED);
+        if (!relevant) relevant = (name == KEY_TPE_MODE);
+        if (!relevant) relevant = (name == KEY_PUBLIC_ACCESS);
+        if (!relevant) return;
+
+        if (!AclUpdatePending) {
+            AclUpdatePending = TRUE;
+            llSetTimerEvent(ACL_UPDATE_DEBOUNCE);
+        }
+    }
+
+    timer() {
+        if (AclUpdatePending) {
+            AclUpdatePending = FALSE;
+            llSetTimerEvent(0.0);
+            broadcast_acl_change("global", NULL_KEY);
+        }
+    }
+
     changed(integer change) {
         if (change & CHANGED_OWNER) {
             llResetScript();

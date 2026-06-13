@@ -1,7 +1,9 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: Enumerate owners/trustees from the user-record roster (user.<uuid> acl 5/3) instead of the retired access.owner-/trustee- keys; single/multi owner mode branching collapses (OwnerKeys always holds every owner).
 PURPOSE: Manage RLV teleport and IM exceptions for owners and trustees
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 --------------------*/
@@ -22,10 +24,8 @@ string KEY_EX_OWNER_TP    = "rlvex.ownertp";
 string KEY_EX_OWNER_IM    = "rlvex.ownerim";
 string KEY_EX_TRUSTEE_TP  = "rlvex.trusteetp";
 string KEY_EX_TRUSTEE_IM  = "rlvex.trusteeim";
-string KEY_OWNER          = "access.owner";          // single-owner uuid
-string KEY_OWNER_UUIDS    = "access.owneruuids";     // multi-owner CSV
-string KEY_TRUSTEE_UUIDS  = "access.trusteeuuids";
-string KEY_MULTI_OWNER_MODE = "access.multiowner";
+// Owners/trustees enumerate from user.<uuid> records (kmod_settings rev 2):
+// the record's leading field is the acl (5 owner / 3 trustee).
 
 /* -------------------- STATE -------------------- */
 integer ExOwnerTp = TRUE;
@@ -33,10 +33,8 @@ integer ExOwnerIm = TRUE;
 integer ExTrusteeTp = FALSE;
 integer ExTrusteeIm = FALSE;
 
-key OwnerKey;
-list OwnerKeys;
+list OwnerKeys;     // ALL owner uuids (single owner = one-entry list)
 list TrusteeKeys;
-integer MultiOwnerMode;
 
 key CurrentUser;
 integer UserAcl = -999;
@@ -94,30 +92,21 @@ apply_im_exception(key k, integer allow) {
 }
 
 reconcile_all() {
-    // Check if there are any owners/trustees to apply exceptions for
-    integer has_owners = (MultiOwnerMode && llGetListLength(OwnerKeys) > 0) || (!MultiOwnerMode && OwnerKey != NULL_KEY);
-    integer has_trustees = llGetListLength(TrusteeKeys) > 0;
+    if (llGetListLength(OwnerKeys) == 0 && llGetListLength(TrusteeKeys) == 0) return;
 
-    if (!has_owners && !has_trustees) return;
-
-    // Owner exceptions
-    if (MultiOwnerMode) {
-        integer i = 0;
-        integer owner_count = llGetListLength(OwnerKeys);
-        while (i < owner_count) {
-            key k = (key)llList2String(OwnerKeys, i);
-            apply_tp_exception(k, ExOwnerTp);
-            apply_im_exception(k, ExOwnerIm);
-            i++;
-        }
-    }
-    else {
-        apply_tp_exception(OwnerKey, ExOwnerTp);
-        apply_im_exception(OwnerKey, ExOwnerIm);
+    // Owner exceptions — OwnerKeys holds every owner (a single owner is a
+    // one-entry list), so no mode branching.
+    integer i = 0;
+    integer owner_count = llGetListLength(OwnerKeys);
+    while (i < owner_count) {
+        key k = (key)llList2String(OwnerKeys, i);
+        apply_tp_exception(k, ExOwnerTp);
+        apply_im_exception(k, ExOwnerIm);
+        i++;
     }
 
     // Trustee exceptions
-    integer i = 0;
+    i = 0;
     integer trustee_count = llGetListLength(TrusteeKeys);
     while (i < trustee_count) {
         key k = (key)llList2String(TrusteeKeys, i);
@@ -200,20 +189,16 @@ apply_settings_sync() {
     seed_def(KEY_EX_TRUSTEE_IM, "0");
 
     // Save previous state for change detection
-    key prev_owner = OwnerKey;
     list prev_owners = OwnerKeys;
     list prev_trustees = TrusteeKeys;
     integer prev_ex_otp = ExOwnerTp;
     integer prev_ex_oim = ExOwnerIm;
     integer prev_ex_ttp = ExTrusteeTp;
     integer prev_ex_tim = ExTrusteeIm;
-    integer prev_multi = MultiOwnerMode;
 
     // Reset state
-    OwnerKey = NULL_KEY;
     OwnerKeys = [];
     TrusteeKeys = [];
-    MultiOwnerMode = FALSE;
 
     // Read exception settings from LSD
     ExOwnerTp = lsd_int(KEY_EX_OWNER_TP, TRUE);
@@ -221,46 +206,28 @@ apply_settings_sync() {
     ExTrusteeTp = lsd_int(KEY_EX_TRUSTEE_TP, FALSE);
     ExTrusteeIm = lsd_int(KEY_EX_TRUSTEE_IM, FALSE);
 
-    // Read multi-owner mode
-    string tmp = llLinksetDataRead(KEY_MULTI_OWNER_MODE);
-    if (tmp != "") {
-        MultiOwnerMode = (integer)tmp;
-    }
-
-    // Read owner/trustee lists from LSD
-    if (MultiOwnerMode) {
-        string raw = llLinksetDataRead(KEY_OWNER_UUIDS);
-        if (raw != "") OwnerKeys = llCSV2List(raw);
-    }
-    else {
-        string raw = llLinksetDataRead(KEY_OWNER);
-        if (raw != "") OwnerKey = (key)raw;
-    }
-
-    string trustees_raw = llLinksetDataRead(KEY_TRUSTEE_UUIDS);
-    if (trustees_raw != "") {
-        TrusteeKeys = llCSV2List(trustees_raw);
+    // Enumerate owners/trustees from the user records (record's leading
+    // field is the acl). Order doesn't matter for exceptions.
+    list ks = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer ki = 0;
+    integer kn = llGetListLength(ks);
+    while (ki < kn) {
+        string k = llList2String(ks, ki);
+        integer acl = (integer)llLinksetDataRead(k);
+        if (acl == 5) OwnerKeys += [llGetSubString(k, 5, -1)];
+        else if (acl == 3) TrusteeKeys += [llGetSubString(k, 5, -1)];
+        ki += 1;
     }
 
     // Detect changes: clear old exceptions for removed owners/trustees
     integer need_reconcile = FALSE;
 
     if (ExOwnerTp != prev_ex_otp || ExOwnerIm != prev_ex_oim
-        || ExTrusteeTp != prev_ex_ttp || ExTrusteeIm != prev_ex_tim
-        || MultiOwnerMode != prev_multi) {
+        || ExTrusteeTp != prev_ex_ttp || ExTrusteeIm != prev_ex_tim) {
         need_reconcile = TRUE;
     }
 
-    // Single owner changed
-    if (OwnerKey != prev_owner) {
-        if (prev_owner != NULL_KEY) {
-            apply_tp_exception(prev_owner, FALSE);
-            apply_im_exception(prev_owner, FALSE);
-        }
-        need_reconcile = TRUE;
-    }
-
-    // Multi-owner list changed
+    // Owner set changed
     if (llList2CSV(OwnerKeys) != llList2CSV(prev_owners)) {
         integer ci = 0;
         integer old_count = llGetListLength(prev_owners);

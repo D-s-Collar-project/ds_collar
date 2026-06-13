@@ -1,7 +1,9 @@
 /*--------------------
 PLUGIN: plugin_leash_target.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: is_blacklisted reads the user.<uuid> record (leading acl field == -1) instead of the retired blacklist.blklistuuid CSV.
 PURPOSE: Unified hidden target-picker for all targeted leash flows. Merges the
          former plugin_leash_avatar (Clip/Pass/Offer/Coffle + offer reception)
          and plugin_leash_object (Post). One picker, two sources.
@@ -61,12 +63,11 @@ integer is_object_mode() {
 
 // Pass/Offer must not hand the leash to a blacklisted avatar. The engine used
 // to enforce target ACL >= 1; with ACL decisions in the plugins, we check the
-// canonical blacklist CSV directly (one synchronous LSD read). Pass/offer only —
+// canonical user record directly (one synchronous LSD read — the record's
+// leading field is the acl; -1 = blacklisted). Pass/offer only —
 // coffle/post have their own target validation in the engine.
 integer is_blacklisted(key avatar) {
-    string raw = llLinksetDataRead("blacklist.blklistuuid");
-    if (raw == "") return FALSE;
-    return llListFindList(llCSV2List(raw), [(string)avatar]) != -1;
+    return (integer)llLinksetDataRead("user." + (string)avatar) == -1;
 }
 
 string dialogTitleForContext(string ctx) {

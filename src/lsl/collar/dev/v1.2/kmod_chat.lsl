@@ -1,7 +1,9 @@
 /*--------------------
 MODULE: kmod_chat.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: speaker_authorised computes live from the user-record roster (user.<uuid> leading acl field; strangers pass only with public.mode on) — replaces the acl.<uuid>.cache + acl.timestamp freshness check, which no longer exists.
 PURPOSE: Local chat command receiver. Listens on channel 1 (always) and
          optionally channel 0 (public chat) for prefixed commands from
          authorised speakers. Sends ui.chat.command to UI_BUS so kmod_ui
@@ -191,26 +193,19 @@ dispatch_command(key speaker, string head, string tail) {
     ]), speaker);
 }
 
-// Validate that a speaker is authorised to send chat commands.
-// Wearer is always allowed. Every non-wearer must have a CACHE-FRESH cached
-// ACL >= 1 (public or higher), regardless of channel — protects the private
-// channel from griefers who guess the channel number, as well as public
-// chat. A cache entry is fresh when its timestamp >= the global
-// acl.timestamp epoch written by kmod_auth on every settings change. Stale
-// entries (e.g. left over if the wipe chain ever regresses) are rejected.
+// Validate that a speaker is authorised to send chat commands (ACL >= 1),
+// computed live from the user-record roster — protects the private channel
+// from griefers who guess the channel number, as well as public chat.
+// Wearer is always allowed. A user.<uuid> record's leading field is the
+// acl (5 owner / 3 trustee / -1 blacklist); strangers without a record
+// pass only when public mode is on. No cache, no staleness window.
 integer speaker_authorised(key speaker) {
     key wearer = llGetOwner();
     if (speaker == wearer) return TRUE;
 
-    string raw = llLinksetDataRead("acl." + (string)speaker + ".cache");
-    if (raw == "") return FALSE;
-    integer sep = llSubStringIndex(raw, "|");
-    if (sep == -1) return FALSE;
-    integer cache_ts = (integer)llGetSubString(raw, sep + 1, -1);
-    integer global_ts = (integer)llLinksetDataRead("acl.timestamp");
-    if (cache_ts < global_ts) return FALSE;  // pre-dates last ACL change
-    integer level = (integer)llGetSubString(raw, 0, sep - 1);
-    return (level >= 1);
+    string rec = llLinksetDataRead("user." + (string)speaker);
+    if (rec != "") return ((integer)rec >= 1);
+    return (integer)llLinksetDataRead("public.mode");
 }
 
 /* -------------------- EVENTS -------------------- */

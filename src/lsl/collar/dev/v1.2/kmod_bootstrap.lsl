@@ -1,7 +1,9 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
+CHANGES:
+- v1.2 rev 1: Owner announcement + names_ready read the user-record roster (user.<uuid> acl-5 records, rank-ordered) instead of the retired access.owner- keys; multi-owner derives from owner count.
 PURPOSE: Startup coordination, RLV detection, status announcement
 ARCHITECTURE: Consolidated message bus lanes
 --------------------*/
@@ -25,14 +27,7 @@ integer RELAY_CHAN = -1812221819;
 integer ProbeRelayBothSigns;  // Also try positive relay channel
 
 /* -------------------- SETTINGS KEYS -------------------- */
-string KEY_MULTI_OWNER_MODE  = "access.multiowner";
-string KEY_OWNER             = "access.owner";              // single-owner uuid
-string KEY_OWNER_NAME        = "access.ownername";          // single-owner resolved name
-string KEY_OWNER_HONORIFIC   = "access.ownerhonorific";
-string KEY_OWNER_UUIDS       = "access.owneruuids";         // multi-owner csv
-string KEY_OWNER_NAMES       = "access.ownernames";
-string KEY_OWNER_HONORIFICS  = "access.ownerhonorifics";
-
+// Roster reads come from user.<uuid> records (see owner_rows).
 string NAME_LOADING = "(loading...)";
 
 /* -------------------- BOOTSTRAP CONFIG -------------------- */
@@ -92,14 +87,6 @@ sendIM(string msg) {
 
 integer isAttached() {
     return ((integer)llGetAttached() != 0);
-}
-
-// llCSV2List("") returns [""] (length 1), not []. This wrapper returns a
-// truly empty list when the LSD key is unset/empty.
-list csv_read(string lsd_key) {
-    string raw = llLinksetDataRead(lsd_key);
-    if (raw == "") return [];
-    return llCSV2List(raw);
 }
 
 // Owner change detection (prevents unnecessary resets on teleport)
@@ -199,23 +186,36 @@ apply_settings_sync() {
     NamesReadyDeadline = now() + NAMES_READY_TIMEOUT_SEC;
 }
 
-// Returns TRUE if all owner names in LSD are resolved (no NAME_LOADING placeholders)
-integer names_ready() {
-    integer multi_mode = (integer)llLinksetDataRead(KEY_MULTI_OWNER_MODE);
-
-    if (multi_mode) {
-        list names = csv_read(KEY_OWNER_NAMES);
-        integer i;
-        integer len = llGetListLength(names);
-        for (i = 0; i < len; i++) {
-            if (llList2String(names, i) == NAME_LOADING) return FALSE;
+// Collect owner records (user.<uuid> with acl 5) as a strided
+// [rank, name, honorific] list, rank-sorted (rank 0 = primary). The
+// record's leading field is the acl; fields 2/3 are name/honorific.
+list owner_rows() {
+    list rows = [];
+    list ks = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string rec = llLinksetDataRead(llList2String(ks, i));
+        if ((integer)rec == 5) {
+            list f = llCSV2List(rec);
+            rows += [(integer)llList2String(f, 1), llList2String(f, 2), llList2String(f, 3)];
         }
-        return TRUE;
+        i += 1;
     }
+    if (llGetListLength(rows) > 3) rows = llListSortStrided(rows, 3, 0, TRUE);
+    return rows;
+}
 
-    // Single owner: only check if there IS an owner
-    if (llLinksetDataRead(KEY_OWNER) == "") return TRUE;
-    return (llLinksetDataRead(KEY_OWNER_NAME) != NAME_LOADING);
+// Returns TRUE if all owner names are resolved (no NAME_LOADING placeholders)
+integer names_ready() {
+    list rows = owner_rows();
+    integer i = 1;
+    integer n = llGetListLength(rows);
+    while (i < n) {
+        if (llList2String(rows, i) == NAME_LOADING) return FALSE;
+        i += 3;
+    }
+    return TRUE;
 }
 
 /* -------------------- BOOTSTRAP INITIATION -------------------- */
@@ -262,54 +262,36 @@ announce_status() {
         sendIM("WARNING: Settings timed out. Using defaults.");
     }
 
-    integer multi_mode = (integer)llLinksetDataRead(KEY_MULTI_OWNER_MODE);
+    // Owner announcement from the user-record roster. The mode line shows
+    // the access.multiowner POLICY flag (notecard-only), not the count.
+    list rows = owner_rows();
+    integer owner_count = llGetListLength(rows) / 3;
 
-    if (multi_mode) {
-        list uuids = csv_read(KEY_OWNER_UUIDS);
-        list names = csv_read(KEY_OWNER_NAMES);
-        list hons  = csv_read(KEY_OWNER_HONORIFICS);
-        integer owner_count = llGetListLength(uuids);
-
+    if ((integer)llLinksetDataRead("access.multiowner")) {
         sendIM("Mode: Multi-Owner (" + (string)owner_count + ")");
-
-        if (owner_count > 0) {
-            list owner_parts = [];
-            integer i = 0;
-            while (i < owner_count) {
-                string nm = "";
-                if (i < llGetListLength(names)) nm = llList2String(names, i);
-                string hn = "";
-                if (i < llGetListLength(hons)) hn = llList2String(hons, i);
-
-                if (hn != "") {
-                    owner_parts += [hn + " " + nm];
-                }
-                else {
-                    owner_parts += [nm];
-                }
-                i += 1;
-            }
-            sendIM("Owned by " + llDumpList2String(owner_parts, ", "));
-        }
-        else {
-            sendIM("Uncommitted");
-        }
     }
     else {
         sendIM("Mode: Single-Owner");
+    }
 
-        string owner_uuid = llLinksetDataRead(KEY_OWNER);
-        if (owner_uuid != "") {
-            string nm = llLinksetDataRead(KEY_OWNER_NAME);
-            string hn = llLinksetDataRead(KEY_OWNER_HONORIFIC);
-            string owner_line = "Owned by ";
-            if (hn != "") owner_line += hn + " ";
-            owner_line += nm;
-            sendIM(owner_line);
+    if (owner_count > 0) {
+        list owner_parts = [];
+        integer i = 0;
+        while (i < owner_count) {
+            string nm = llList2String(rows, i * 3 + 1);
+            string hn = llList2String(rows, i * 3 + 2);
+            if (hn != "") {
+                owner_parts += [hn + " " + nm];
+            }
+            else {
+                owner_parts += [nm];
+            }
+            i += 1;
         }
-        else {
-            sendIM("Uncommitted");
-        }
+        sendIM("Owned by " + llDumpList2String(owner_parts, ", "));
+    }
+    else {
+        sendIM("Uncommitted");
     }
 
     sendIM("Collar startup complete.");
