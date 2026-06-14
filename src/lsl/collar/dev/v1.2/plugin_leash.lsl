@@ -24,8 +24,6 @@ integer DIALOG_BUS = 950;
 string PLUGIN_CONTEXT = "ui.core.leash";
 string PLUGIN_LABEL = "Leash";
 
-/* -------------------- CONFIGURATION -------------------- */
-float STATE_QUERY_DELAY = 0.5;  // 500ms delay for non-blocking state queries
 
 /* -------------------- STATE -------------------- */
 // Current leash state (synced from core)
@@ -51,9 +49,8 @@ list gPolicyButtons = [];  // Cached policy buttons for current user's ACL
 string SessionId = "";
 string MenuContext = "";
 
-// State query tracking (event-driven, no blocking llSleep)
-integer PendingStateQuery = FALSE;
-string PendingQueryContext = "";  // Which menu to show after query completes
+// Which menu to show once the queried plugin.leash.state reply lands.
+string PendingQueryContext = "";
 
 // Registration state (SYN/ACK pattern for active discovery)
 integer IsRegistered = FALSE;
@@ -655,12 +652,14 @@ queryState() {
     ]), NULL_KEY);
 }
 
-// Schedule a state query after brief delay, then show specified menu
-// Replaces blocking llSleep() + queryState() pattern
+// Query leash state and show the given menu when the reply lands. The query is
+// sent immediately — link messages are ordered and near-instant, so any action
+// just sent is processed before this query, and the reply (plugin.leash.state)
+// drives the menu via PendingQueryContext. The old 0.5s timer wait here was
+// orphaned cruft from a former blocking-llSleep pattern and made the UI sluggish.
 scheduleStateQuery(string next_menu_context) {
-    PendingStateQuery = TRUE;
     PendingQueryContext = next_menu_context;
-    llSetTimerEvent(STATE_QUERY_DELAY);
+    queryState();
 }
 
 /* -------------------- EVENT HANDLERS -------------------- */
@@ -684,16 +683,6 @@ default
     
     changed(integer change) {
         if (change & CHANGED_OWNER) llResetScript();
-    }
-
-    timer() {
-        // Handle pending state query (replaces blocking llSleep pattern)
-        if (PendingStateQuery) {
-            PendingStateQuery = FALSE;
-            llSetTimerEvent(0.0);  // Stop timer
-            queryState();
-            // Menu will be shown when leash_state response arrives
-        }
     }
 
     link_message(integer sender, integer num, string msg, key id) {

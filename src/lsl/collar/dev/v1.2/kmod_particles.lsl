@@ -213,11 +213,13 @@ integer find_leashpoint_link() {
     integer prim_count = llGetNumberOfPrims();
     
     while (i <= prim_count) {
-        list params = llGetLinkPrimitiveParams(i, [PRIM_NAME, PRIM_DESC]);
-        string name = llToLower(llStringTrim(llList2String(params, 0), STRING_TRIM));
-        string desc = llToLower(llStringTrim(llList2String(params, 1), STRING_TRIM));
-        
-        if (name == "leashpoint" && desc == "leashpoint") {
+        // The leashpoint prim is tagged via its DESCRIPTION = "leashpoint"
+        // (same convention as the engine's findLeashpointPrim). Requiring the
+        // prim NAME as well made a desc-only leashpoint fall through to
+        // LINK_ROOT, so the beam emitted from the collar root instead.
+        list params = llGetLinkPrimitiveParams(i, [PRIM_DESC]);
+        string desc = llToLower(llStringTrim(llList2String(params, 0), STRING_TRIM));
+        if (desc == "leashpoint") {
             return i;
         }
         i = i + 1;

@@ -38,8 +38,10 @@ integer UI_BUS = 900;
 // kmod_particles owns the plain-string Lockmeister grammar on the same channel.
 integer LEASH_CHAN = -8888;
 float   PROBE_WINDOW = 3.0;   // seconds to wait for a native holder reply
-float   PENDING_WINDOW = 6.0; // seconds a fresh grab/coffle waits for ANY holder
-                              // (native OR Lockmeister) before it is denied
+float   PENDING_WINDOW = 2.0; // seconds a fresh grab/coffle waits for ANY holder
+                              // (native OR Lockmeister) before it is denied. A
+                              // present holder confirms well under 1s; this only
+                              // bounds how long a FAILED clip waits to be denied.
 
 /* -------------------- PROTOCOL CONSTANTS -------------------- */
 
@@ -305,8 +307,12 @@ key findLeashpointPrim() {
     integer n = llGetNumberOfPrims();
     integer i = 2;
     while (i <= n) {
-        string nm = llToLower(llStringTrim(llGetLinkName(i), STRING_TRIM));
-        if (nm == "leashpoint") return llGetLinkKey(i);
+        // Leashpoint prim is tagged via its DESCRIPTION = "leashpoint" (must
+        // match kmod_particles' find_leashpoint_link so the beam emits from,
+        // and docks at, the same prim).
+        list p = llGetLinkPrimitiveParams(i, [PRIM_DESC]);
+        string desc = llToLower(llStringTrim(llList2String(p, 0), STRING_TRIM));
+        if (desc == "leashpoint") return llGetLinkKey(i);
         i = i + 1;
     }
     integer ln = llGetLinkNumber();
