@@ -1,9 +1,11 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 3
+REVISION: 5
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 CHANGES:
+- v1.2 rev 5: Unified the roster build path (memory + dedup). parse_notecard_line no longer special-cases the owner/trustee/blacklist/honorific/names lines: since card key names ARE the legacy LSD key names, those lines now write through raw like any dotted scalar, and migrate_legacy_roster() converts the whole set into user.* records at EOF — the SAME single builder the cardless path already used. Deleted ~90 lines of per-line card-builder ladder from the parser (the heaviest bytecode in the script, and the path that collided on reparse). Side effects, all parity-or-better: the multiowner flag and tpe.mode are now evaluated at EOF so they're free of card line order (the "place X before the owner lines" rules are gone); the TPE "requires external owner" guard moved into migrate_legacy_roster (same timing as before relative to reset-config's preserved-owner restore). the card_add_ helpers and apply_card_honorifics are retained (migrate calls them).
+- v1.2 rev 4: Memory reclaim (stack-heap headroom). Dissolved the 28-element MANAGED_SETTINGS_KEYS global list into a single comma-delimited string literal inside is_writable_key — a list of that size sits in script heap permanently with heavy per-element overhead; the string materializes only during a check. Gate logic and the managed-key set are unchanged (comma-wrapped substring match, whole-key). No behavior change.
 - v1.2 rev 3: Version-stamped bootstrap + combined re-bootstrap. The sentinel now stores SCHEMA_VERSION (was "1") instead of a bare flag, so a roster-format upgrade is detected on boot: sentinel == current ⇒ LSD authoritative, just announce; absent or older ⇒ clear sentinel and re-bootstrap from whichever source exists — carded (existing notecard parse) OR cardless (migrate_legacy_roster converts the legacy access.owner / trustee / blacklist LSD keys into user.* records by replaying them through the same card builders, then deletes them; flag scalars are shared and untouched). Both paths converge on the new finalize_bootstrap() (manifest + stamp SCHEMA_VERSION + sync + notecard.loaded). Fixes the rev-2 "clean break re-seed from notecard" never firing because the persisted sentinel gated start_notecard_reading. CROSS-MODULE: kmod_auth gates readiness on the same SCHEMA_VERSION sentinel.
 - v1.2 rev 2: User-record roster (/etc/passwd model). The 13 role-segregated keys (the access.owner- and access.trustee- parallel CSVs, access.multiowner, the blacklist.blklist- pair) are replaced by one record per person: user.<uuid> = "<acl>,<rank>,<name>,<honorific>" (acl 5/3/-1; rank orders owners, 0 = primary, and correlates card honorifics). Role exclusivity is structural (one record per uuid; a role write overwrites). access.multiowner KEPT as an explicit notecard-only POLICY flag (commitment semantics, never derived from count): off ⇒ the parser refuses extra card owners ("there can be only one"), on ⇒ several owner records permitted; runtime writes refused; preserved by reset-config. access.isowned kept as the derived fast flag. Card syntax unchanged: roster lines build records (uuid+honorific lines order-independent via EOF application; *names lines accepted-and-ignored; place access.multiowner BEFORE the owner lines). Name policy: username at write when in-region, else placeholder + async upgrade (display name for owners/trustees, username for blacklist); handle_name_response collapses to a single record-field update. Reset-config preserves owner records dynamically. CLEAN BREAK: no legacy keys, no migration — existing collars re-seed from the notecard.
 - v1.2 rev 1: Blacklist display names parallel CSV (superseded by rev 2's records).
@@ -297,50 +299,26 @@ trigger a sync-storm.
 
 -------------------- */
 
-// Canonical list of LSD keys that kmod_settings manages on behalf of consumer
-// plugins, writable via the settings.delta CSV protocol (is_writable_key gate).
-// Notecard reload no longer blanket-clears this list; the card-ownership
-// manifest (apply_card_manifest_clear) clears only keys the card itself
-// provided, and consumers fall back to in-script defaults via
-// lsd_int(key, fallback) when a key is absent.
-// Grow this list as more plugins migrate to the single-writer protocol.
+// Writable-key gate for the settings.delta/seed/delete CSV protocol. The set
+// of managed keys lives as a single comma-delimited string rather than a
+// global list: a 28-element LSL list carries heavy per-element overhead and
+// sits in script heap permanently, whereas this literal only materializes for
+// the duration of a check. Comma-wrapped on both ends so the substring test
+// matches whole keys, never a prefix ("lock.lock" can't match "lock.locked").
+// reg.* (plugin registrations) and acl.policycontext:* stay plugin-owned and
+// are deliberately absent. Grow the string as plugins adopt single-writer.
+// Tail entries (leash.*) are still on the settings.set JSON path but are listed
+// for correct attribution; migrate those emitters to settings.delta later.
 // @lsl-ide lsd-owner
-list MANAGED_SETTINGS_KEYS = [
-    "lock.locked",            // plugin_lock
-    "public.mode",            // plugin_public
-    "tpe.mode",               // plugin_tpe
-    "folders.locked",         // plugin_folders
-    "outfits.locked",         // plugin_outfits
-    "plugin.outfit.active",   // plugin_outfits on/off toggle
-    "relay.mode",             // plugin_relay
-    "relay.hardcoremode",     // plugin_relay
-    "chat.prefix",            // plugin_chat
-    "chat.channel",           // plugin_chat
-    "chat.public",            // plugin_chat
-    "bell.visible",           // plugin_bell
-    "bell.enablesound",       // plugin_bell
-    "bell.volume",            // plugin_bell
-    "bell.sound",             // plugin_bell
-    "rlvex.ownertp",          // plugin_rlvex
-    "rlvex.ownerim",          // plugin_rlvex
-    "rlvex.trusteetp",        // plugin_rlvex
-    "rlvex.trusteeim",        // plugin_rlvex
-    "restrict.list",          // plugin_restrict
-    "access.enablerunaway",   // plugin_access
-    "leash.enhanced",         // plugin_leash (enhanced mode; delta-native + notecard "leash.enhanced = 0|1")
-    // Keys still on the old settings.set JSON path (handle_set, dynamic key)
-    // but conceptually owned by kmod_settings just the same. Listed here for
-    // correct cross-script attribution; migrate these emitters to settings.delta
-    // CSV in a future pass.
-    "leash.leashedavatar",    // kmod_leash
-    "leash.leasherkey",       // kmod_leash
-    "leash.length",           // kmod_leash
-    "leash.turnto",           // kmod_leash
-    "leash.texture"           // kmod_leash
-];
-
 integer is_writable_key(string lsd_key) {
-    return llListFindList(MANAGED_SETTINGS_KEYS, [lsd_key]) != -1;
+    string managed =
+        ",lock.locked,public.mode,tpe.mode,folders.locked,outfits.locked"
+        + ",plugin.outfit.active,relay.mode,relay.hardcoremode,chat.prefix"
+        + ",chat.channel,chat.public,bell.visible,bell.enablesound,bell.volume"
+        + ",bell.sound,rlvex.ownertp,rlvex.ownerim,rlvex.trusteetp,rlvex.trusteeim"
+        + ",restrict.list,access.enablerunaway,leash.enhanced"
+        + ",leash.leashedavatar,leash.leasherkey,leash.length,leash.turnto,leash.texture,";
+    return llSubStringIndex(managed, "," + lsd_key + ",") != -1;
 }
 
 handle_settings_delta_csv(string msg) {
@@ -598,7 +576,7 @@ card_add_owner(string uuid_str) {
 
     if (!is_multi_owner_mode() && role_count(5) >= 1) {
         llRegionSayTo(llGetOwner(), 0,
-            "WARNING: Multi-owner mode is off — additional card owner ignored. Set access.multiowner = 1 BEFORE the owner lines to allow several owners.");
+            "WARNING: Multi-owner mode is off — additional card owner ignored. Set access.multiowner = 1 in the notecard to allow several owners.");
         return;
     }
 
@@ -703,6 +681,15 @@ migrate_legacy_roster() {
     // Apply buffered honorifics by rank (mirrors the card EOF step).
     apply_card_honorifics();
 
+    // Deferred TPE guard: the card's tpe.mode line was written unconditionally
+    // during parse (owner records didn't exist yet). Now that the roster is
+    // built, enforce "TPE requires an external owner" — clear it otherwise.
+    if ((integer)llLinksetDataRead(KEY_TPE_MODE) && !has_external_owner()) {
+        llLinksetDataWrite(KEY_TPE_MODE, "0");
+        llRegionSayTo(llGetOwner(), 0,
+            "ERROR: TPE disabled - it requires an external owner.");
+    }
+
     // Drop the now-converted legacy roster keys; the flag scalars stay.
     llLinksetDataDelete(CARD_OWNER);
     llLinksetDataDelete(CARD_OWNER_NAME);
@@ -732,7 +719,7 @@ parse_notecard_line(string line) {
     // Provenance: record which manifest token this card line contributes, so a
     // later reload that drops the line clears it (runtime-only keys, never
     // recorded here, survive). Owner/trustee/blacklist collapse to family units.
-    if (key_name == CARD_OWNER || key_name == CARD_OWNER_HON
+    if (key_name == CARD_OWNER || key_name == CARD_OWNER_NAME || key_name == CARD_OWNER_HON
         || key_name == CARD_OWNER_UUIDS || key_name == CARD_OWNER_NAMES
         || key_name == CARD_OWNER_HONS) {
         record_card_key("@owner");
@@ -748,84 +735,16 @@ parse_notecard_line(string line) {
         record_card_key(key_name);
     }
 
-    // Multi-owner policy flag (notecard-only). Card convention: place it
-    // BEFORE the owner lines — the parser enforces single-owner as it
-    // reads, so a late flag can't retroactively admit dropped owners.
-    if (key_name == CARD_MULTI_OWNER) {
-        llLinksetDataWrite(KEY_MULTI_OWNER_MODE, normalize_bool(value));
-        return;
-    }
+    // user.* records are kmod_settings-internal — a card may only define people
+    // via the roster lines (converted at EOF), never by raw record writes.
+    if (llSubStringIndex(key_name, USER_PREFIX) == 0) return;
 
-    // No-op roster lines: *names resolve automatically — accept and ignore.
-    if (key_name == CARD_OWNER_NAMES) return;
-    if (key_name == CARD_TRUSTEE_NAMES) return;
-    if (key_name == CARD_OWNER_NAME) return;
-
-    // Owner lines — each uuid becomes a rank-ordered owner record.
-    if (key_name == CARD_OWNER) {
-        card_add_owner(value);
-        return;
-    }
-    if (key_name == CARD_OWNER_UUIDS) {
-        list uuids = llCSV2List(value);
-        if (llGetListLength(uuids) > MaxListLen) {
-            uuids = llList2List(uuids, 0, MaxListLen - 1);
-        }
-        integer i;
-        integer len = llGetListLength(uuids);
-        for (i = 0; i < len; i++) {
-            card_add_owner(llList2String(uuids, i));
-        }
-        return;
-    }
-
-    // Honorific lines are buffered and applied by rank at EOF, so the
-    // card's uuid and honorific lines work in either order.
-    if (key_name == CARD_OWNER_HON) {
-        CardOwnerHons = [value];
-        return;
-    }
-    if (key_name == CARD_OWNER_HONS) {
-        CardOwnerHons = llCSV2List(value);
-        return;
-    }
-    if (key_name == CARD_TRUSTEE_HONS) {
-        CardTrusteeHons = llCSV2List(value);
-        return;
-    }
-
-    // Trustee uuids
-    if (key_name == CARD_TRUSTEE_UUIDS) {
-        list uuids = llCSV2List(value);
-        if (llGetListLength(uuids) > MaxListLen) {
-            uuids = llList2List(uuids, 0, MaxListLen - 1);
-        }
-        integer i;
-        integer len = llGetListLength(uuids);
-        for (i = 0; i < len; i++) {
-            card_add_trustee(llList2String(uuids, i));
-        }
-        return;
-    }
-
-    // Blacklist uuids. NOTE: like TPE-after-owner, exclusivity checks here
-    // see only roles defined EARLIER in the card — list owners/trustees
-    // before the blacklist line (established card convention).
-    if (key_name == CARD_BLACKLIST) {
-        list bl = llCSV2List(value);
-        if (llGetListLength(bl) > MaxListLen) {
-            bl = llList2List(bl, 0, MaxListLen - 1);
-        }
-        integer i;
-        integer len = llGetListLength(bl);
-        for (i = 0; i < len; i++) {
-            add_blacklist_internal(llList2String(bl, i), "");
-        }
-        return;
-    }
-
-    // Boolean scalars
-    if (key_name == KEY_PUBLIC_ACCESS
+    // Boolean policy/flag scalars normalize "true/yes/1" → 1/0. CARD_MULTI_OWNER
+    // is "access.multiowner" (== KEY_MULTI_OWNER_MODE), so writing key_name is
+    // correct. Order-independence: the multiowner flag is consulted at EOF when
+    // the roster is converted, so it no longer must precede the owner lines.
+    if (key_name == CARD_MULTI_OWNER
+        || key_name == KEY_PUBLIC_ACCESS
         || key_name == KEY_LOCKED
         || key_name == KEY_RUNAWAY_ENABLED
         || key_name == KEY_ISOWNED) {
@@ -833,22 +752,20 @@ parse_notecard_line(string line) {
         return;
     }
 
-    // TPE — requires external owner
+    // TPE normalizes now; the "requires an external owner" check is deferred to
+    // EOF (migrate_legacy_roster), since owner records don't exist until the
+    // roster is converted — which also frees tpe.mode from card line order.
     if (key_name == KEY_TPE_MODE) {
-        value = normalize_bool(value);
-        if ((integer)value == 1 && !has_external_owner()) {
-            llRegionSayTo(llGetOwner(), 0, "ERROR: Cannot enable TPE via notecard - requires external owner");
-            llRegionSayTo(llGetOwner(), 0, "HINT: Set owner BEFORE tpe.mode in notecard");
-            return;
-        }
-        llLinksetDataWrite(KEY_TPE_MODE, value);
+        llLinksetDataWrite(KEY_TPE_MODE, normalize_bool(value));
         return;
     }
 
-    // Generic plugin scalars (any other dotted key) — write through.
-    // user.* records are kmod_settings-internal: a card may only define
-    // people via the roster lines above, never by raw record writes.
-    if (llSubStringIndex(key_name, USER_PREFIX) == 0) return;
+    // Everything else dotted writes through raw. This now covers the roster
+    // lines too: card key names ARE the legacy LSD key names (access.owner*/
+    // trustee*, blacklist.*), so they land in LSD verbatim and migrate_legacy_
+    // roster() converts the whole set into user.* records at EOF — one builder
+    // for both the carded and cardless paths. *names lines write here and are
+    // dropped by migrate (names resolve automatically).
     if (llSubStringIndex(key_name, ".") != -1) {
         llLinksetDataWrite(key_name, value);
     }
@@ -1177,9 +1094,11 @@ default
             else {
                 IsLoadingNotecard = FALSE;
 
-                // Card honorific lines apply by rank now that every card
-                // uuid line has been processed (order-independent cards).
-                apply_card_honorifics();
+                // The card wrote its roster as raw legacy keys; convert the
+                // whole set into user.* records now (honorifics by rank, TPE
+                // guard, then the legacy keys are dropped). Same single builder
+                // the cardless path uses.
+                migrate_legacy_roster();
 
                 if (InResetConfig) {
                     // Reset Config in flight: restore preserved keys for any
