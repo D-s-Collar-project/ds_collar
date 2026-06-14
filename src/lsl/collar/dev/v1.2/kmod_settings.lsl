@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 2
+REVISION: 3
 PURPOSE: Notecard parser, validation guards, and LSD settings store
 CHANGES:
+- v1.2 rev 3: Version-stamped bootstrap + combined re-bootstrap. The sentinel now stores SCHEMA_VERSION (was "1") instead of a bare flag, so a roster-format upgrade is detected on boot: sentinel == current ⇒ LSD authoritative, just announce; absent or older ⇒ clear sentinel and re-bootstrap from whichever source exists — carded (existing notecard parse) OR cardless (migrate_legacy_roster converts the legacy access.owner / trustee / blacklist LSD keys into user.* records by replaying them through the same card builders, then deletes them; flag scalars are shared and untouched). Both paths converge on the new finalize_bootstrap() (manifest + stamp SCHEMA_VERSION + sync + notecard.loaded). Fixes the rev-2 "clean break re-seed from notecard" never firing because the persisted sentinel gated start_notecard_reading. CROSS-MODULE: kmod_auth gates readiness on the same SCHEMA_VERSION sentinel.
 - v1.2 rev 2: User-record roster (/etc/passwd model). The 13 role-segregated keys (the access.owner- and access.trustee- parallel CSVs, access.multiowner, the blacklist.blklist- pair) are replaced by one record per person: user.<uuid> = "<acl>,<rank>,<name>,<honorific>" (acl 5/3/-1; rank orders owners, 0 = primary, and correlates card honorifics). Role exclusivity is structural (one record per uuid; a role write overwrites). access.multiowner KEPT as an explicit notecard-only POLICY flag (commitment semantics, never derived from count): off ⇒ the parser refuses extra card owners ("there can be only one"), on ⇒ several owner records permitted; runtime writes refused; preserved by reset-config. access.isowned kept as the derived fast flag. Card syntax unchanged: roster lines build records (uuid+honorific lines order-independent via EOF application; *names lines accepted-and-ignored; place access.multiowner BEFORE the owner lines). Name policy: username at write when in-region, else placeholder + async upgrade (display name for owners/trustees, username for blacklist); handle_name_response collapses to a single record-field update. Reset-config preserves owner records dynamically. CLEAN BREAK: no legacy keys, no migration — existing collars re-seed from the notecard.
 - v1.2 rev 1: Blacklist display names parallel CSV (superseded by rev 2's records).
 ARCHITECTURE: People live in user.<uuid> records (see USER RECORDS below);
@@ -80,11 +81,20 @@ string KEY_PUBLIC_ACCESS = "public.mode";
 string KEY_TPE_MODE      = "tpe.mode";
 string KEY_LOCKED        = "lock.locked";
 
-// Bootstrap sentinel — set after first notecard parse completes.
-// Gates start_notecard_reading() so subsequent script restarts don't
-// re-arm a hostile notecard. Cleared by Reload Settings, Reset Config,
-// CHANGED_INVENTORY notecard-changed, or llLinksetDataReset().
+// Bootstrap sentinel — holds the SCHEMA_VERSION the roster was last
+// bootstrapped under. A plain restart whose sentinel already matches skips
+// re-parsing (so script restarts can't re-arm a hostile notecard); a fresh
+// install (absent) or a roster-format upgrade (older value) re-bootstraps.
+// Also cleared by Reload Settings, Reset Config, CHANGED_INVENTORY
+// notecard-changed, or llLinksetDataReset().
 string KEY_SENTINEL = "settings.bootstrapped";
+
+// Roster record-format version. BUMP this whenever the user.<uuid> record
+// shape (or any roster key the boot path depends on) changes — an existing
+// collar whose sentinel holds an older value then auto-re-bootstraps from
+// whichever source is present (notecard, else legacy LSD keys). The value is
+// a CROSS-MODULE CONTRACT: kmod_auth gates its readiness on the same string.
+string SCHEMA_VERSION = "userrec-1";
 
 // Card-ownership manifest — CSV of tokens the settings notecard provided on its
 // last parse: "@owner"/"@trustees"/"@blacklist" units plus individual managed/
@@ -415,6 +425,19 @@ finalize_card_manifest() {
     csv_write(KEY_CARDMANIFEST, CardProvided);
 }
 
+// Shared bootstrap tail for BOTH re-bootstrap sources (carded notecard EOF and
+// cardless legacy migration): persist the card manifest, stamp the sentinel
+// with the CURRENT schema version (this is the signal kmod_auth gates on, so it
+// marks "roster is final under this format"), announce, and notify the kernel.
+finalize_bootstrap() {
+    finalize_card_manifest();
+    llLinksetDataWrite(KEY_SENTINEL, SCHEMA_VERSION);
+    broadcast_settings_changed();
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type", "settings.notecard.loaded"
+    ]), NULL_KEY);
+}
+
 factory_reset() {
     llRegionSayTo(llGetOwner(), 0, "Collar factory reset triggered.");
 
@@ -622,6 +645,75 @@ apply_card_honorifics() {
 
     CardOwnerHons = [];
     CardTrusteeHons = [];
+}
+
+// Cardless re-bootstrap: convert any legacy roster keys still in LSD into
+// user.<uuid> records. The legacy (pre-record) format stored the roster under
+// the SAME key names the notecard uses (access.owner*/trustee*, blacklist.*),
+// so this replays them through the exact card builders — same dedup, rank, and
+// honorific-by-rank rules. Flag scalars (isowned/public/tpe/lock/multiowner)
+// are unchanged keys and need no conversion. Used on an update that ships no
+// notecard, where the legacy LSD keys are the only roster source. A no-op when
+// none are present (e.g. a collar already on this schema). Defined after the
+// card builders it reuses — LSL has no forward references.
+migrate_legacy_roster() {
+    integer i;
+    integer n;
+    list items;
+
+    // Owners: multi-owner list preferred, else the single-owner scalar.
+    string owners_csv = llLinksetDataRead(CARD_OWNER_UUIDS);
+    if (owners_csv != "") {
+        items = llCSV2List(owners_csv);
+        n = llGetListLength(items);
+        if (n > MaxListLen) n = MaxListLen;
+        for (i = 0; i < n; i++) card_add_owner(llList2String(items, i));
+        string ohons = llLinksetDataRead(CARD_OWNER_HONS);
+        if (ohons != "") CardOwnerHons = llCSV2List(ohons);
+    }
+    else {
+        string owner1 = llLinksetDataRead(CARD_OWNER);
+        if (owner1 != "") {
+            card_add_owner(owner1);
+            string ohon1 = llLinksetDataRead(CARD_OWNER_HON);
+            if (ohon1 != "") CardOwnerHons = [ohon1];
+        }
+    }
+
+    // Trustees.
+    string tru_csv = llLinksetDataRead(CARD_TRUSTEE_UUIDS);
+    if (tru_csv != "") {
+        items = llCSV2List(tru_csv);
+        n = llGetListLength(items);
+        if (n > MaxListLen) n = MaxListLen;
+        for (i = 0; i < n; i++) card_add_trustee(llList2String(items, i));
+        string thons = llLinksetDataRead(CARD_TRUSTEE_HONS);
+        if (thons != "") CardTrusteeHons = llCSV2List(thons);
+    }
+
+    // Blacklist.
+    string bl_csv = llLinksetDataRead(CARD_BLACKLIST);
+    if (bl_csv != "") {
+        items = llCSV2List(bl_csv);
+        n = llGetListLength(items);
+        if (n > MaxListLen) n = MaxListLen;
+        for (i = 0; i < n; i++) add_blacklist_internal(llList2String(items, i), "");
+    }
+
+    // Apply buffered honorifics by rank (mirrors the card EOF step).
+    apply_card_honorifics();
+
+    // Drop the now-converted legacy roster keys; the flag scalars stay.
+    llLinksetDataDelete(CARD_OWNER);
+    llLinksetDataDelete(CARD_OWNER_NAME);
+    llLinksetDataDelete(CARD_OWNER_HON);
+    llLinksetDataDelete(CARD_OWNER_UUIDS);
+    llLinksetDataDelete(CARD_OWNER_NAMES);
+    llLinksetDataDelete(CARD_OWNER_HONS);
+    llLinksetDataDelete(CARD_TRUSTEE_UUIDS);
+    llLinksetDataDelete(CARD_TRUSTEE_NAMES);
+    llLinksetDataDelete(CARD_TRUSTEE_HONS);
+    llLinksetDataDelete(CARD_BLACKLIST);
 }
 
 /* -------------------- NOTECARD PARSING -------------------- */
@@ -979,7 +1071,7 @@ finalize_reset_config() {
     // Persist the card manifest (the restored owner/lock keys are runtime-owned
     // and intentionally not in it), then mark bootstrap complete.
     finalize_card_manifest();
-    llLinksetDataWrite(KEY_SENTINEL, "1");
+    llLinksetDataWrite(KEY_SENTINEL, SCHEMA_VERSION);
 
     InResetConfig = FALSE;
     ResetConfigKeys = [];
@@ -1003,12 +1095,29 @@ default
         LastOwner = llGetOwner();
         NotecardKey = llGetInventoryKey(NOTECARD_NAME);
 
-        integer notecard_found = start_notecard_reading();
-
-        if (!notecard_found) {
-            // No notecard — LSD already has settings from previous session
+        // Already bootstrapped under the CURRENT schema: LSD is authoritative,
+        // just announce so consumers resync. (Sentinel-gated re-parse is
+        // intentionally skipped here so a plain restart can't re-arm a card.)
+        if (llLinksetDataRead(KEY_SENTINEL) == SCHEMA_VERSION) {
             broadcast_settings_changed();
+            return;
         }
+
+        // Fresh install (sentinel absent) OR a roster-format upgrade (sentinel
+        // holds an older value). Drop the stale sentinel so start_notecard_reading
+        // proceeds and so ACL consumers queue until the new roster is stamped,
+        // then re-bootstrap from whichever source exists.
+        llLinksetDataDelete(KEY_SENTINEL);
+
+        if (start_notecard_reading()) {
+            // Carded: dataserver EOF runs finalize_bootstrap().
+            return;
+        }
+
+        // Cardless (e.g. an update that ships no notecard): convert any legacy
+        // roster keys left in LSD into user.* records, then finalize.
+        migrate_legacy_roster();
+        finalize_bootstrap();
     }
 
     on_rez(integer start_param) {
@@ -1078,15 +1187,9 @@ default
                     finalize_reset_config();
                 }
                 else {
-                    // Normal bootstrap completion. Persist the card manifest,
-                    // then mark sentinel so the next restart doesn't re-parse.
-                    finalize_card_manifest();
-                    llLinksetDataWrite(KEY_SENTINEL, "1");
-                    broadcast_settings_changed();
-
-                    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
-                        "type", "settings.notecard.loaded"
-                    ]), NULL_KEY);
+                    // Normal bootstrap completion (carded). Persist the card
+                    // manifest, stamp the schema-versioned sentinel, announce.
+                    finalize_bootstrap();
                 }
             }
             return;

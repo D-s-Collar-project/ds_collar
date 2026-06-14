@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_auth.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 2
 PURPOSE: Authoritative ACL engine over the user-record roster
 CHANGES:
+- v1.2 rev 2: Sentinel-driven readiness; dropped the settings.sync dependency. SettingsReady is now seeded in state_entry from the schema-versioned bootstrap sentinel (settings.bootstrapped == SCHEMA_VERSION) and flipped the instant that stamp lands via linkset_data, draining queued boot-time queries then. An independent restart of this module (script deploy/edit) re-reads the durable sentinel and serves immediately instead of queueing every touch forever; an in-flight roster-format upgrade (older sentinel) reads as not-ready and queues until the new stamp. The SETTINGS_BUS settings.sync handler and the bus constant are removed. Fixes "touch yields nothing" after the rev-1 removal of kmod_ui's local ACL fast path made all touches depend on this gate. CROSS-MODULE: SCHEMA_VERSION is shared with kmod_settings.
 - v1.2 rev 1: Rebuilt on user.<uuid> records (kmod_settings rev 2). ACL for a named actor is ONE LSD read (the record's leading acl field); wearer/stranger paths read the isowned/tpe/public scalars. Deleted: the in-memory roster mirror + apply_settings_sync re-reads, enforce_role_exclusivity (structural now), the JSON list-compare change detection, the acl.<uuid>.cache layer (TTL cache, store/clear, precompute_known_acl), acl.timestamp, and the write-only acl.owners/trustees/blacklist/public/wearertpe debris keys. auth.acl.update now fires from a debounced linkset_data watch on user.* / public.mode / tpe.mode / access.isowned. Query queueing until the first settings.sync is kept (boot-order safety). Response templates and the auth.acl.query/result protocol are unchanged.
 ARCHITECTURE: Dispatch table pattern with JSON response templates. The
   roster lives in LSD as user.<uuid> = "<acl>,<rank>,<name>,<honorific>"
@@ -11,14 +12,18 @@ ARCHITECTURE: Dispatch table pattern with JSON response templates. The
   Consumers with a hot path (kmod_ui, kmod_chat) compute ACL from the same
   records directly — kmod_auth remains the authoritative responder for
   async auth.acl.query traffic (plugins, external HUD queries) and the
-  sole broadcaster of auth.acl.update on roster/flag changes.
+  sole broadcaster of auth.acl.update on roster/flag changes. Readiness is
+  gated on the schema-versioned settings.bootstrapped sentinel (an LSD fact),
+  not on any settings.sync message — see state_entry / linkset_data.
 --------------------*/
 
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
+// SETTINGS_BUS (800) is intentionally absent: readiness is now sentinel-driven
+// off LSD (state_entry + linkset_data), so kmod_auth no longer listens for
+// settings.sync.
 integer KERNEL_LIFECYCLE = 500;
 integer AUTH_BUS = 700;
-integer SETTINGS_BUS = 800;
 
 /* -------------------- ACL CONSTANTS -------------------- */
 integer ACL_BLACKLIST     = -1;
@@ -38,6 +43,18 @@ string USER_PREFIX = "user.";
 string KEY_ISOWNED       = "access.isowned";
 string KEY_PUBLIC_ACCESS = "public.mode";
 string KEY_TPE_MODE      = "tpe.mode";
+
+// Readiness is gated on this LSD fact, not on catching a transient message:
+// kmod_settings stamps KEY_SENTINEL with the current SCHEMA_VERSION once the
+// roster is final under that format. We serve ACL queries iff the sentinel
+// already equals SCHEMA_VERSION (a durable fact any restart re-reads), and we
+// flip ready the instant we observe that stamp via linkset_data — so there is
+// no settings.sync round-trip and no boot-order window to miss. A sentinel
+// that is absent (cold boot) or holds an OLDER value (roster-format upgrade
+// mid-migration) correctly reads as not-ready, so queries queue until the new
+// roster is stamped. Both strings are a CROSS-MODULE CONTRACT with kmod_settings.
+string KEY_SENTINEL      = "settings.bootstrapped";
+string SCHEMA_VERSION    = "userrec-1";
 
 // Debounce for the linkset_data-driven auth.acl.update broadcast: a card
 // parse writes many records back-to-back; one broadcast covers the burst.
@@ -244,6 +261,18 @@ broadcast_acl_change(string scope, key avatar) {
 
 /* -------------------- MESSAGE HANDLERS -------------------- */
 
+// Answer every query parked while the roster was still being built, then
+// clear the queue. Called the instant the schema-versioned sentinel lands.
+drain_pending_queries() {
+    integer i = 0;
+    while (i < llGetListLength(PendingQueries)) {
+        route_acl_query(llList2Key(PendingQueries, i),
+            llList2String(PendingQueries, i + 1));
+        i = i + PENDING_STRIDE;
+    }
+    PendingQueries = [];
+}
+
 handle_acl_query(string msg) {
     string av_str = llJsonGetValue(msg, ["avatar"]);
     if (av_str == JSON_INVALID) return;
@@ -269,7 +298,12 @@ handle_acl_query(string msg) {
 default
 {
     state_entry() {
-        SettingsReady = FALSE;
+        // Ready iff the roster is already final under THIS schema. A lone
+        // restart of this module (script deploy/edit) re-reads the durable
+        // sentinel and serves immediately; a cold boot or an in-flight
+        // roster-format upgrade reads as not-ready and queues until the
+        // matching stamp lands (caught in linkset_data).
+        SettingsReady = (llLinksetDataRead(KEY_SENTINEL) == SCHEMA_VERSION);
         PendingQueries = [];
         AclUpdatePending = FALSE;
 
@@ -290,31 +324,29 @@ default
                 handle_acl_query(msg);
             }
         }
-        else if (num == SETTINGS_BUS) {
-            // First sync marks the roster usable (card parse done or no
-            // card); queued boot-time queries drain against final state.
-            if (msg_type == "settings.sync") {
-                if (!SettingsReady) {
-                    SettingsReady = TRUE;
-                    broadcast_acl_change("global", NULL_KEY);
-                }
-                integer i = 0;
-                while (i < llGetListLength(PendingQueries)) {
-                    route_acl_query(llList2Key(PendingQueries, i),
-                        llList2String(PendingQueries, i + 1));
-                    i = i + PENDING_STRIDE;
-                }
-                PendingQueries = [];
-            }
-        }
+        // Readiness no longer rides SETTINGS_BUS — it is sentinel-driven (see
+        // state_entry + linkset_data). kmod_auth reads the roster from LSD
+        // live, so there is nothing to do on a settings.sync.
     }
 
-    // Roster/flag changes: any user.* record write/delete (or a flip of the
-    // isowned/tpe/public scalars) arms a debounced auth.acl.update so
-    // session-holding consumers (kmod_ui) invalidate. Card-parse bursts
-    // collapse into a single broadcast.
+    // Readiness + roster/flag changes, both driven straight off LSD:
+    //  • The schema-versioned sentinel landing is our readiness signal — flip
+    //    ready and drain any queued boot-time touches against the final roster.
+    //  • Any user.* record write/delete (or a flip of the isowned/tpe/public
+    //    scalars) arms a debounced auth.acl.update so session-holding consumers
+    //    (kmod_ui) invalidate. Card-parse bursts collapse into one broadcast.
     linkset_data(integer action, string name, string value) {
         if (action == LINKSETDATA_RESET) return;
+
+        if (name == KEY_SENTINEL) {
+            if (value == SCHEMA_VERSION && !SettingsReady) {
+                SettingsReady = TRUE;
+                drain_pending_queries();
+                broadcast_acl_change("global", NULL_KEY);
+            }
+            return;
+        }
+
         integer relevant = (llSubStringIndex(name, USER_PREFIX) == 0);
         if (!relevant) relevant = (name == KEY_ISOWNED);
         if (!relevant) relevant = (name == KEY_TPE_MODE);
