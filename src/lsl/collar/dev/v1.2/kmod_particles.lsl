@@ -1,8 +1,11 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 2
 PURPOSE: Visual connection renderer with Lockmeister compatibility
+CHANGES:
+- v1.2 rev 2: find_leashpoint_link matches "leashpoint" as a SUBSTRING of the prim description (was exact ==), so an OpenCollar leashpoint — whose desc carries a slew of config after the word "leashpoint" — is recognized. Engine's findLeashpointPrim updated to match.
+- v1.2 rev 1: find_leashpoint_link now identifies the leashpoint prim by its DESCRIPTION == "leashpoint" (was name AND desc, which made a desc-only/name-only leashpoint fall through to LINK_ROOT — the beam emitted from the collar root instead of the ring). Matches the engine's findLeashpointPrim convention so both scripts emit from / dock at the same prim.
 ARCHITECTURE: Consolidated message bus lanes
 --------------------*/
 
@@ -213,13 +216,13 @@ integer find_leashpoint_link() {
     integer prim_count = llGetNumberOfPrims();
     
     while (i <= prim_count) {
-        // The leashpoint prim is tagged via its DESCRIPTION = "leashpoint"
-        // (same convention as the engine's findLeashpointPrim). Requiring the
-        // prim NAME as well made a desc-only leashpoint fall through to
-        // LINK_ROOT, so the beam emitted from the collar root instead.
+        // Leashpoint prim = "leashpoint" appearing ANYWHERE in its DESCRIPTION
+        // (substring, not an exact match — OpenCollar's leashpoint desc carries
+        // a slew of config after the word). Same convention as the engine's
+        // findLeashpointPrim so both pick the same prim.
         list params = llGetLinkPrimitiveParams(i, [PRIM_DESC]);
-        string desc = llToLower(llStringTrim(llList2String(params, 0), STRING_TRIM));
-        if (desc == "leashpoint") {
+        string desc = llToLower(llList2String(params, 0));
+        if (llSubStringIndex(desc, "leashpoint") != -1) {
             return i;
         }
         i = i + 1;
