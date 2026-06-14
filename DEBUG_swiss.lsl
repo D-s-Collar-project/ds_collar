@@ -164,6 +164,53 @@ regtest() {
     out("regtest: high-then-low => kernel pruning; flat-low => plugins not writing");
 }
 
+// Fine-grained prune detector: fire a refresh, then sample reg.* every 0.3s
+// for ~5s. A spike above 6 that then drops = kernel pruning valid writes (and
+// we see WHEN). A flat 6 throughout = the 13 plugins never write reg.* at all.
+regwatch() {
+    out("regwatch: refresh sent; sampling reg every 0.3s for ~5s...");
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type", "kernel.register.refresh"]), NULL_KEY);
+    integer i = 0;
+    while (i < 16) {
+        llSleep(0.3);
+        i += 1;
+        out("  +" + fnum((float)i * 0.3, 1) + "s  reg=" + (string)reg_count());
+    }
+    out("regwatch: spike-then-drop => kernel pruning; flat-6 => not written");
+}
+
+// Staggered re-registration test: llResetOtherScript every plugin one at a
+// time, 0.4s apart, so each re-registers in isolation (no write burst). This is
+// the exact mechanism the kernel fix would use on owner-change. If reg climbs to
+// ~18 and holds, the staggered-reset approach is validated.
+sweep(float gap) {
+    if (gap < 0.1) gap = 0.4;
+    list plugins = ["plugin_animate","plugin_bell","plugin_blacklist","plugin_chat",
+        "plugin_folders","plugin_leash","plugin_lock","plugin_maint","plugin_outfits",
+        "plugin_owners","plugin_public","plugin_relay","plugin_restrict","plugin_rlvex",
+        "plugin_sos","plugin_status","plugin_strip","plugin_tpe"];
+    integer n = llGetListLength(plugins);
+    out("sweep: staggered llResetOtherScript over " + (string)n + " plugins, "
+        + fnum(gap, 1) + "s apart...");
+    integer found = 0;
+    integer i = 0;
+    while (i < n) {
+        string sn = llList2String(plugins, i);
+        if (llGetInventoryType(sn) == INVENTORY_SCRIPT) {
+            llResetOtherScript(sn);
+            found += 1;
+        }
+        else {
+            out("  ! not in inventory by that name: " + sn);
+        }
+        llSleep(gap);
+        i += 1;
+    }
+    out("sweep done: reset " + (string)found + " scripts. reg now = "
+        + (string)reg_count() + " (give kmod_ui a sec, then /9090 reg)");
+}
+
 /* -------------------- INJECTOR -------------------- */
 
 inject(string what) {
@@ -209,6 +256,9 @@ run_command(string cmd) {
     else if (cmd == "views")     dump_group("views");
     else if (cmd == "leash")     dump_group("leash");
     else if (cmd == "regtest")   regtest();
+    else if (cmd == "regwatch")  regwatch();
+    else if (cmd == "sweep")     sweep(0.4);
+    else if (llSubStringIndex(cmd, "sweep ") == 0) sweep((float)llGetSubString(cmd, 6, -1));
     else if (cmd == "lsd") {
         out("LSD keys = " + (string)llLinksetDataCountKeys()
             + "   free bytes = " + (string)llLinksetDataAvailable()
@@ -217,6 +267,18 @@ run_command(string cmd) {
     else if (cmd == "tap on")  { TapOn = TRUE;  LastT = llGetTime(); out("tap ON  (verbose=" + (string)TapVerbose + ")"); }
     else if (cmd == "tap off") { TapOn = FALSE; out("tap OFF"); }
     else if (cmd == "verbose") { TapVerbose = !TapVerbose; out("tap verbose=" + (string)TapVerbose); }
+    else if (llSubStringIndex(cmd, "hardreset ") == 0) {
+        string sn = llGetSubString(cmd, 10, -1);
+        llResetOtherScript(sn);
+        out("llResetOtherScript('" + sn + "') sent — direct same-prim reset, "
+            + "bypasses the script's event queue. (No effect if it's in another prim.)");
+    }
+    else if (llSubStringIndex(cmd, "reset ") == 0) {
+        string ctx = llGetSubString(cmd, 6, -1);
+        llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+            "type", "kernel.reset.soft", "context", ctx]), NULL_KEY);
+        out("sent kernel.reset.soft to '" + ctx + "' (forces its llResetScript -> state_entry)");
+    }
     else if (llSubStringIndex(cmd, "inject ") == 0) inject(llGetSubString(cmd, 7, -1));
     else if (llSubStringIndex(cmd, "dump ")   == 0) dump_group(llGetSubString(cmd, 5, -1));
     else out("? unknown command: " + cmd);
