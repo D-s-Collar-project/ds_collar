@@ -144,6 +144,26 @@ snapshot() {
     out("=====================================");
 }
 
+// Count reg.* entries right now.
+integer reg_count() {
+    return llGetListLength(llLinksetDataFindKeys("^reg\\.", 0, -1));
+}
+
+// Prune-vs-write test: sample reg.* before a refresh, ~0.5s after (before the
+// kernel's 3s prune sweep), and ~4.5s after (after a prune sweep). If the
+// middle sample is high and the last drops back, the kernel is deleting valid
+// registrations. If all three stay low, the plugins aren't writing reg.* at all.
+regtest() {
+    out("regtest: before = " + (string)reg_count());
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type", "kernel.register.refresh"]), NULL_KEY);
+    llSleep(0.6);
+    out("regtest: +0.6s (post-refresh, pre-prune) = " + (string)reg_count());
+    llSleep(4.0);
+    out("regtest: +4.6s (post-prune) = " + (string)reg_count());
+    out("regtest: high-then-low => kernel pruning; flat-low => plugins not writing");
+}
+
 /* -------------------- INJECTOR -------------------- */
 
 inject(string what) {
@@ -188,6 +208,7 @@ run_command(string cmd) {
     else if (cmd == "reg")       dump_group("reg");
     else if (cmd == "views")     dump_group("views");
     else if (cmd == "leash")     dump_group("leash");
+    else if (cmd == "regtest")   regtest();
     else if (cmd == "lsd") {
         out("LSD keys = " + (string)llLinksetDataCountKeys()
             + "   free bytes = " + (string)llLinksetDataAvailable()
