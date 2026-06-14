@@ -25,14 +25,18 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
-  r1 — Rez-race fix. The old park ran in state_entry and llSetScriptState-d
-       sibling scripts that aren't instantiated yet at rez ("Could not find
-       script 'collar_kernel'"). Parking is now a watchdog deferred onto a
-       one-shot timer so instantiation has settled first; CHANGED_INVENTORY
-       drop-ins are already live and still park immediately. Park rule is
-       default-deny by the updater_ prefix (keep updater_* machinery running,
-       park everything else — collar payload AND the shim templates, which
-       are inert here). Parked names recorded in LSD updater.parked.
+  r1 — Rez-race fix. The staged collar scripts are parked on CHANGED_INVENTORY
+       ONLY (drop-in: each is already instantiated, so llSetScriptState is
+       race-free), and NEVER at state_entry — at rez the siblings aren't
+       instantiated yet, so the old state_entry park shouted "Could not find
+       script" AND failed to disable them, leaving them saved running. Script
+       run-state is durable (a parked script stays parked across rez and
+       edits), so this one-time park persists; no rez park / timer / watchdog
+       needed. Park rule: default-deny by the updater_ prefix (keep updater_*
+       machinery, park everything else incl. the inert shim templates).
+       NOTE: a bundle saved before r1 may hold running scripts — re-bake once
+       (re-drop the collar scripts so CHANGED_INVENTORY fires, then take it
+       to inventory).
 --------------------*/
 
 
@@ -51,21 +55,10 @@ integer LM_INSTALL_MISSING     = 91009;  // bundler→driver: flat list of missi
 
 /* -------------------- CONSTANTS -------------------- */
 // Branded description stamped on this prim (state_entry). Doubles as the
-// shims' staging self-park signal. v1.2 collar scripts have no dormancy
-// guard, so staged collar scripts are disabled directly by
-// park_staged_collar_scripts() rather than self-parking on this marker.
+// shims' staging self-park signal. The staged collar scripts are kept dormant
+// by parking them on drop-in (see park_staged_scripts / CHANGED_INVENTORY);
+// run-state is durable so that one park persists across rez and edits.
 string UPDATER_MARKER = "D/s Collar Updater -- v1.2";
-
-// LSD key holding the CSV of scripts the watchdog has parked. Single writer
-// (this script), so a flat CSV is race-free. Diagnostic, and lets a consumer
-// read the parked set from LSD without having to address live scripts.
-string PARKED_MANIFEST = "updater.parked";
-
-// Watchdog deferred-park delay. At rez the sibling scripts in this prim may
-// not be instantiated yet, so an immediate llSetScriptState races ("Could
-// not find script"). Wait out instantiation, then park. CHANGED_INVENTORY
-// drop-ins are already live and bypass this delay.
-float WATCHDOG_DELAY = 1.0;
 
 // Wearer-specific config; never managed by the updater. Mirrors the
 // shim's exclusion so a stray "settings" notecard in this prim never
@@ -177,16 +170,33 @@ integer is_collar_script(string name) {
     return FALSE;
 }
 
-// Updater-machinery test. The watchdog keeps these running and parks
-// everything else (default-deny). updater_ is the real prefix of the
-// machinery (updater_driver / updater_bundler / updater_bespoke_ui). The
-// shims (update_shim / install_shim) deliberately fall OUTSIDE this set —
-// they're inert source templates in this prim (remote-loaded to the target
-// regardless of their state here) and self-park on the desc marker anyway,
-// so parking them costs nothing and a stray new collar namespace can never
-// slip past a positive-match list.
+// Default-deny discriminator for parking: updater_ machinery stays running,
+// everything else gets parked. "updater_" is the real prefix of the machinery
+// (updater_driver / updater_bundler). The shims (update_shim / install_shim)
+// fall outside it and so get parked too — harmless, they're inert source
+// templates here (llRemoteLoadScriptPin ships them by name regardless of
+// their run-state in this prim, and they only run on the target).
 integer is_updater_machinery(string name) {
     return llSubStringIndex(name, "updater_") == 0;
+}
+
+// Park every staged non-machinery script in this prim. Call ONLY from
+// CHANGED_INVENTORY: a just-dropped script is already instantiated, so
+// llSetScriptState is race-free. NEVER call at state_entry/on_rez — at rez
+// the siblings aren't instantiated, so the call shouts "Could not find
+// script" and fails to disable them. Run-state is durable, so this one-time
+// park persists across rez and edits; the rez path needs no action.
+park_staged_scripts() {
+    integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
+    integer i = 0;
+    string self = llGetScriptName();
+    while (i < count) {
+        string name = llGetInventoryName(INVENTORY_SCRIPT, i);
+        if (name != self && !is_updater_machinery(name)) {
+            llSetScriptState(name, FALSE);
+        }
+        i += 1;
+    }
 }
 
 // Build the candidates list: every collar-namespace script in this prim,
@@ -693,49 +703,16 @@ ship_nonscripts_to_install_shim(integer inv_type, list skip_list) {
 }
 
 
-// Watchdog: v1.2 staged scripts carry no dormancy guard, so on rez they
-// would run their state_entry inside the updater box (spin up a stray kernel,
-// register, set timers — kmod_remote even answers collar scans and hijacks
-// sessions). Park every script that ISN'T updater machinery (default-deny):
-// the collar payload AND the shim templates. llRemoteLoadScriptPin ships
-// parked sources fine — the target's run-state is set by the running flag,
-// independent of the source's state. Parked names are recorded in the LSD
-// manifest (empty write removes the key, so absent == nothing parked).
-//
-// CALLER CONTRACT: only call this when the targets are known live — the timer
-// (post-rez instantiation settled) or CHANGED_INVENTORY (drop-in already
-// live). Calling it from state_entry races: at rez the siblings may not be
-// instantiated, and llSetScriptState shouts "Could not find script".
-watchdog_park_payload() {
-    integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
-    integer i = 0;
-    string self = llGetScriptName();
-    list parked = [];
-    while (i < count) {
-        string name = llGetInventoryName(INVENTORY_SCRIPT, i);
-        if (name != self && !is_updater_machinery(name)) {
-            llSetScriptState(name, FALSE);
-            parked += [name];
-        }
-        i += 1;
-    }
-    llLinksetDataWrite(PARKED_MANIFEST, llDumpList2String(parked, ","));
-}
-
-
 /* -------------------- EVENTS -------------------- */
 
 default {
     state_entry() {
         // Brand this child prim as the updater (this string is also the
-        // shims' staging self-park signal). In v1.2 the staged collar
-        // scripts carry no dormancy guard, so the watchdog parks them — but
-        // DEFER it onto a one-shot timer. At rez the siblings may not be
-        // instantiated yet, so an immediate llSetScriptState would race and
-        // shout "Could not find script". The timer fires once instantiation
-        // has settled and parks the payload then.
+        // shims' staging self-park signal). NO park here: at rez the siblings
+        // aren't instantiated, so llSetScriptState would race. Staging scripts
+        // are parked on drop-in (CHANGED_INVENTORY) instead, and run-state is
+        // durable so they stay parked across this rez without any action.
         llSetObjectDesc(UPDATER_MARKER);
-        llSetTimerEvent(WATCHDOG_DELAY);
         // Explicit particle clear — llResetScript wipes the
         // ParticlesActive flag but doesn't necessarily clear the prim's
         // particle emitter, so cleanup_bundle's stop_particles would
@@ -749,24 +726,13 @@ default {
         llResetScript();
     }
 
-    timer() {
-        // One-shot watchdog park. By now (WATCHDOG_DELAY after state_entry)
-        // rez-time instantiation has settled, so llSetScriptState can address
-        // every staged sibling without racing. Stop the timer first — single
-        // timer in this script, and the park is needed exactly once per rez.
-        llSetTimerEvent(0.0);
-        watchdog_park_payload();
-    }
-
     changed(integer change) {
         if (change & CHANGED_OWNER) llResetScript();
-        // Staging guard: v1.2 collar scripts have no dormancy guard, so a
-        // script dropped into this prim AFTER rez boots and runs (the timer
-        // park only covers the rez/reset path). Left running, the staged set
-        // acts like a live collar inside the updater — kmod_remote even
-        // answers collar scans, hijacking update/install sessions. A drop-in
-        // is already live, so park immediately (no race, no deferral needed).
-        if (change & CHANGED_INVENTORY) watchdog_park_payload();
+        // Park staged scripts at drop-in (assembly time). Each just-dropped
+        // script is already live, so this is race-free, and run-state is
+        // durable so the park persists across rez/edits — no rez park needed.
+        // Folder drops fire changed once per item; each pass re-parks all.
+        if (change & CHANGED_INVENTORY) park_staged_scripts();
     }
 
     link_message(integer sender, integer num, string msg, key id) {
