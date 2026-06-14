@@ -1,11 +1,12 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl   (v1.2 redesign)
 VERSION: 1.2
-REVISION: 2
+REVISION: 3
 PURPOSE: Self-contained leashing engine. Absorbs the former
          kmod_leash_proto holder-discovery handshake: there is no proto
          sibling and no engine<->proto IPC.
 CHANGES:
+- v1.2 rev 3: Coffle now Lockmeister-probes the followed avatar too (activateLeashFromState enables LM for ANY FollowIsAvatar claim, controller = FollowTarget, was avatar-grab-only). Lets coffle interop with OpenCollar collars, which answer LM RequestPoint but not our native plugin.leash.request; DS targets still confirm via the native probe. Post (object) still skips LM.
 - v1.2 rev 2: findLeashpointPrim matches "leashpoint" as a SUBSTRING of the prim description (was exact ==), so an OpenCollar leashpoint (desc has config after the word) is recognized. Mirrors kmod_particles' find_leashpoint_link.
 - v1.2 rev 1: Deferred-restraint clip. A fresh gated grab/coffle now enters leashed to reuse its probe/listener/timer but HOLDS @follow + the leashed-broadcast (so plugin_leash's enhanced-TP stays off) + the success notice until a holder confirms (native plugin.leash.target OR Lockmeister particles.lm.grabbed → commitPendingLeash). No holder within PENDING_WINDOW (2s) → denyPendingLeash: "Unable to leash: No holder found to clip leash to." / "...coffle...No collar...", with nothing restrained. Post / reclip / cold-restart / take-over pass gate_on_holder=FALSE (or hit the was_leashed guard) and activate immediately as before. Added: PendingHolder / PendingNotice / PendingDeadline + claimLeash gate_on_holder param. Leashpoint prim matched by DESCRIPTION "leashpoint" (consistent with kmod_particles' find_leashpoint_link).
 ARCHITECTURE: Two LSL states.
@@ -606,7 +607,8 @@ followTick() {
 }
 
 // Activate a leash session on entry to (or refresh within) the leashed state.
-// CAUSE_NATIVE: follow + native holder probe + (LM enable for a regular grab).
+// CAUSE_NATIVE: follow + native holder probe + Lockmeister probe of the followed
+//               avatar (covers both an avatar grab and a coffle).
 // CAUSE_LM:     follow only — particles is already rendering the Lockmeister
 //               leash from its own grab detection, so no probe / LM re-enable.
 activateLeashFromState() {
@@ -614,9 +616,14 @@ activateLeashFromState() {
     // handshake to find a holder, but don't start following until one answers.
     if (!PendingHolder) startFollow();
     if (LeashCause == CAUSE_NATIVE) {
-        if (FollowTarget == Leasher && FollowIsAvatar) {
-            AuthorizedLmController = Leasher;
-            setLockmeisterState(TRUE, Leasher);
+        // Lockmeister-probe the followed avatar (FollowTarget). For an avatar
+        // grab that's the grabber (== Leasher); for a coffle it's the coffled
+        // avatar. This is what lets coffle interop with OpenCollar, which
+        // answers LM RequestPoint but NOT our native plugin.leash.request. Post
+        // (object, !FollowIsAvatar) skips LM and renders natively.
+        if (FollowIsAvatar) {
+            AuthorizedLmController = FollowTarget;
+            setLockmeisterState(TRUE, FollowTarget);
         }
         startProbe();
     }
