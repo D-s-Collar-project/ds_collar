@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 2
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
          multi-step flows (Pass/Offer/Coffle, Post) to the hidden picker.
 CHANGES:
+- v1.2 rev 2: Leash UI button policy reworked. Pass → ACL {1,3,5} (was {3,4,5}): added ACL 1 (public) for a captor→slaver handoff, dropped ACL 4; the CurrentUser==Leasher guard still gates it (only the actual holder sees Pass) and the recipient still gets the accept dialog. Take → ACL 5 only (was {3,5}). Self-owned/unowned wearer (ACL 4) trimmed to {Unclip, Offer, Coffle, Get Holder, Settings}: a self-owned sub can offer its own leash (Offer) and coffle, but no longer self-clips / posts / yanks / passes. Owned wearer (ACL 2) stays Offer-only.
 - v1.2 rev 1: Removed the orphaned 0.5s STATE_QUERY_DELAY (a leftover from a former blocking-llSleep pattern) that made every menu open/refresh hang half a second before even sending the state query. scheduleStateQuery now queries immediately — link messages are ordered and instant, so the reply drives the menu with no perceptible lag. Dropped STATE_QUERY_DELAY, the PendingStateQuery flag, and the now-dead timer() handler (plugin no longer uses a timer).
 ARCHITECTURE: Renderer for the leash module. Picker flows live in a single
               hidden sub-plugin, plugin_leash_target (avatar picker for
@@ -168,10 +169,10 @@ register_self() {
     // limits the button to cases where CurrentUser == Leasher — so only
     // a public user who holds the leash themselves can release it.
     llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
-        "1", "Clip,Unclip,Coffle,Post,Get Holder,Settings",
+        "1", "Clip,Unclip,Pass,Coffle,Post,Get Holder,Settings",
         "2", "Offer",
-        "3", "Clip,Unclip,Pass,Yank,Take,Coffle,Post,Get Holder,Settings",
-        "4", "Clip,Unclip,Pass,Yank,Coffle,Post,Get Holder,Settings",
+        "3", "Clip,Unclip,Pass,Yank,Coffle,Post,Get Holder,Settings",
+        "4", "Unclip,Offer,Coffle,Get Holder,Settings",
         "5", "Clip,Unclip,Pass,Yank,Take,Coffle,Post,Get Holder,Settings"
     ]));
 
