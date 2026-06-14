@@ -38,6 +38,8 @@ integer UI_BUS = 900;
 // kmod_particles owns the plain-string Lockmeister grammar on the same channel.
 integer LEASH_CHAN = -8888;
 float   PROBE_WINDOW = 3.0;   // seconds to wait for a native holder reply
+float   PENDING_WINDOW = 6.0; // seconds a fresh grab/coffle waits for ANY holder
+                              // (native OR Lockmeister) before it is denied
 
 /* -------------------- PROTOCOL CONSTANTS -------------------- */
 
@@ -116,6 +118,16 @@ integer ReclipDeadline = 0;
 
 // Lockmeister authorization
 key AuthorizedLmController = NULL_KEY;
+
+// Deferred-restraint gate for a fresh grab/coffle: the leash enters the leashed
+// state to reuse its probe/listener/timer, but @follow + the leashed-broadcast
+// (and thus plugin_leash's enhanced-TP) + the success notice are HELD until a
+// holder actually answers. No holder by PendingDeadline → deny, nothing to
+// unwind. Reclip / post / cold-restart / take-over pass gate_on_holder=FALSE
+// and activate immediately as before.
+integer PendingHolder   = FALSE;
+string  PendingNotice   = "";
+integer PendingDeadline = 0;
 
 // Yank rate limiting
 integer LastYankTime = 0;
@@ -259,6 +271,8 @@ clearLeashState(integer clear_reclip) {
     HolderTarget = NULL_KEY;
     AwaitingHolder = FALSE;
     AuthorizedLmController = NULL_KEY;
+    PendingHolder = FALSE;
+    PendingNotice = "";
     persistLeashState(FALSE, NULL_KEY);
 
     if (clear_reclip) clearReclipState();
@@ -399,6 +413,7 @@ handleLeashListen(string msg) {
         HolderTarget = holder;
         AwaitingHolder = FALSE;
         setParticlesState(TRUE, HolderTarget);
+        if (PendingHolder) commitPendingLeash();   // a pending coffle/grab's collar answered
     }
 }
 
@@ -467,7 +482,7 @@ checkAutoReclip() {
         // Re-clip the previously-authorized leasher directly — no ACL re-check.
         // They were authorized when first leashed; we're unleashed now, so this
         // is a fresh claim (acl arg unused on the not-leashed path).
-        claimLeash(LastLeasher, MODE_AVATAR, NULL_KEY, 1);
+        claimLeash(LastLeasher, MODE_AVATAR, NULL_KEY, 1, FALSE);
         ReclipAttempts = ReclipAttempts + 1;
         ReclipScheduled = llGetUnixTime() + 2;
     }
@@ -585,7 +600,9 @@ followTick() {
 // CAUSE_LM:     follow only — particles is already rendering the Lockmeister
 //               leash from its own grab detection, so no probe / LM re-enable.
 activateLeashFromState() {
-    startFollow();
+    // A pending (deferred) grab/coffle holds the restraint: run the probe/LM
+    // handshake to find a holder, but don't start following until one answers.
+    if (!PendingHolder) startFollow();
     if (LeashCause == CAUSE_NATIVE) {
         if (FollowTarget == Leasher && FollowIsAvatar) {
             AuthorizedLmController = Leasher;
@@ -594,6 +611,34 @@ activateLeashFromState() {
         startProbe();
     }
     LeashCause = CAUSE_NATIVE;  // reset to default for next entry
+}
+
+// A holder answered a pending grab/coffle (native plugin.leash.target or
+// Lockmeister particles.lm.grabbed). Commit the deferred restraint now: start
+// following, release the held broadcast (NeedBroadcast was suppressed at claim),
+// and show the success notice. Idempotent — a second confirm is a no-op.
+commitPendingLeash() {
+    if (!PendingHolder) return;
+    PendingHolder = FALSE;
+    startFollow();
+    NeedBroadcast = TRUE;
+    if (PendingNotice != "") {
+        llRegionSayTo(Leasher, 0, PendingNotice);
+        PendingNotice = "";
+    }
+}
+
+// No holder answered within PENDING_WINDOW. Nothing was restrained, so this is a
+// clean drop — the unleash transition tears down the probe/LM and broadcasts the
+// (never-shown) unleashed state. Message is parametrized: leash/holder vs
+// coffle/collar. Read mode + recipient BEFORE clearLeashState wipes them.
+denyPendingLeash() {
+    string verb = "leash";
+    string anchor = "holder";
+    if (LeashClaimMode == MODE_COFFLE) { verb = "coffle"; anchor = "collar"; }
+    key who = Leasher;
+    clearLeashState(TRUE);
+    llRegionSayTo(who, 0, "Unable to " + verb + ": No " + anchor + " found to clip leash to.");
 }
 
 /* -------------------- STATE BROADCAST -------------------- */
@@ -658,7 +703,10 @@ setTextureInternal(string texture) {
 // One entry point for all three claim kinds. Resolves a unified
 // (follow_target, follow_is_avatar) pair and calls setLeashState, which marks
 // the transition; activateLeashFromState() (on entry) does the activation.
-claimLeash(key user, integer mode, key target_key, integer acl_level) {
+// gate_on_holder: TRUE for a fresh user grab/coffle — defer the restraint until
+// a holder answers (deny on timeout). FALSE for post / reclip — activate
+// immediately. A take-over (already leashed) never defers regardless.
+claimLeash(key user, integer mode, key target_key, integer acl_level, integer gate_on_holder) {
     integer was_leashed = Leashed;
     if (Leashed) {
         if (mode == MODE_AVATAR && acl_level >= 3) {
@@ -716,12 +764,26 @@ claimLeash(key user, integer mode, key target_key, integer acl_level) {
     }
 
     LeashCause = CAUSE_NATIVE;
+
+    // Defer the restraint only for a FRESH gated grab/coffle (not a take-over).
+    integer defer = (gate_on_holder && !was_leashed);
+    PendingHolder = defer;
+
     setLeashState(user, follow_target, follow_is_avatar, mode);
+
+    if (defer) {
+        // Hold the leashed-broadcast (so plugin_leash's enhanced-TP stays off)
+        // and the success notice until a holder confirms; deny on timeout.
+        NeedBroadcast = FALSE;
+        PendingNotice = notice;
+        PendingDeadline = llGetUnixTime() + (integer)PENDING_WINDOW;
+    }
+
     // Fresh claim (was unleashed): leashed/state_entry runs activation on the
     // transition. Take-over (was already leashed): same-state, so state_entry
     // won't re-run — activate the new session directly, like pass.
     if (was_leashed) activateLeashFromState();
-    llRegionSayTo(user, 0, notice);
+    if (!defer) llRegionSayTo(user, 0, notice);
 }
 
 
@@ -855,9 +917,9 @@ routeLinkMessage(integer num, string msg, key id) {
             integer acl = (integer)jsonGet(msg, "acl", "0");
             key target = (key)jsonGet(msg, "target", (string)NULL_KEY);
 
-            if (action == "grab")             claimLeash(user, MODE_AVATAR, NULL_KEY, acl);
-            else if (action == "coffle")      claimLeash(user, MODE_COFFLE, target, acl);
-            else if (action == "post")        claimLeash(user, MODE_POST, target, acl);
+            if (action == "grab")             claimLeash(user, MODE_AVATAR, NULL_KEY, acl, TRUE);
+            else if (action == "coffle")      claimLeash(user, MODE_COFFLE, target, acl, TRUE);
+            else if (action == "post")        claimLeash(user, MODE_POST, target, acl, FALSE);
             else if (action == "release" || action == "force_release") releaseLeashInternal(user);
             else if (action == "pass")        passLeashInternal(target);
             else if (action == "offer") {
@@ -881,7 +943,8 @@ routeLinkMessage(integer num, string msg, key id) {
             key controller = (key)jsonGet(msg, "controller", (string)NULL_KEY);
             if (controller == NULL_KEY) return;
             if (controller != AuthorizedLmController) return;
-            handleLmGrabbed(controller);
+            if (PendingHolder) commitPendingLeash();   // a pending grab's holder answered
+            else handleLmGrabbed(controller);           // Lockmeister grab-inflow
             return;
         }
 
@@ -1053,10 +1116,17 @@ state leashed
             // an avatar grab LM is active and kmod_particles owns the OC-holder
             // render — sending a native fallback here would OVERRIDE it (native
             // outranks Lockmeister in kmod_particles), snapping the leash to the
-            // avatar centre instead of the OC leash-point prim.
-            if (AuthorizedLmController == NULL_KEY && FollowTarget != NULL_KEY) {
+            // avatar centre instead of the OC leash-point prim. A pending claim
+            // applies NO fallback — it either confirms or is denied below.
+            if (!PendingHolder && AuthorizedLmController == NULL_KEY && FollowTarget != NULL_KEY) {
                 setParticlesState(TRUE, FollowTarget);
             }
+        }
+
+        // Deferred grab/coffle that no holder ever confirmed → deny. Nothing was
+        // restrained (follow + broadcast were held), so this is a clean drop.
+        if (PendingHolder && llGetUnixTime() > PendingDeadline) {
+            denyPendingLeash();
         }
 
         // Re-acquire a leashpoint every ~10s if we've fallen through to the
