@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 2
-PURPOSE: Notecard parser, validation guards, and LSD settings store
+REVISION: 3
+PURPOSE: Validation guards, roster conversion, and LSD settings store
 CHANGES:
+- v1.2 rev 3: Notecard I/O relocated to kmod_bootstrap (memory: rev 2 sat at 90.6% of the Mono budget and stack-heap-collided when it parsed). kmod_settings no longer reads the card: kmod_bootstrap streams each card line into LSD verbatim and signals "settings.card.streamed"; we convert in process_streamed_card() (normalize flag scalars, migrate_legacy_roster() rebuilds the user.* roster from the deposited access-roster and blacklist scratch keys via the retained card builders, deferred TPE guard, stamp sentinel, broadcast). kmod_settings stays the SOLE user.* writer (bootstrap only deposits scratch + scalar keys). Removed: parse_notecard_line, start_notecard_reading, the card-ownership manifest (record_card_key / apply_card_manifest_clear / finalize_card_manifest — migrate clears+rebuilds wholesale via delete_role), clear_owner_keys / clear_trustee_keys, csv_read / csv_write, the notecard dataserver branch, and the Notecard-reading globals (CardProvided, COMMENT_PREFIX, SEPARATOR, CARD_MULTI_OWNER, KEY_CARDMANIFEST). Reload Settings / Reset Config / card-edit now request a re-stream (settings.card.restream) instead of reading directly; no-card paths rebroadcast/finalize without touching the roster. Estimator: 90.6% -> 82.7%. The multiowner FEATURE is unchanged (KEY_MULTI_OWNER_MODE + is_multi_owner_mode + card_add_owner refusal all intact).
 - v1.2 rev 2: User-record roster (/etc/passwd model). The 13 role-segregated keys (the access.owner- and access.trustee- parallel CSVs, access.multiowner, the blacklist.blklist- pair) are replaced by one record per person: user.<uuid> = "<acl>,<rank>,<name>,<honorific>" (acl 5/3/-1; rank orders owners, 0 = primary, and correlates card honorifics). Role exclusivity is structural (one record per uuid; a role write overwrites). access.multiowner KEPT as an explicit notecard-only POLICY flag (commitment semantics, never derived from count): off ⇒ the parser refuses extra card owners ("there can be only one"), on ⇒ several owner records permitted; runtime writes refused; preserved by reset-config. access.isowned kept as the derived fast flag. Card syntax unchanged: roster lines build records (uuid+honorific lines order-independent via EOF application; *names lines accepted-and-ignored; place access.multiowner BEFORE the owner lines). Name policy: username at write when in-region, else placeholder + async upgrade (display name for owners/trustees, username for blacklist); handle_name_response collapses to a single record-field update. Reset-config preserves owner records dynamically. CLEAN BREAK: no legacy keys, no migration — existing collars re-seed from the notecard.
 - v1.2 rev 1: Blacklist display names parallel CSV (superseded by rev 2's records).
 ARCHITECTURE: People live in user.<uuid> records (see USER RECORDS below);
@@ -60,7 +61,6 @@ string KEY_MULTI_OWNER_MODE = "access.multiowner";
 // syntax; these lines now BUILD user records instead of writing LSD keys
 // of their own. *names lines are accepted-and-ignored (names resolve
 // automatically).
-string CARD_MULTI_OWNER     = "access.multiowner";
 string CARD_OWNER           = "access.owner";
 string CARD_OWNER_NAME      = "access.ownername";
 string CARD_OWNER_HON       = "access.ownerhonorific";
@@ -80,40 +80,27 @@ string KEY_PUBLIC_ACCESS = "public.mode";
 string KEY_TPE_MODE      = "tpe.mode";
 string KEY_LOCKED        = "lock.locked";
 
-// Bootstrap sentinel — set after first notecard parse completes.
-// Gates start_notecard_reading() so subsequent script restarts don't
-// re-arm a hostile notecard. Cleared by Reload Settings, Reset Config,
-// CHANGED_INVENTORY notecard-changed, or llLinksetDataReset().
+// Bootstrap sentinel — set once the roster is bootstrapped. kmod_bootstrap
+// streams the card only while this is unset (so a restart can't re-arm a
+// hostile card); Reload Settings, Reset Config, a card edit, or llLinksetDataReset
+// clear it. kmod_auth gates ACL readiness on its presence.
 string KEY_SENTINEL = "settings.bootstrapped";
-
-// Card-ownership manifest — CSV of tokens the settings notecard provided on its
-// last parse: "@owner"/"@trustees"/"@blacklist" units plus individual managed/
-// generic LSD keys. On reparse we clear only what the card managed last time, so
-// a key the card has dropped is removed while runtime-set keys the card never
-// listed survive. Rebuilt into CardProvided each parse; persisted at finalize.
-string KEY_CARDMANIFEST = "settings.cardmanifest";
 
 // Placeholder used while a display name is being resolved
 string NAME_LOADING = "(loading...)";
 
 /* -------------------- NOTECARD CONFIG -------------------- */
+// kmod_settings no longer reads the card (kmod_bootstrap streams it); the name
+// is kept only to detect add/remove/edit in changed().
 string NOTECARD_NAME = "settings";
-string COMMENT_PREFIX = "#";
-string SEPARATOR = "=";
 
 /* -------------------- STATE -------------------- */
 key LastOwner = NULL_KEY;
 
-key NotecardQuery = NULL_KEY;
-integer NotecardLine = 0;
-integer IsLoadingNotecard = FALSE;
 key NotecardKey = NULL_KEY;
 
-// Tokens recorded during the in-progress notecard parse (see KEY_CARDMANIFEST).
-list CardProvided = [];
-
-// Reset Config in-flight state. When TRUE, dataserver EOF routes to
-// finalize_reset_config() instead of the normal bootstrap broadcast.
+// Reset Config in-flight state. When TRUE, process_streamed_card routes to
+// finalize_reset_config() instead of the normal bootstrap completion.
 integer InResetConfig = FALSE;
 list ResetConfigKeys   = [];
 list ResetConfigValues = [];
@@ -144,21 +131,6 @@ string normalize_bool(string s) {
     integer v = (integer)s;
     if (v != 0) v = 1;
     return (string)v;
-}
-
-list csv_read(string key_name) {
-    string raw = llLinksetDataRead(key_name);
-    if (raw == "") return [];
-    return llCSV2List(raw);
-}
-
-csv_write(string key_name, list values) {
-    if (llGetListLength(values) == 0) {
-        llLinksetDataDelete(key_name);
-    }
-    else {
-        llLinksetDataWrite(key_name, llList2CSV(values));
-    }
 }
 
 list list_remove_at(list source_list, integer idx) {
@@ -264,6 +236,17 @@ integer is_multi_owner_mode() {
 broadcast_settings_changed() {
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
         "type", "settings.sync"
+    ]), NULL_KEY);
+}
+
+// Ask kmod_bootstrap to (re-)stream the notecard into LSD. It deposits the raw
+// card keys and replies with "settings.card.streamed", which we convert in
+// process_streamed_card(). Used for boot is implicit (bootstrap self-triggers);
+// this is for the explicit re-arm paths (Reload Settings, Reset Config, a card
+// edit). The caller has already confirmed a notecard is present.
+request_card_restream() {
+    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+        "type", "settings.card.restream"
     ]), NULL_KEY);
 }
 
@@ -377,43 +360,10 @@ handle_settings_seed_csv(string msg) {
 
 /* -------------------- LSD CLEAR & FACTORY RESET -------------------- */
 
-clear_owner_keys() {
-    delete_role(5);
-    llLinksetDataDelete(KEY_ISOWNED);
-}
-
-clear_trustee_keys() {
-    delete_role(3);
-}
-
-/* -------------------- CARD-OWNERSHIP MANIFEST -------------------- */
-
-// Record a manifest token the current parse provided (deduped).
-record_card_key(string tok) {
-    if (llListFindList(CardProvided, [tok]) == -1) CardProvided += [tok];
-}
-
-// Pre-parse clear: remove only what the card managed on its last parse. Units
-// map to the family-clear helpers; every other token is a single LSD key.
-// Card-present keys are re-written by the parse; dropped ones stay cleared;
-// runtime-set keys the card never listed are never touched.
-apply_card_manifest_clear() {
-    list old_manifest = csv_read(KEY_CARDMANIFEST);
-    integer i;
-    integer n = llGetListLength(old_manifest);
-    for (i = 0; i < n; i++) {
-        string tok = llList2String(old_manifest, i);
-        if      (tok == "@owner")     clear_owner_keys();
-        else if (tok == "@trustees")  clear_trustee_keys();
-        else if (tok == "@blacklist") delete_role(-1);
-        else                          llLinksetDataDelete(tok);
-    }
-}
-
-// Persist the manifest built during this parse (csv_write deletes when empty).
-finalize_card_manifest() {
-    csv_write(KEY_CARDMANIFEST, CardProvided);
-}
+// (Card-ownership manifest + clear_owner_keys/clear_trustee_keys removed:
+// kmod_bootstrap streams the card and migrate_legacy_roster() clears+rebuilds
+// the roster wholesale on each load via delete_role(), so the per-key
+// drop-tracking the manifest provided is no longer needed.)
 
 factory_reset() {
     llRegionSayTo(llGetOwner(), 0, "Collar factory reset triggered.");
@@ -575,7 +525,7 @@ card_add_owner(string uuid_str) {
 
     if (!is_multi_owner_mode() && role_count(5) >= 1) {
         llRegionSayTo(llGetOwner(), 0,
-            "WARNING: Multi-owner mode is off — additional card owner ignored. Set access.multiowner = 1 BEFORE the owner lines to allow several owners.");
+            "WARNING: Multi-owner mode is off — additional card owner ignored. Set access.multiowner = 1 in the notecard to allow several owners.");
         return;
     }
 
@@ -624,185 +574,145 @@ apply_card_honorifics() {
     CardTrusteeHons = [];
 }
 
-/* -------------------- NOTECARD PARSING -------------------- */
+/* -------------------- STREAMED-CARD CONVERSION --------------------
 
-parse_notecard_line(string line) {
-    line = llStringTrim(line, STRING_TRIM);
-    if (line == "") return;
-    if (llGetSubString(line, 0, 0) == COMMENT_PREFIX) return;
+kmod_bootstrap does the heavy notecard I/O now: it streams each card line as a
+raw key=value into LSD (the card key names ARE the LSD key names), then emits
+"settings.card.streamed". We convert that raw deposit into final state here —
+the lighter half of the old parse, with no per-line dataserver state — so this
+script never holds the parse's memory. kmod_settings remains the sole writer of
+user.* records (bootstrap only deposits the legacy access.* / blacklist.* scratch
+keys; we build the records and delete the scratch). See kmod_bootstrap rev for
+the streaming side. CROSS-MODULE CONTRACT: the streamed key names + the
+"settings.card.streamed" signal.
 
-    integer sep_pos = llSubStringIndex(line, SEPARATOR);
-    if (sep_pos == -1) return;
+-------------------- */
 
-    string key_name = llStringTrim(llGetSubString(line, 0, sep_pos - 1), STRING_TRIM);
-    string value    = llStringTrim(llGetSubString(line, sep_pos + 1, -1), STRING_TRIM);
+// Normalize a boolean flag the card deposited raw ("true"/"1"/"yes" → 1/0).
+normalize_flag(string k) {
+    string v = llLinksetDataRead(k);
+    if (v != "") llLinksetDataWrite(k, normalize_bool(v));
+}
 
-    // Provenance: record which manifest token this card line contributes, so a
-    // later reload that drops the line clears it (runtime-only keys, never
-    // recorded here, survive). Owner/trustee/blacklist collapse to family units.
-    if (key_name == CARD_OWNER || key_name == CARD_OWNER_HON
-        || key_name == CARD_OWNER_UUIDS || key_name == CARD_OWNER_NAMES
-        || key_name == CARD_OWNER_HONS) {
-        record_card_key("@owner");
+// Convert the streamed legacy roster keys into user.<uuid> records. The card's
+// roster lines were deposited verbatim (access.owner*/trustee*, blacklist.*);
+// replay them through the card builders — same dedup, rank, honorific-by-rank,
+// and name-resolution rules the old per-line parse used. The existing roster is
+// cleared first so a reload rebuilds cleanly. Flag scalars are untouched here
+// (normalized separately). The scratch keys are deleted once converted.
+migrate_legacy_roster() {
+    // Clear any prior roster so a reload doesn't leave stale owners/trustees.
+    delete_role(5);
+    delete_role(3);
+    delete_role(-1);
+
+    integer i;
+    integer n;
+    list items;
+
+    // Owners: multi-owner list preferred, else the single-owner scalar.
+    string owners_csv = llLinksetDataRead(CARD_OWNER_UUIDS);
+    if (owners_csv != "") {
+        items = llCSV2List(owners_csv);
+        n = llGetListLength(items);
+        if (n > MaxListLen) n = MaxListLen;
+        for (i = 0; i < n; i++) card_add_owner(llList2String(items, i));
+        string ohons = llLinksetDataRead(CARD_OWNER_HONS);
+        if (ohons != "") CardOwnerHons = llCSV2List(ohons);
     }
-    else if (key_name == CARD_TRUSTEE_UUIDS || key_name == CARD_TRUSTEE_NAMES
-        || key_name == CARD_TRUSTEE_HONS) {
-        record_card_key("@trustees");
-    }
-    else if (key_name == CARD_BLACKLIST) {
-        record_card_key("@blacklist");
-    }
-    else if (llSubStringIndex(key_name, ".") != -1) {
-        record_card_key(key_name);
-    }
-
-    // Multi-owner policy flag (notecard-only). Card convention: place it
-    // BEFORE the owner lines — the parser enforces single-owner as it
-    // reads, so a late flag can't retroactively admit dropped owners.
-    if (key_name == CARD_MULTI_OWNER) {
-        llLinksetDataWrite(KEY_MULTI_OWNER_MODE, normalize_bool(value));
-        return;
-    }
-
-    // No-op roster lines: *names resolve automatically — accept and ignore.
-    if (key_name == CARD_OWNER_NAMES) return;
-    if (key_name == CARD_TRUSTEE_NAMES) return;
-    if (key_name == CARD_OWNER_NAME) return;
-
-    // Owner lines — each uuid becomes a rank-ordered owner record.
-    if (key_name == CARD_OWNER) {
-        card_add_owner(value);
-        return;
-    }
-    if (key_name == CARD_OWNER_UUIDS) {
-        list uuids = llCSV2List(value);
-        if (llGetListLength(uuids) > MaxListLen) {
-            uuids = llList2List(uuids, 0, MaxListLen - 1);
+    else {
+        string owner1 = llLinksetDataRead(CARD_OWNER);
+        if (owner1 != "") {
+            card_add_owner(owner1);
+            string ohon1 = llLinksetDataRead(CARD_OWNER_HON);
+            if (ohon1 != "") CardOwnerHons = [ohon1];
         }
-        integer i;
-        integer len = llGetListLength(uuids);
-        for (i = 0; i < len; i++) {
-            card_add_owner(llList2String(uuids, i));
-        }
-        return;
     }
 
-    // Honorific lines are buffered and applied by rank at EOF, so the
-    // card's uuid and honorific lines work in either order.
-    if (key_name == CARD_OWNER_HON) {
-        CardOwnerHons = [value];
-        return;
-    }
-    if (key_name == CARD_OWNER_HONS) {
-        CardOwnerHons = llCSV2List(value);
-        return;
-    }
-    if (key_name == CARD_TRUSTEE_HONS) {
-        CardTrusteeHons = llCSV2List(value);
-        return;
+    // Trustees.
+    string tru_csv = llLinksetDataRead(CARD_TRUSTEE_UUIDS);
+    if (tru_csv != "") {
+        items = llCSV2List(tru_csv);
+        n = llGetListLength(items);
+        if (n > MaxListLen) n = MaxListLen;
+        for (i = 0; i < n; i++) card_add_trustee(llList2String(items, i));
+        string thons = llLinksetDataRead(CARD_TRUSTEE_HONS);
+        if (thons != "") CardTrusteeHons = llCSV2List(thons);
     }
 
-    // Trustee uuids
-    if (key_name == CARD_TRUSTEE_UUIDS) {
-        list uuids = llCSV2List(value);
-        if (llGetListLength(uuids) > MaxListLen) {
-            uuids = llList2List(uuids, 0, MaxListLen - 1);
-        }
-        integer i;
-        integer len = llGetListLength(uuids);
-        for (i = 0; i < len; i++) {
-            card_add_trustee(llList2String(uuids, i));
-        }
-        return;
+    // Blacklist.
+    string bl_csv = llLinksetDataRead(CARD_BLACKLIST);
+    if (bl_csv != "") {
+        items = llCSV2List(bl_csv);
+        n = llGetListLength(items);
+        if (n > MaxListLen) n = MaxListLen;
+        for (i = 0; i < n; i++) add_blacklist_internal(llList2String(items, i), "");
     }
 
-    // Blacklist uuids. NOTE: like TPE-after-owner, exclusivity checks here
-    // see only roles defined EARLIER in the card — list owners/trustees
-    // before the blacklist line (established card convention).
-    if (key_name == CARD_BLACKLIST) {
-        list bl = llCSV2List(value);
-        if (llGetListLength(bl) > MaxListLen) {
-            bl = llList2List(bl, 0, MaxListLen - 1);
-        }
-        integer i;
-        integer len = llGetListLength(bl);
-        for (i = 0; i < len; i++) {
-            add_blacklist_internal(llList2String(bl, i), "");
-        }
-        return;
+    // Honorifics by rank (mirrors the old card EOF step).
+    apply_card_honorifics();
+
+    // Deferred TPE guard: tpe.mode was deposited raw; enforce "requires an
+    // external owner" now that the roster exists.
+    if ((integer)llLinksetDataRead(KEY_TPE_MODE) && !has_external_owner()) {
+        llLinksetDataWrite(KEY_TPE_MODE, "0");
+        llRegionSayTo(llGetOwner(), 0,
+            "ERROR: TPE disabled - it requires an external owner.");
     }
 
-    // Boolean scalars
-    if (key_name == KEY_PUBLIC_ACCESS
-        || key_name == KEY_LOCKED
-        || key_name == KEY_RUNAWAY_ENABLED
-        || key_name == KEY_ISOWNED) {
-        llLinksetDataWrite(key_name, normalize_bool(value));
-        return;
-    }
+    // Drop the converted scratch keys; flag scalars stay.
+    llLinksetDataDelete(CARD_OWNER);
+    llLinksetDataDelete(CARD_OWNER_NAME);
+    llLinksetDataDelete(CARD_OWNER_HON);
+    llLinksetDataDelete(CARD_OWNER_UUIDS);
+    llLinksetDataDelete(CARD_OWNER_NAMES);
+    llLinksetDataDelete(CARD_OWNER_HONS);
+    llLinksetDataDelete(CARD_TRUSTEE_UUIDS);
+    llLinksetDataDelete(CARD_TRUSTEE_NAMES);
+    llLinksetDataDelete(CARD_TRUSTEE_HONS);
+    llLinksetDataDelete(CARD_BLACKLIST);
+}
 
-    // TPE — requires external owner
-    if (key_name == KEY_TPE_MODE) {
-        value = normalize_bool(value);
-        if ((integer)value == 1 && !has_external_owner()) {
-            llRegionSayTo(llGetOwner(), 0, "ERROR: Cannot enable TPE via notecard - requires external owner");
-            llRegionSayTo(llGetOwner(), 0, "HINT: Set owner BEFORE tpe.mode in notecard");
-            return;
-        }
-        llLinksetDataWrite(KEY_TPE_MODE, value);
-        return;
-    }
+// Entry point when kmod_bootstrap signals the card has been streamed into LSD.
+// Normalize the flag scalars, convert the roster, then finalize: Reset-Config
+// restores the preserved owner+lock block; a normal bootstrap stamps the
+// sentinel and announces.
+process_streamed_card() {
+    normalize_flag(KEY_PUBLIC_ACCESS);
+    normalize_flag(KEY_LOCKED);
+    normalize_flag(KEY_RUNAWAY_ENABLED);
+    normalize_flag(KEY_ISOWNED);
+    normalize_flag(KEY_MULTI_OWNER_MODE);
+    normalize_flag(KEY_TPE_MODE);
 
-    // Generic plugin scalars (any other dotted key) — write through.
-    // user.* records are kmod_settings-internal: a card may only define
-    // people via the roster lines above, never by raw record writes.
-    if (llSubStringIndex(key_name, USER_PREFIX) == 0) return;
-    if (llSubStringIndex(key_name, ".") != -1) {
-        llLinksetDataWrite(key_name, value);
+    migrate_legacy_roster();
+
+    if (InResetConfig) {
+        finalize_reset_config();
+    }
+    else {
+        llLinksetDataWrite(KEY_SENTINEL, "1");
+        broadcast_settings_changed();
+        llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+            "type", "settings.notecard.loaded"
+        ]), NULL_KEY);
     }
 }
 
-integer start_notecard_reading() {
-    // Sentinel-gated: callers wanting an explicit re-parse (Reload Settings,
-    // Reset Config, CHANGED_INVENTORY notecard-changed) must clear the
-    // sentinel first. Boot/restart paths fall through this guard so a
-    // hostile notecard cannot self-arm a wiped collar.
-    CardProvided = [];   // reset provenance accumulator for this parse
-    CardOwnerHons = [];
-    CardTrusteeHons = [];
-    if (llLinksetDataRead(KEY_SENTINEL) != "") return FALSE;
-
-    if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) {
-        return FALSE;
-    }
-    // Clear only what the card itself managed on its last parse (the manifest),
-    // so a key the card has since dropped is removed, while runtime-set keys the
-    // card never listed survive. Card-present keys are re-asserted by the parse.
-    apply_card_manifest_clear();
-
-    IsLoadingNotecard = TRUE;
-    NotecardLine = 0;
-    NotecardQuery = llGetNotecardLine(NOTECARD_NAME, NotecardLine);
-    return TRUE;
-}
 
 /* -------------------- MESSAGE HANDLERS -------------------- */
 
 handle_settings_get() {
-    // UI contract ("Reload Settings" button): re-read the notecard and let
-    // plugins resync from the refreshed LSD. Falling back to a plain
-    // rebroadcast when no notecard is present or a reload is already in
-    // flight — broadcast_settings_changed will also fire from the EOF
-    // branch of the dataserver handler once the in-flight read completes.
-    if (IsLoadingNotecard) return;
-
-    // Reload Settings is an explicit re-arm: clear the sentinel so
-    // start_notecard_reading() proceeds past its bootstrap guard.
-    llLinksetDataDelete(KEY_SENTINEL);
-
-    if (!start_notecard_reading()) {
+    // UI "Reload Settings": with a card present, clear the sentinel and ask
+    // kmod_bootstrap to re-stream it (→ settings.card.streamed → convert). With
+    // no card, there's nothing to reload — just rebroadcast so plugins resync
+    // from the existing LSD (the roster is NOT touched).
+    if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) {
         broadcast_settings_changed();
+        return;
     }
+    llLinksetDataDelete(KEY_SENTINEL);
+    request_card_restream();
 }
 
 // Generic scalar set for non-access keys (and a few access scalars).
@@ -950,17 +860,21 @@ handle_reset_config() {
 
     llRegionSayTo(llGetOwner(), 0, "Resetting configuration...");
 
-    // Wipe LSD. Sentinel is removed implicitly so start_notecard_reading
-    // below will proceed. Notecard stays in inventory (preserve trust).
+    // Wipe LSD (the snapshot lives in script vars, so it survives). Notecard
+    // stays in inventory (preserve trust). The sentinel is gone with the wipe.
     llLinksetDataReset();
 
     InResetConfig = TRUE;
 
-    if (!start_notecard_reading()) {
-        // No notecard — restore + finalize immediately.
+    if (llGetInventoryType(NOTECARD_NAME) == INVENTORY_NOTECARD) {
+        // Ask bootstrap to re-stream; settings.card.streamed routes to
+        // process_streamed_card → finalize_reset_config (InResetConfig set).
+        request_card_restream();
+    }
+    else {
+        // No notecard — restore the preserved block + finalize immediately.
         finalize_reset_config();
     }
-    // else: dataserver chain runs; EOF routes to finalize_reset_config.
 }
 
 finalize_reset_config() {
@@ -976,9 +890,7 @@ finalize_reset_config() {
         }
     }
 
-    // Persist the card manifest (the restored owner/lock keys are runtime-owned
-    // and intentionally not in it), then mark bootstrap complete.
-    finalize_card_manifest();
+    // Mark bootstrap complete under the current schema.
     llLinksetDataWrite(KEY_SENTINEL, "1");
 
     InResetConfig = FALSE;
@@ -1003,10 +915,17 @@ default
         LastOwner = llGetOwner();
         NotecardKey = llGetInventoryKey(NOTECARD_NAME);
 
-        integer notecard_found = start_notecard_reading();
-
-        if (!notecard_found) {
-            // No notecard — LSD already has settings from previous session
+        // kmod_settings no longer reads the notecard — kmod_bootstrap streams it
+        // and signals settings.card.streamed, which we convert. At boot:
+        //   • sentinel set → LSD is authoritative, just rebroadcast.
+        //   • sentinel unset + card present → wait; bootstrap streams it.
+        //   • sentinel unset + no card → empty bootstrap: stamp + broadcast so
+        //     ACL/consumers don't wait forever for a card that will never come.
+        if (llLinksetDataRead(KEY_SENTINEL) != "") {
+            broadcast_settings_changed();
+        }
+        else if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) {
+            llLinksetDataWrite(KEY_SENTINEL, "1");
             broadcast_settings_changed();
         }
     }
@@ -1046,53 +965,19 @@ default
                     factory_reset();
                 }
                 else {
-                    // Wearer/owner swapped or edited the notecard. Clear the
-                    // bootstrap sentinel so start_notecard_reading proceeds —
-                    // the new card is an explicit re-arm signal.
+                    // Wearer/owner swapped or edited the notecard — an explicit
+                    // re-arm. Clear the sentinel and ask bootstrap to re-stream.
                     NotecardKey = current_notecard_key;
                     llLinksetDataDelete(KEY_SENTINEL);
-                    start_notecard_reading();
+                    request_card_restream();
                 }
             }
         }
     }
 
     dataserver(key query_id, string data) {
-        // Notecard line read
-        if (query_id == NotecardQuery) {
-            if (data != EOF) {
-                parse_notecard_line(data);
-                NotecardLine += 1;
-                NotecardQuery = llGetNotecardLine(NOTECARD_NAME, NotecardLine);
-            }
-            else {
-                IsLoadingNotecard = FALSE;
-
-                // Card honorific lines apply by rank now that every card
-                // uuid line has been processed (order-independent cards).
-                apply_card_honorifics();
-
-                if (InResetConfig) {
-                    // Reset Config in flight: restore preserved keys for any
-                    // slot the card was silent on, set sentinel, broadcast.
-                    finalize_reset_config();
-                }
-                else {
-                    // Normal bootstrap completion. Persist the card manifest,
-                    // then mark sentinel so the next restart doesn't re-parse.
-                    finalize_card_manifest();
-                    llLinksetDataWrite(KEY_SENTINEL, "1");
-                    broadcast_settings_changed();
-
-                    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
-                        "type", "settings.notecard.loaded"
-                    ]), NULL_KEY);
-                }
-            }
-            return;
-        }
-
-        // Display name response
+        // Notecard reading moved to kmod_bootstrap. The only dataserver traffic
+        // left here is async display-name resolution for roster records.
         handle_name_response(query_id, data);
     }
 
@@ -1130,7 +1015,8 @@ default
 
         if (num != SETTINGS_BUS) return;
 
-        if      (msg_type == "settings.get")            handle_settings_get();
+        if      (msg_type == "settings.card.streamed")  process_streamed_card();
+        else if (msg_type == "settings.get")            handle_settings_get();
         else if (msg_type == "settings.set")            handle_set(msg);
         else if (msg_type == "settings.owner.set")       handle_set_owner(msg);
         else if (msg_type == "settings.owner.clear")     handle_clear_owner();

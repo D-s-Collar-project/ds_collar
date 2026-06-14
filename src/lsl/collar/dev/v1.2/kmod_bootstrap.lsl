@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 2
 CHANGES:
+- v1.2 rev 2: Owns the settings-notecard I/O now (relocated from kmod_settings, which collided at ~90% of the Mono budget when it parsed). At boot, if the bootstrap sentinel is unset, stream_card() reads the card line-by-line and deposits each as a raw key=value into LSD (dumb deposit: comments/blanks skipped, user.* refused, dotted keys only), then emits settings.card.streamed so kmod_settings converts it. Reload/Reset/card-edit arrive as settings.card.restream (handled in both states). We build no records and hold no parse memory — this module sits at ~46%. CROSS-MODULE CONTRACT: streamed key names + settings.card.streamed / settings.card.restream.
 - v1.2 rev 1: Owner announcement + names_ready read the user-record roster (user.<uuid> acl-5 records, rank-ordered) instead of the retired access.owner- keys; multi-owner derives from owner count.
-PURPOSE: Startup coordination, RLV detection, status announcement
+PURPOSE: Startup coordination, RLV detection, status announcement, settings-card streaming
 ARCHITECTURE: Consolidated message bus lanes
 --------------------*/
 
@@ -29,6 +30,31 @@ integer ProbeRelayBothSigns;  // Also try positive relay channel
 /* -------------------- SETTINGS KEYS -------------------- */
 // Roster reads come from user.<uuid> records (see owner_rows).
 string NAME_LOADING = "(loading...)";
+
+// Bootstrap sentinel (written by kmod_settings once the roster is bootstrapped).
+// We stream the card only while it is unset. CROSS-MODULE CONTRACT.
+string KEY_SENTINEL = "settings.bootstrapped";
+
+/* -------------------- NOTECARD STREAMING --------------------
+
+The settings notecard parse used to live in kmod_settings, which sat at ~90% of
+the Mono budget and stack-heap-collided when it ran. We do the I/O here (this
+module has ample headroom) and DEPOSIT each card line into LSD verbatim — the
+card key names ARE the LSD key names. kmod_settings converts the deposited
+roster keys into user.* records on "settings.card.streamed" (it stays the sole
+user.* writer). We never build records here — dumb deposit only. CROSS-MODULE
+CONTRACT: the streamed key names + the settings.card.streamed / settings.card.restream
+signals.
+
+-------------------- */
+string NOTECARD_NAME  = "settings";
+string COMMENT_PREFIX = "#";
+string SEPARATOR      = "=";
+string USER_PREFIX    = "user.";
+
+key CardQuery   = NULL_KEY;
+integer CardLine = 0;
+integer Streaming = FALSE;
 
 /* -------------------- BOOTSTRAP CONFIG -------------------- */
 integer BOOTSTRAP_TIMEOUT_SEC = 90;
@@ -218,6 +244,49 @@ integer names_ready() {
     return TRUE;
 }
 
+/* -------------------- NOTECARD STREAMING -------------------- */
+
+// Deposit one card line into LSD as a raw key=value. Comments/blanks are
+// skipped; user.* is refused (a card may never forge records directly); only
+// dotted keys are accepted (roster scratch keys + plugin scalars). No parsing,
+// normalization, or record-building happens here — kmod_settings does that on
+// settings.card.streamed.
+stream_line(string line) {
+    line = llStringTrim(line, STRING_TRIM);
+    if (line == "") return;
+    if (llGetSubString(line, 0, 0) == COMMENT_PREFIX) return;
+
+    integer sep = llSubStringIndex(line, SEPARATOR);
+    if (sep == -1) return;
+
+    string k = llStringTrim(llGetSubString(line, 0, sep - 1), STRING_TRIM);
+    string v = llStringTrim(llGetSubString(line, sep + 1, -1), STRING_TRIM);
+    if (k == "") return;
+    if (llSubStringIndex(k, USER_PREFIX) == 0) return;   // never card-write records
+    if (llSubStringIndex(k, ".") == -1) return;          // dotted keys only
+
+    llLinksetDataWrite(k, v);
+}
+
+// Begin streaming the settings notecard (idempotent while in flight). The
+// dataserver chain deposits each line and emits settings.card.streamed at EOF.
+stream_card() {
+    if (Streaming) return;
+    if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) return;
+    Streaming = TRUE;
+    CardLine = 0;
+    CardQuery = llGetNotecardLine(NOTECARD_NAME, CardLine);
+}
+
+// Tell kmod_settings the raw deposit is complete; it converts + stamps the
+// sentinel + rebroadcasts settings.sync.
+emit_card_streamed() {
+    Streaming = FALSE;
+    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+        "type", "settings.card.streamed"
+    ]), NULL_KEY);
+}
+
 /* -------------------- BOOTSTRAP INITIATION -------------------- */
 
 start_bootstrap() {
@@ -231,6 +300,14 @@ start_bootstrap() {
     sendIM("D/s Collar starting up. Please wait...");
 
     start_rlv_probe();
+
+    // If the roster hasn't been bootstrapped yet and a settings card is
+    // present, stream it into LSD; kmod_settings converts it and stamps the
+    // sentinel. An already-bootstrapped collar (sentinel set) or a cardless one
+    // skips this — the settings.sync / retry path below drives completion.
+    if (llLinksetDataRead(KEY_SENTINEL) == "") {
+        stream_card();
+    }
 
     // OPTIMIZATION: Delay initial settings check to allow notecard loading
     SettingsNextRetry = now() + SETTINGS_INITIAL_DELAY_SEC;
@@ -399,15 +476,32 @@ state starting
         stop_rlv_probe();
         check_bootstrap_complete();
     }
-    
+
+    dataserver(key query_id, string data) {
+        if (query_id != CardQuery) return;
+        if (data != EOF) {
+            stream_line(data);
+            CardLine += 1;
+            CardQuery = llGetNotecardLine(NOTECARD_NAME, CardLine);
+        }
+        else {
+            emit_card_streamed();
+        }
+    }
+
     link_message(integer sender, integer num, string msg, key id) {
         string msg_type = get_msg_type(msg);
         if (msg_type == "") return;
-        
+
         /* -------------------- SETTINGS BUS -------------------- */
         if (num == SETTINGS_BUS) {
             if (msg_type == "settings.sync") {
                 apply_settings_sync();
+            }
+            else if (msg_type == "settings.card.restream") {
+                // kmod_settings (Reload / Reset Config / card edit) cleared the
+                // sentinel and wants the card re-deposited.
+                stream_card();
             }
         }
 
@@ -457,11 +551,32 @@ state running
         llResetScript();
     }
 
+    dataserver(key query_id, string data) {
+        // A post-boot Reload Settings / Reset Config / card edit can request a
+        // re-stream while we're running; deposit the lines here too.
+        if (query_id != CardQuery) return;
+        if (data != EOF) {
+            stream_line(data);
+            CardLine += 1;
+            CardQuery = llGetNotecardLine(NOTECARD_NAME, CardLine);
+        }
+        else {
+            emit_card_streamed();
+        }
+    }
+
     link_message(integer sender, integer num, string msg, key id) {
         string msg_type = get_msg_type(msg);
         if (msg_type == "") return;
 
-        if (num == KERNEL_LIFECYCLE) {
+        if (num == SETTINGS_BUS) {
+            if (msg_type == "settings.card.restream") {
+                // Re-deposit the card; the following settings.notecard.loaded
+                // (from kmod_settings) then restarts us to re-announce.
+                stream_card();
+            }
+        }
+        else if (num == KERNEL_LIFECYCLE) {
             if (msg_type == "settings.notecard.loaded") {
                 llResetScript();
             }
