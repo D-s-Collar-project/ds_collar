@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.2
-REVISION: 2
+REVISION: 3
 CHANGES:
+- v1.2 rev 3: Self-healing card-stream handshake. The 'starting' timer re-streams the card while the sentinel is still unset and a card is present, so a missed first settings.card.streamed (kmod_settings still resetting on a fresh owner-change boot) is recovered until kmod_settings processes one and stamps the sentinel. Fixes "new owner gets no UI" — the owner-change re-bootstrap path never exercised on an already-bootstrapped collar. Bounded by the sentinel check + bootstrap timeout.
 - v1.2 rev 2: Owns the settings-notecard I/O now (relocated from kmod_settings, which collided at ~90% of the Mono budget when it parsed). At boot, if the bootstrap sentinel is unset, stream_card() reads the card line-by-line and deposits each as a raw key=value into LSD (dumb deposit: comments/blanks skipped, user.* refused, dotted keys only), then emits settings.card.streamed so kmod_settings converts it. Reload/Reset/card-edit arrive as settings.card.restream (handled in both states). We build no records and hold no parse memory — this module sits at ~46%. CROSS-MODULE CONTRACT: streamed key names + settings.card.streamed / settings.card.restream.
 - v1.2 rev 1: Owner announcement + names_ready read the user-record roster (user.<uuid> acl-5 records, rank-ordered) instead of the retired access.owner- keys; multi-owner derives from owner count.
 PURPOSE: Startup coordination, RLV detection, status announcement, settings-card streaming
@@ -430,6 +431,20 @@ state starting
                 SettingsRetryCount++;
                 SettingsNextRetry = current_time + SETTINGS_RETRY_INTERVAL_SEC;
             }
+        }
+
+        // Self-heal the card-stream handshake. If the roster still isn't
+        // bootstrapped (sentinel unset) and a card is present, re-stream it.
+        // settings.card.streamed is a one-shot message: on a fresh boot
+        // (e.g. owner-change wipe) kmod_settings can still be resetting when the
+        // first one fires and miss it, leaving the sentinel unstamped and ACL
+        // never-ready (no UI). Re-streaming until kmod_settings processes one and
+        // stamps the sentinel makes that path reliable; the sentinel check stops
+        // it, and the bootstrap timeout (→ state running) bounds it.
+        if (!Streaming
+            && llLinksetDataRead(KEY_SENTINEL) == ""
+            && llGetInventoryType(NOTECARD_NAME) == INVENTORY_NOTECARD) {
+            stream_card();
         }
 
         // Handle RLV probe retries
