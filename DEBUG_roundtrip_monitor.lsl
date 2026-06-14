@@ -12,8 +12,8 @@ kernel handshake traffic with timing, so you can watch:
 
 Usage in-world:
   - Touch the prim holding this script to print a "--- MARK ---" line and zero
-    the delta clock, then immediately do the action (touch collar / Reload
-    Settings / Reset Config) and watch the sequence.
+    the delta clock, then immediately do the action (touch collar / re-wear /
+    Reload Settings / Reset Config) and watch the sequence.
   - Output is llOwnerSay (wearer-only). Flip VERBOSE for ALL bus traffic
     (incl. settings.delta/seed CSV writes); default is the handshake types only.
 --------------------*/

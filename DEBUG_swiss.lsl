@@ -1,0 +1,273 @@
+/*--------------------
+THROWAWAY DEBUG TOOL — NOT part of the product. DELETE before any build/bundle.
+
+DS Collar Swiss-army debugger. Drop into ANY prim of the collar linkset (it
+shares the internal link-message bus, so it sees every ISP lane natively — the
+lanes are llMessageLinked(LINK_SET,...) and never leave the object, which is
+why this has to live IN the collar, not in a detached HUD).
+
+FOUR tools, one script:
+  • LSD INSPECTOR  — dump live LSD state by group (sentinel/flags, roster,
+                     registrations, ui.views, leash). Sidesteps boot-timing:
+                     read the truth NOW instead of catching a transient.
+  • SNAPSHOT       — one shot: owner-change sentinel vs current owner, the
+                     bootstrap sentinel, ownership flags, and counts of
+                     roster / registrations / views. The "what's broken now".
+  • LANE TAP       — live print of all ISP lanes (500 KERNEL, 600 REMOTE,
+                     700 AUTH, 800 SETTINGS, 900 UI) with timing. Toggle +
+                     verbose.
+  • INJECTOR       — fire test messages onto the lanes (ACL self-query,
+                     register.refresh, settings reload/restream, menu self).
+
+USAGE:
+  - Wearer: touch this prim → dialog menu. Output is llOwnerSay (wearer-only).
+  - Separate console prim: chat a command on DEBUG_CMD_CHAN (e.g. "snapshot",
+    "dump roster", "tap on", "inject acl"); replies come back on DEBUG_OUT_CHAN
+    AND llOwnerSay. (Lets you drive it from another prim — comms over channel.)
+--------------------*/
+
+/* -------------------- ISP LANES (link-message buses) -------------------- */
+integer KERNEL_LIFECYCLE = 500;
+integer REMOTE_BUS       = 600;
+integer AUTH_BUS         = 700;
+integer SETTINGS_BUS     = 800;
+integer UI_BUS           = 900;
+
+/* -------------------- CONSOLE CHANNELS (throwaway) -----------------------
+   CMD is POSITIVE so you can drive it straight from the viewer chat bar:
+   the chat bar refuses negative channels, but "/9090 snapshot" works.   */
+integer DEBUG_CMD_CHAN = 9090;       // you (chat) / console -> agent commands
+integer DEBUG_OUT_CHAN = -90909091;  // agent -> external console replies (mirror)
+
+/* -------------------- STATE -------------------- */
+integer DialogChan;
+integer DialogListen;
+integer CmdListen;
+
+integer TapOn      = FALSE;   // live lane printing
+integer TapVerbose = FALSE;   // TRUE: raw msg too, not just the type
+float   LastT;
+
+key   Speaker = NULL_KEY;     // last console speaker (for OUT replies)
+
+/* -------------------- OUTPUT -------------------- */
+// Everything goes to the wearer; if a console drove the last command, mirror
+// it back on the OUT channel too.
+out(string s) {
+    llOwnerSay(s);
+    if (Speaker != NULL_KEY) llRegionSayTo(Speaker, DEBUG_OUT_CHAN, s);
+}
+
+string fnum(float f, integer places) {
+    string s = (string)f;
+    integer dot = llSubStringIndex(s, ".");
+    if (dot == -1) return s;
+    return llGetSubString(s, 0, dot + places);
+}
+
+// Readable label from a JSON envelope ({"type":...}) or a CSV envelope
+// (settings.delta:key:val -> "settings.delta:key").
+string label_of(string msg) {
+    if (llGetSubString(msg, 0, 0) == "{") {
+        string t = llJsonGetValue(msg, ["type"]);
+        if (t == JSON_INVALID) return "(json,no-type)";
+        return t;
+    }
+    list p = llParseString2List(msg, [":"], []);
+    if (llGetListLength(p) >= 2) return llList2String(p, 0) + ":" + llList2String(p, 1);
+    return msg;
+}
+
+string lane_name(integer num) {
+    if (num == KERNEL_LIFECYCLE) return "KERNEL";
+    if (num == REMOTE_BUS)       return "REMOTE";
+    if (num == AUTH_BUS)         return "AUTH";
+    if (num == SETTINGS_BUS)     return "SETTINGS";
+    if (num == UI_BUS)           return "UI";
+    return (string)num;
+}
+
+/* -------------------- LSD INSPECTOR -------------------- */
+
+// Dump every LSD key matching a regex prefix, value alongside. Returns count.
+integer dump_prefix(string pattern, string heading) {
+    list keys = llLinksetDataFindKeys(pattern, 0, -1);
+    integer n = llGetListLength(keys);
+    out("-- " + heading + " (" + (string)n + ") --");
+    integer i = 0;
+    while (i < n) {
+        string k = llList2String(keys, i);
+        out("   " + k + " = " + llLinksetDataRead(k));
+        i += 1;
+    }
+    if (n == 0) out("   (none)");
+    return n;
+}
+
+dump_group(string grp) {
+    if (grp == "sentinel") {
+        out("settings.bootstrapped = '" + llLinksetDataRead("settings.bootstrapped") + "'");
+        out("safeguard.last_owner  = " + llLinksetDataRead("safeguard.last_owner"));
+        out("current owner         = " + (string)llGetOwner());
+    }
+    else if (grp == "flags") {
+        out("access.isowned     = " + llLinksetDataRead("access.isowned"));
+        out("access.multiowner  = " + llLinksetDataRead("access.multiowner"));
+        out("access.enablerunaway = " + llLinksetDataRead("access.enablerunaway"));
+        out("public.mode        = " + llLinksetDataRead("public.mode"));
+        out("tpe.mode           = " + llLinksetDataRead("tpe.mode"));
+        out("lock.locked        = " + llLinksetDataRead("lock.locked"));
+    }
+    else if (grp == "roster")   dump_prefix("^user\\.", "user.* roster");
+    else if (grp == "scratch")  dump_prefix("^access\\.(owner|trustee)", "access.* card scratch");
+    else if (grp == "reg")      dump_prefix("^reg\\.", "reg.* registrations");
+    else if (grp == "views")    dump_prefix("^ui\\.view", "ui.view* menu views");
+    else if (grp == "leash")    dump_prefix("^leash\\.", "leash.* state");
+    else out("? unknown group: " + grp);
+}
+
+snapshot() {
+    out("===== SNAPSHOT @ t=" + fnum(llGetTime(), 1) + " =====");
+    string sent = llLinksetDataRead("settings.bootstrapped");
+    string lo   = llLinksetDataRead("safeguard.last_owner");
+    string cur  = (string)llGetOwner();
+    out("bootstrapped sentinel : '" + sent + "'  <- empty == auth NEVER ready (no UI)");
+    out("cardapplied marker    : '" + llLinksetDataRead("settings.cardapplied") + "'");
+    out("last_owner / current  : " + lo + " / " + cur
+        + "   match=" + (string)(lo == cur));
+    out("access.isowned        : " + llLinksetDataRead("access.isowned"));
+    out("tpe.mode              : " + llLinksetDataRead("tpe.mode"));
+    integer nUser = llGetListLength(llLinksetDataFindKeys("^user\\.", 0, -1));
+    integer nReg  = llGetListLength(llLinksetDataFindKeys("^reg\\.", 0, -1));
+    integer nView = llGetListLength(llLinksetDataFindKeys("^ui\\.view", 0, -1));
+    out("roster / reg / views  : " + (string)nUser + " / " + (string)nReg + " / " + (string)nView);
+    out("=====================================");
+}
+
+/* -------------------- INJECTOR -------------------- */
+
+inject(string what) {
+    if (what == "acl") {
+        llMessageLinked(LINK_SET, AUTH_BUS, llList2Json(JSON_OBJECT, [
+            "type", "auth.acl.query", "avatar", (string)llGetOwner(), "id", "dbg"]), NULL_KEY);
+        out("injected -> [700] auth.acl.query (self); watch tap for auth.acl.result");
+    }
+    else if (what == "reg") {
+        llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+            "type", "kernel.register.refresh"]), NULL_KEY);
+        out("injected -> [500] kernel.register.refresh (rebuild registrations/views)");
+    }
+    else if (what == "reload") {
+        llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+            "type", "settings.get"]), NULL_KEY);
+        out("injected -> [800] settings.get (Reload Settings; clears+restreams card)");
+    }
+    else if (what == "restream") {
+        llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+            "type", "settings.card.restream"]), NULL_KEY);
+        out("injected -> [800] settings.card.restream");
+    }
+    else if (what == "menu") {
+        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+            "type", "ui.menu.start", "context", "ui.core.root"]), llGetOwner());
+        out("injected -> [900] ui.menu.start root (self); a menu should open if UI is alive");
+    }
+    else out("? unknown inject: " + what);
+}
+
+/* -------------------- COMMAND DISPATCH (dialog label or console text) ---- */
+
+run_command(string cmd) {
+    cmd = llStringTrim(llToLower(cmd), STRING_TRIM);
+
+    if      (cmd == "snapshot")  snapshot();
+    else if (cmd == "sentinel")  dump_group("sentinel");
+    else if (cmd == "flags")     dump_group("flags");
+    else if (cmd == "roster")    dump_group("roster");
+    else if (cmd == "scratch")   dump_group("scratch");
+    else if (cmd == "reg")       dump_group("reg");
+    else if (cmd == "views")     dump_group("views");
+    else if (cmd == "leash")     dump_group("leash");
+    else if (cmd == "lsd") {
+        out("LSD keys = " + (string)llLinksetDataCountKeys()
+            + "   free bytes = " + (string)llLinksetDataAvailable()
+            + "   (store full == 0 free → writes silently fail)");
+    }
+    else if (cmd == "tap on")  { TapOn = TRUE;  LastT = llGetTime(); out("tap ON  (verbose=" + (string)TapVerbose + ")"); }
+    else if (cmd == "tap off") { TapOn = FALSE; out("tap OFF"); }
+    else if (cmd == "verbose") { TapVerbose = !TapVerbose; out("tap verbose=" + (string)TapVerbose); }
+    else if (llSubStringIndex(cmd, "inject ") == 0) inject(llGetSubString(cmd, 7, -1));
+    else if (llSubStringIndex(cmd, "dump ")   == 0) dump_group(llGetSubString(cmd, 5, -1));
+    else out("? unknown command: " + cmd);
+}
+
+/* -------------------- DIALOGS -------------------- */
+
+show_main(key who) {
+    Speaker = NULL_KEY;  // dialog-driven: wearer output only
+    list b = [
+        "Snapshot", "Tap On", "Tap Off",
+        "Roster", "Reg", "Views",
+        "Flags", "Leash", "Sentinel",
+        "Inject", "Verbose", "Scratch"];
+    llDialog(who, "DS Collar debugger — pick a probe.\ntap verbose=" + (string)TapVerbose
+        + "  tap=" + (string)TapOn, b, DialogChan);
+}
+
+show_inject(key who) {
+    list b = ["ACL self", "Reg refresh", "Reload card",
+              "Restream", "Menu self", "Back"];
+    llDialog(who, "Inject a test message onto the lanes:", b, DialogChan);
+}
+
+/* -------------------- EVENTS -------------------- */
+default {
+    state_entry() {
+        DialogChan = -1000000 - (integer)llFrand(8000000.0);
+        if (DialogListen) llListenRemove(DialogListen);
+        DialogListen = llListen(DialogChan, "", llGetOwner(), "");
+        if (CmdListen) llListenRemove(CmdListen);
+        CmdListen = llListen(DEBUG_CMD_CHAN, "", llGetOwner(), "");
+        LastT = llGetTime();
+        llOwnerSay("=== DS Collar Swiss debugger armed ===\n"
+            + "Type commands in chat, e.g.:  /9090 snapshot   /9090 tap on   "
+            + "/9090 inject menu   /9090 inject acl   /9090 dump views");
+    }
+
+    touch_start(integer n) {
+        show_main(llDetectedKey(0));
+    }
+
+    listen(integer channel, string nm, key id, string message) {
+        if (channel == DialogChan) {
+            if (message == "Inject")       { show_inject(id); return; }
+            if (message == "Back")         { show_main(id); return; }
+            if (message == "ACL self")     { inject("acl");      return; }
+            if (message == "Reg refresh")  { inject("reg");      return; }
+            if (message == "Reload card")  { inject("reload");   return; }
+            if (message == "Restream")     { inject("restream"); return; }
+            if (message == "Menu self")    { inject("menu");     return; }
+            run_command(message);
+            return;
+        }
+        if (channel == DEBUG_CMD_CHAN) {
+            Speaker = id;          // reply to this console too
+            run_command(message);
+        }
+    }
+
+    link_message(integer sender, integer num, string msg, key id) {
+        if (!TapOn) return;
+        if (num != KERNEL_LIFECYCLE && num != REMOTE_BUS && num != AUTH_BUS
+            && num != SETTINGS_BUS && num != UI_BUS) return;
+
+        float t = llGetTime();
+        float d = t - LastT;
+        LastT = t;
+        string line = "  t=" + fnum(t, 2) + " +" + fnum(d, 2)
+            + " [" + lane_name(num) + "] " + label_of(msg);
+        if (id != NULL_KEY) line += "  id=" + llGetSubString((string)id, 0, 7);
+        llOwnerSay(line);
+        if (TapVerbose) llOwnerSay("       " + msg);
+    }
+}

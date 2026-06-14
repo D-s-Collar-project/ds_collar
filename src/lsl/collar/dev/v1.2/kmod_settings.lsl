@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 3
+REVISION: 4
 PURPOSE: Validation guards, roster conversion, and LSD settings store
 CHANGES:
+- v1.2 rev 4: The notecard is an OVERRIDE, never a requirement — decouple readiness from the card so a present-but-unstreamable card can't brick the UI. Two markers now: settings.bootstrapped (readiness; kmod_auth's gate) is stamped IMMEDIATELY in state_entry on any fresh boot (the old "card present → wait for settings.card.streamed" branch is gone — that branch left the sentinel unstamped forever on owner-change boots whose card handshake didn't land, so auth never went ready = no UI). New settings.cardapplied marker gates the card override: process_streamed_card + finalize_reset_config set it; Reload Settings / card-edit clear it (NOT the readiness sentinel, so the UI stays up through a reload); a wipe clears both so the card re-applies for a new owner. kmod_bootstrap now streams the card gated on settings.cardapplied, not the readiness sentinel.
 - v1.2 rev 3: Notecard I/O relocated to kmod_bootstrap (memory: rev 2 sat at 90.6% of the Mono budget and stack-heap-collided when it parsed). kmod_settings no longer reads the card: kmod_bootstrap streams each card line into LSD verbatim and signals "settings.card.streamed"; we convert in process_streamed_card() (normalize flag scalars, migrate_legacy_roster() rebuilds the user.* roster from the deposited access-roster and blacklist scratch keys via the retained card builders, deferred TPE guard, stamp sentinel, broadcast). kmod_settings stays the SOLE user.* writer (bootstrap only deposits scratch + scalar keys). Removed: parse_notecard_line, start_notecard_reading, the card-ownership manifest (record_card_key / apply_card_manifest_clear / finalize_card_manifest — migrate clears+rebuilds wholesale via delete_role), clear_owner_keys / clear_trustee_keys, csv_read / csv_write, the notecard dataserver branch, and the Notecard-reading globals (CardProvided, COMMENT_PREFIX, SEPARATOR, CARD_MULTI_OWNER, KEY_CARDMANIFEST). Reload Settings / Reset Config / card-edit now request a re-stream (settings.card.restream) instead of reading directly; no-card paths rebroadcast/finalize without touching the roster. Estimator: 90.6% -> 82.7%. The multiowner FEATURE is unchanged (KEY_MULTI_OWNER_MODE + is_multi_owner_mode + card_add_owner refusal all intact).
 - v1.2 rev 2: User-record roster (/etc/passwd model). The 13 role-segregated keys (the access.owner- and access.trustee- parallel CSVs, access.multiowner, the blacklist.blklist- pair) are replaced by one record per person: user.<uuid> = "<acl>,<rank>,<name>,<honorific>" (acl 5/3/-1; rank orders owners, 0 = primary, and correlates card honorifics). Role exclusivity is structural (one record per uuid; a role write overwrites). access.multiowner KEPT as an explicit notecard-only POLICY flag (commitment semantics, never derived from count): off ⇒ the parser refuses extra card owners ("there can be only one"), on ⇒ several owner records permitted; runtime writes refused; preserved by reset-config. access.isowned kept as the derived fast flag. Card syntax unchanged: roster lines build records (uuid+honorific lines order-independent via EOF application; *names lines accepted-and-ignored; place access.multiowner BEFORE the owner lines). Name policy: username at write when in-region, else placeholder + async upgrade (display name for owners/trustees, username for blacklist); handle_name_response collapses to a single record-field update. Reset-config preserves owner records dynamically. CLEAN BREAK: no legacy keys, no migration — existing collars re-seed from the notecard.
 - v1.2 rev 1: Blacklist display names parallel CSV (superseded by rev 2's records).
@@ -80,11 +81,19 @@ string KEY_PUBLIC_ACCESS = "public.mode";
 string KEY_TPE_MODE      = "tpe.mode";
 string KEY_LOCKED        = "lock.locked";
 
-// Bootstrap sentinel — set once the roster is bootstrapped. kmod_bootstrap
-// streams the card only while this is unset (so a restart can't re-arm a
-// hostile card); Reload Settings, Reset Config, a card edit, or llLinksetDataReset
-// clear it. kmod_auth gates ACL readiness on its presence.
+// Readiness sentinel — kmod_auth gates ACL readiness on its presence. Stamped
+// IMMEDIATELY on a fresh boot (state_entry) from LSD alone: the collar is
+// operable without a notecard, so readiness must NEVER wait on the card. Only
+// llLinksetDataReset (owner-change wipe / factory / reset-config) clears it.
 string KEY_SENTINEL = "settings.bootstrapped";
+
+// Card-override applied marker. The notecard is an OVERRIDE for UI-set settings,
+// not a requirement: kmod_bootstrap streams it (gated on THIS, not the readiness
+// sentinel) once per fresh boot, and process_streamed_card() sets this after
+// applying. A normal reboot (marker set) keeps UI/LSD values; Reload Settings, a
+// card edit, or a wipe clear it so the card re-applies. Decoupling this from
+// readiness is what stops a present-but-unstreamable card from bricking the UI.
+string KEY_CARD_APPLIED = "settings.cardapplied";
 
 // Placeholder used while a display name is being resolved
 string NAME_LOADING = "(loading...)";
@@ -691,7 +700,11 @@ process_streamed_card() {
         finalize_reset_config();
     }
     else {
+        // Readiness is normally already stamped (state_entry on a fresh boot);
+        // keep it idempotent here for the Reload path. Mark the card override as
+        // applied so bootstrap won't re-stream on the next normal reboot.
         llLinksetDataWrite(KEY_SENTINEL, "1");
+        llLinksetDataWrite(KEY_CARD_APPLIED, "1");
         broadcast_settings_changed();
         llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
             "type", "settings.notecard.loaded"
@@ -711,7 +724,9 @@ handle_settings_get() {
         broadcast_settings_changed();
         return;
     }
-    llLinksetDataDelete(KEY_SENTINEL);
+    // Re-arm the card override (keep readiness up so the UI doesn't drop during
+    // a reload). process_streamed_card re-applies and re-sets the marker.
+    llLinksetDataDelete(KEY_CARD_APPLIED);
     request_card_restream();
 }
 
@@ -890,8 +905,9 @@ finalize_reset_config() {
         }
     }
 
-    // Mark bootstrap complete under the current schema.
+    // Mark readiness + card override applied (reset-config re-derived from card).
     llLinksetDataWrite(KEY_SENTINEL, "1");
+    llLinksetDataWrite(KEY_CARD_APPLIED, "1");
 
     InResetConfig = FALSE;
     ResetConfigKeys = [];
@@ -916,15 +932,20 @@ default
         NotecardKey = llGetInventoryKey(NOTECARD_NAME);
 
         // kmod_settings no longer reads the notecard — kmod_bootstrap streams it
-        // and signals settings.card.streamed, which we convert. At boot:
-        //   • sentinel set → LSD is authoritative, just rebroadcast.
-        //   • sentinel unset + card present → wait; bootstrap streams it.
-        //   • sentinel unset + no card → empty bootstrap: stamp + broadcast so
-        //     ACL/consumers don't wait forever for a card that will never come.
+        // and signals settings.card.streamed, which we convert. The notecard is
+        // an OVERRIDE, never a requirement, so readiness is decided from LSD
+        // alone and NEVER waits for the card:
+        //   • sentinel set → already bootstrapped, LSD authoritative, rebroadcast.
+        //   • sentinel unset → fresh boot (install / post-wipe): stamp + broadcast
+        //     NOW so ACL/consumers come up immediately. If a card is present,
+        //     kmod_bootstrap streams it in parallel (gated on KEY_CARD_APPLIED)
+        //     and process_streamed_card() applies the override on top, then
+        //     rebroadcasts. A missing or unstreamable card simply leaves the
+        //     LSD/UI values in place — the collar still works.
         if (llLinksetDataRead(KEY_SENTINEL) != "") {
             broadcast_settings_changed();
         }
-        else if (llGetInventoryType(NOTECARD_NAME) != INVENTORY_NOTECARD) {
+        else {
             llLinksetDataWrite(KEY_SENTINEL, "1");
             broadcast_settings_changed();
         }
@@ -966,9 +987,10 @@ default
                 }
                 else {
                     // Wearer/owner swapped or edited the notecard — an explicit
-                    // re-arm. Clear the sentinel and ask bootstrap to re-stream.
+                    // re-arm of the override. Clear the card marker (NOT readiness)
+                    // and ask bootstrap to re-stream.
                     NotecardKey = current_notecard_key;
-                    llLinksetDataDelete(KEY_SENTINEL);
+                    llLinksetDataDelete(KEY_CARD_APPLIED);
                     request_card_restream();
                 }
             }

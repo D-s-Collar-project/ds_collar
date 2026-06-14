@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.2
-REVISION: 3
+REVISION: 4
 CHANGES:
+- v1.2 rev 4: Card streaming is gated on settings.cardapplied, not the readiness sentinel. The notecard is an OVERRIDE, never a requirement: kmod_settings now stamps readiness (settings.bootstrapped) immediately and independently, so gating the stream on the readiness sentinel was both wrong (a missed handshake left readiness unstamped = no UI) and circular. We stream once per fresh boot (card present + settings.cardapplied unset) and the self-heal retry re-points to the same marker — now non-fatal, since readiness no longer waits on the card. Fixes "new owner / blank-card collar gets no UI".
 - v1.2 rev 3: Self-healing card-stream handshake. The 'starting' timer re-streams the card while the sentinel is still unset and a card is present, so a missed first settings.card.streamed (kmod_settings still resetting on a fresh owner-change boot) is recovered until kmod_settings processes one and stamps the sentinel. Fixes "new owner gets no UI" — the owner-change re-bootstrap path never exercised on an already-bootstrapped collar. Bounded by the sentinel check + bootstrap timeout.
 - v1.2 rev 2: Owns the settings-notecard I/O now (relocated from kmod_settings, which collided at ~90% of the Mono budget when it parsed). At boot, if the bootstrap sentinel is unset, stream_card() reads the card line-by-line and deposits each as a raw key=value into LSD (dumb deposit: comments/blanks skipped, user.* refused, dotted keys only), then emits settings.card.streamed so kmod_settings converts it. Reload/Reset/card-edit arrive as settings.card.restream (handled in both states). We build no records and hold no parse memory — this module sits at ~46%. CROSS-MODULE CONTRACT: streamed key names + settings.card.streamed / settings.card.restream.
 - v1.2 rev 1: Owner announcement + names_ready read the user-record roster (user.<uuid> acl-5 records, rank-ordered) instead of the retired access.owner- keys; multi-owner derives from owner count.
@@ -32,9 +33,11 @@ integer ProbeRelayBothSigns;  // Also try positive relay channel
 // Roster reads come from user.<uuid> records (see owner_rows).
 string NAME_LOADING = "(loading...)";
 
-// Bootstrap sentinel (written by kmod_settings once the roster is bootstrapped).
-// We stream the card only while it is unset. CROSS-MODULE CONTRACT.
-string KEY_SENTINEL = "settings.bootstrapped";
+// Card-override applied marker (written by kmod_settings once the streamed card
+// has been converted/applied). We stream the card only while THIS is unset — NOT
+// the readiness sentinel: the notecard is an override, never a requirement, so it
+// must not gate (and can't be gated by) collar readiness. CROSS-MODULE CONTRACT.
+string KEY_CARD_APPLIED = "settings.cardapplied";
 
 /* -------------------- NOTECARD STREAMING --------------------
 
@@ -302,11 +305,14 @@ start_bootstrap() {
 
     start_rlv_probe();
 
-    // If the roster hasn't been bootstrapped yet and a settings card is
-    // present, stream it into LSD; kmod_settings converts it and stamps the
-    // sentinel. An already-bootstrapped collar (sentinel set) or a cardless one
-    // skips this — the settings.sync / retry path below drives completion.
-    if (llLinksetDataRead(KEY_SENTINEL) == "") {
+    // Stream the settings card as an OVERRIDE on a fresh boot only: a card is
+    // present AND the override hasn't been applied yet (settings.cardapplied
+    // unset — cleared by an owner-change wipe / Reload / card-edit). A normal
+    // reboot (marker set) keeps the UI/LSD values. This is gated on the card
+    // marker, NOT the readiness sentinel — readiness is kmod_settings' job and
+    // is stamped immediately, independent of whether a card ever streams.
+    if (llGetInventoryType(NOTECARD_NAME) == INVENTORY_NOTECARD
+        && llLinksetDataRead(KEY_CARD_APPLIED) == "") {
         stream_card();
     }
 
@@ -433,16 +439,15 @@ state starting
             }
         }
 
-        // Self-heal the card-stream handshake. If the roster still isn't
-        // bootstrapped (sentinel unset) and a card is present, re-stream it.
-        // settings.card.streamed is a one-shot message: on a fresh boot
-        // (e.g. owner-change wipe) kmod_settings can still be resetting when the
-        // first one fires and miss it, leaving the sentinel unstamped and ACL
-        // never-ready (no UI). Re-streaming until kmod_settings processes one and
-        // stamps the sentinel makes that path reliable; the sentinel check stops
-        // it, and the bootstrap timeout (→ state running) bounds it.
+        // Self-heal the card-override handshake. settings.card.streamed is a
+        // one-shot message: on a fresh boot (e.g. owner-change wipe) kmod_settings
+        // can still be resetting when the first one fires and miss it, leaving the
+        // override un-applied. Re-stream until kmod_settings processes one and
+        // sets settings.cardapplied. This is now NON-FATAL — readiness no longer
+        // depends on it, so the worst case is the card override lands a beat late;
+        // the marker check stops the loop and the bootstrap timeout bounds it.
         if (!Streaming
-            && llLinksetDataRead(KEY_SENTINEL) == ""
+            && llLinksetDataRead(KEY_CARD_APPLIED) == ""
             && llGetInventoryType(NOTECARD_NAME) == INVENTORY_NOTECARD) {
             stream_card();
         }
