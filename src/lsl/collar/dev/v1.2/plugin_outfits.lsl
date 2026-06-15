@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -49,6 +49,8 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              DiscoveredLocked pair catches the silent fail on first
              click and hides those items for the rest of the session.
              No shared shadow lock vector between plugins.
+CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
 integer KERNEL_LIFECYCLE = 500;
@@ -127,27 +129,28 @@ integer btn_allowed(string label) {
 string PLUGIN_CATEGORY = "Avatar";
 integer PLUGIN_ACL_MASK = 62;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, ["cat", PLUGIN_CATEGORY, "label", label, "script", llGetScriptName(), "mask", PLUGIN_ACL_MASK]);
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Per-button visibility policy. Was written straight to LSD here; now
+    // announced to the kernel, which is the SOLE writer of acl.policycontext
+    // (and reg.<ctx>) — see collar_kernel rev 6.
+    string policy = llList2Json(JSON_OBJECT, [
         "1", "Add,Wear,Remove",
         "2", "Add,Wear,Remove,Disable",
         "3", "Add,Wear,Remove,Lock,Unlock,Disable",
         "4", "Add,Wear,Remove,Lock,Unlock,Disable",
         "5", "Add,Wear,Remove,Lock,Unlock,Disable"
-    ]));
-    write_plugin_reg(PLUGIN_LABEL);
+    ]);
+
+    // Announce full registration. The kernel writes reg.<ctx> + the policy to
+    // LSD itself, draining its queue serially — no concurrent write burst.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type",    "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label",   PLUGIN_LABEL,
-        "script",  llGetScriptName()
+        "script",  llGetScriptName(),
+        "cat",     PLUGIN_CATEGORY,
+        "mask",    (string)PLUGIN_ACL_MASK,
+        "policy",  policy
     ]), NULL_KEY);
 }
 
@@ -739,8 +742,7 @@ default {
                 // Release viewer-side restrictions BEFORE reset — kmod_rlv may
                 // reset in parallel and drop its Claims without emitting @=y.
                 release_persisted_locks();
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
         }

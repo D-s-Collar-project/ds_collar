@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -27,6 +27,8 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              the failure on first click and hides them for the rest
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
+CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
@@ -149,28 +151,27 @@ list prealloc(integer n) {
 string PLUGIN_CATEGORY = "Avatar";
 integer PLUGIN_ACL_MASK = 62;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, ["cat", PLUGIN_CATEGORY, "label", label, "script", llGetScriptName(), "mask", PLUGIN_ACL_MASK]);
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    // ACL 1 (public) and every higher tier — Strip is open to all.
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Per-button visibility policy. Was written straight to LSD here; now
+    // announced to the kernel, the SOLE writer of acl.policycontext (and
+    // reg.<ctx>) — see collar_kernel rev 6. ACL 1 (public) and every higher
+    // tier — Strip is open to all.
+    string policy = llList2Json(JSON_OBJECT, [
         "1", "Strip",
         "2", "Strip",
         "3", "Strip",
         "4", "Strip",
         "5", "Strip"
-    ]));
-    write_plugin_reg(PLUGIN_LABEL);
+    ]);
+
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type",    "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label",   PLUGIN_LABEL,
-        "script",  llGetScriptName()
+        "script",  llGetScriptName(),
+        "cat",     PLUGIN_CATEGORY,
+        "mask",    (string)PLUGIN_ACL_MASK,
+        "policy",  policy
     ]), NULL_KEY);
 }
 
@@ -713,8 +714,7 @@ default {
             if (msg_type == "kernel.register.refresh") register_self();
             else if (msg_type == "kernel.ping") send_pong();
             else if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
         }

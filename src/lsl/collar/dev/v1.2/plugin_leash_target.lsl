@@ -1,8 +1,9 @@
 /*--------------------
 PLUGIN: plugin_leash_target.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 6
 CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 - v1.2 rev 1: is_blacklisted reads the user.<uuid> record (leading acl field == -1) instead of the retired blacklist.blklistuuid CSV.
 PURPOSE: Unified hidden target-picker for all targeted leash flows. Merges the
          former plugin_leash_avatar (Clip/Pass/Offer/Coffle + offer reception)

@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.2
-REVISION: 2
+REVISION: 6
 PURPOSE: Top-level UI shell — main menu, Settings (length/turn/texture),
          Get Holder, simple direct actions (Unclip/Yank/Take). Delegates
          multi-step flows (Pass/Offer/Coffle, Post) to the hidden picker.
 CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 2: Leash UI button policy reworked. Pass → ACL {1,3,5} (was {3,4,5}): added ACL 1 (public) for a captor→slaver handoff, dropped ACL 4; the CurrentUser==Leasher guard still gates it (only the actual holder sees Pass) and the recipient still gets the accept dialog. Take → ACL 5 only (was {3,5}). Self-owned/unowned wearer (ACL 4) trimmed to {Unclip, Offer, Coffle, Get Holder, Settings}: a self-owned sub can offer its own leash (Offer) and coffle, but no longer self-clips / posts / yanks / passes. Owned wearer (ACL 2) stays Offer-only.
 - v1.2 rev 1: Removed the orphaned 0.5s STATE_QUERY_DELAY (a leftover from a former blocking-llSleep pattern) that made every menu open/refresh hang half a second before even sending the state query. scheduleStateQuery now queries immediately — link messages are ordered and instant, so the reply drives the menu with no perceptible lag. Dropped STATE_QUERY_DELAY, the PendingStateQuery flag, and the now-dead timer() handler (plugin no longer uses a timer).
 ARCHITECTURE: Renderer for the leash module. Picker flows live in a single
@@ -147,44 +148,31 @@ list reorder_item_buttons(list nav_buttons, list item_buttons) {
 string PLUGIN_CATEGORY = "Standalone";
 integer PLUGIN_ACL_MASK = 62;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    // Write button visibility policy to LSD (default-deny per ACL level).
-    // ACL 1 (public) may Unclip, but the in-code guard at showMainMenu
-    // limits the button to cases where CurrentUser == Leasher — so only
-    // a public user who holds the leash themselves can release it.
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Per-button visibility policy (default-deny per ACL level). Was written
+    // straight to LSD here; now announced to the kernel, which is the SOLE
+    // writer of acl.policycontext (and reg.<ctx>) — see collar_kernel rev 6.
+    // ACL 1 (public) may Unclip, but the in-code guard at showMainMenu limits
+    // the button to cases where CurrentUser == Leasher — so only a public user
+    // who holds the leash themselves can release it.
+    string policy = llList2Json(JSON_OBJECT, [
         "1", "Clip,Unclip,Pass,Coffle,Post,Get Holder,Settings",
         "2", "Offer",
         "3", "Clip,Unclip,Pass,Yank,Coffle,Post,Get Holder,Settings",
         "4", "Unclip,Offer,Coffle,Get Holder,Settings",
         "5", "Clip,Unclip,Pass,Yank,Take,Coffle,Post,Get Holder,Settings"
-    ]));
+    ]);
 
-    // Self-declared menu presence for kmod_ui.
-    write_plugin_reg(PLUGIN_LABEL);
-
-    // Register with kernel (for ping/pong health tracking and alias table).
+    // Announce full registration. The kernel writes reg.<ctx> + the policy to
+    // LSD itself, draining its queue serially — no concurrent write burst.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]), NULL_KEY);
 
     // Declare chat alias.
@@ -707,8 +695,7 @@ default
                 if (target_context != JSON_INVALID) {
                     if (target_context != "" && target_context != PLUGIN_CONTEXT) return;
                 }
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
             return;

@@ -1,11 +1,12 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl   (v1.2 redesign)
 VERSION: 1.2
-REVISION: 2
+REVISION: 6
 PURPOSE: Self-contained leashing engine. Absorbs the former
          kmod_leash_proto holder-discovery handshake: there is no proto
          sibling and no engine<->proto IPC.
 CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 - v1.2 rev 2: findLeashpointPrim matches "leashpoint" as a SUBSTRING of the prim description (was exact ==), so an OpenCollar leashpoint (desc has config after the word) is recognized. Mirrors kmod_particles' find_leashpoint_link.
 - v1.2 rev 1: Deferred-restraint clip. A fresh gated grab/coffle now enters leashed to reuse its probe/listener/timer but HOLDS @follow + the leashed-broadcast (so plugin_leash's enhanced-TP stays off) + the success notice until a holder confirms (native plugin.leash.target OR Lockmeister particles.lm.grabbed → commitPendingLeash). No holder within PENDING_WINDOW (2s) → denyPendingLeash: "Unable to leash: No holder found to clip leash to." / "...coffle...No collar...", with nothing restrained. Post / reclip / cold-restart / take-over pass gate_on_holder=FALSE (or hit the was_leashed guard) and activate immediately as before. Added: PendingHolder / PendingNotice / PendingDeadline + claimLeash gate_on_holder param. Leashpoint prim matched by DESCRIPTION "leashpoint" (consistent with kmod_particles' find_leashpoint_link).
 ARCHITECTURE: Two LSL states.

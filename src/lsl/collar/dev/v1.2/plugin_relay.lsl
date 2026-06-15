@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -9,6 +9,8 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   kmod_rlv; this script just renders the wearer menu, persists Mode /
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
+CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
 
@@ -111,33 +113,22 @@ refresh_mode() {
 string PLUGIN_CATEGORY = "RLV";
 integer PLUGIN_ACL_MASK = 60;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    string policy = llList2Json(JSON_OBJECT, [
         "2", "Mode,Bound by...,Safeword",
         "3", "Mode,Bound by...,Unbind,HC OFF,HC ON",
         "4", "Mode,Bound by...,Safeword",
         "5", "Mode,Bound by...,Unbind,HC OFF,HC ON"
-    ]));
-
-    write_plugin_reg(PLUGIN_LABEL);
+    ]);
 
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]), NULL_KEY);
 
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
@@ -506,8 +497,6 @@ default
             else if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
                 string ctx = llJsonGetValue(msg, ["context"]);
                 if (ctx != JSON_INVALID && ctx != "" && ctx != PLUGIN_CONTEXT) return;
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
                 llResetScript();
             }
         }

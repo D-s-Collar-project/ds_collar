@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: kmod_rlv.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: RLV subsystem. Single point of @-command emission for all
   refcount-stateful RLV restrictions in the collar. Owns the third-party
   RLV relay protocol (RELAY_CHANNEL listen, auth queue, ASK dialog,
@@ -19,6 +19,8 @@ ARCHITECTURE: Spun off from plugin_relay v1.10 rev 21 to keep that
     plugin_sos (@clear emergency), plugin_folders / plugin_restrict
     (one-shot or pre-existing semantics — Phase 2 migration), and
     kmod_leash (=force / =clear only, no refcount overlap).
+CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 --------------------*/
 
 

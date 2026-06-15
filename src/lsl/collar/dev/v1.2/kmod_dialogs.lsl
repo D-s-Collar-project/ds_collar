@@ -1,9 +1,11 @@
 /*--------------------
 MODULE: kmod_dialogs.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Centralized dialog management for shared listener handling
 ARCHITECTURE: Consolidated message bus lanes
+CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 --------------------*/
 
 

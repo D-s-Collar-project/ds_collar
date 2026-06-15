@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_bell.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Bell visibility and jingling control for the collar
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
+CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare write-storm that stranded plugins on reset). register_self now ANNOUNCES cat/mask/policy in kernel.register.declare; the kernel is the sole serial writer. Removed write_plugin_reg helper + the reset-handler LSD deletes (kernel owns clearing). See collar_kernel rev 6.
 --------------------*/
 
 integer KERNEL_LIFECYCLE = 500;
@@ -134,42 +136,27 @@ show_menu(string context, string title, string body, list button_data) {
 string PLUGIN_CATEGORY = "Appearance";
 integer PLUGIN_ACL_MASK = 56;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    // Write button visibility policy to LSD.
-    // ACL 1 (Public) and ACL 2 (Owned wearer) are excluded — bell settings
-    // are owner-imposed controls and should not be changed by the public
-    // or by a wearer who is owned.
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Per-button visibility policy. Was written straight to LSD here; now
+    // announced to the kernel, which is the SOLE writer of acl.policycontext
+    // (and reg.<ctx>) — see collar_kernel rev 6. ACL 1 (Public) and ACL 2
+    // (Owned wearer) are excluded — bell settings are owner-imposed controls.
+    string policy = llList2Json(JSON_OBJECT, [
         "3", "Show,Sound,Volume +,Volume -",
         "4", "Show,Sound,Volume +,Volume -",
         "5", "Show,Sound,Volume +,Volume -"
-    ]));
+    ]);
 
-    // Self-declared menu presence for kmod_ui.
-    write_plugin_reg(PLUGIN_LABEL);
-
-    // Register with kernel (for ping/pong health tracking and alias table).
+    // Announce full registration. The kernel writes reg.<ctx> + the policy to
+    // LSD itself, draining its queue serially — no concurrent write burst.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]), NULL_KEY);
 
     // Declare chat alias.
@@ -492,8 +479,7 @@ default {
                 if (target_context != JSON_INVALID) {
                     if (target_context != "" && target_context != PLUGIN_CONTEXT) return;
                 }
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
 

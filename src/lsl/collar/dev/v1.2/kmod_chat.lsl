@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_chat.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 6
 CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 - v1.2 rev 1: speaker_authorised computes live from the user-record roster (user.<uuid> leading acl field; strangers pass only with public.mode on) — replaces the acl.<uuid>.cache + acl.timestamp freshness check, which no longer exists.
 PURPOSE: Local chat command receiver. Listens on channel 1 (always) and
          optionally channel 0 (public chat) for prefixed commands from

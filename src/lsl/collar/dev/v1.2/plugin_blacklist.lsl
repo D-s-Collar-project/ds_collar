@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.2
-REVISION: 2
+REVISION: 6
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 2: Read the user-record roster (kmod_settings rev 2): blacklist = user.<uuid> records with acl -1, enumerated name-sorted into parallel Blacklist/BlacklistNames caches on settings.sync. Names come from the record (no fallback chain needed). Mutation messages unchanged.
 - v1.2 rev 1: Show Blklst button (policy-gated, ACL 2-5); names captured at add-time ("name" field on settings.blacklist.add); sensor radius 5 → 20 m.
 --------------------*/
@@ -100,40 +101,27 @@ list blacklist_names() {
 string PLUGIN_CATEGORY = "Access";
 integer PLUGIN_ACL_MASK = 60;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    // Write button visibility policy to LSD (Owned+ can manage blacklist)
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Per-button visibility policy. Was written straight to LSD here; now
+    // announced to the kernel, which is the SOLE writer of acl.policycontext
+    // (and reg.<ctx>) — see collar_kernel rev 6. Owned+ can manage blacklist.
+    string policy = llList2Json(JSON_OBJECT, [
         "2", "+Blacklist,-Blacklist,Show Blklst",
         "3", "+Blacklist,-Blacklist,Show Blklst",
         "4", "+Blacklist,-Blacklist,Show Blklst",
         "5", "+Blacklist,-Blacklist,Show Blklst"
-    ]));
+    ]);
 
-    // Self-declared menu presence for kmod_ui.
-    write_plugin_reg(PLUGIN_LABEL);
-
-    // Register with kernel (for ping/pong health tracking and alias table).
+    // Announce full registration. The kernel writes reg.<ctx> + the policy to
+    // LSD itself, draining its queue serially — no concurrent write burst.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]), NULL_KEY);
 
     // Declare chat alias.
@@ -519,8 +507,7 @@ default {
                 if (target_context != JSON_INVALID) {
                     if (target_context != "" && target_context != PLUGIN_CONTEXT) return;
                 }
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
 

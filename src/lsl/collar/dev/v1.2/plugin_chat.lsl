@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_chat.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Configuration UI for kmod_chat — change command prefix and toggle
          public chat (channel 0) listening.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
+CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
@@ -69,37 +71,26 @@ integer btn_allowed(string label) {
 string PLUGIN_CATEGORY = "Options";
 integer PLUGIN_ACL_MASK = 48;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Per-button visibility policy. Was written straight to LSD here; now
+    // announced to the kernel, which is the SOLE writer of acl.policycontext
+    // (and reg.<ctx>) — see collar_kernel rev 6.
+    string policy = llList2Json(JSON_OBJECT, [
         "4", "Set Prefix,Set Channel,Toggle Public",
         "5", "Set Prefix,Set Channel,Toggle Public"
-    ]));
-
-    // Self-declared menu presence for kmod_ui.
-    write_plugin_reg(PLUGIN_LABEL);
+    ]);
 
     // Register with kernel (for ping/pong health tracking and alias table).
+    // The kernel writes reg.<ctx> + the policy to LSD itself, draining its
+    // queue serially — no concurrent write burst.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]), NULL_KEY);
 }
 
@@ -430,8 +421,7 @@ default
                 send_pong();
             }
             else if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
         }

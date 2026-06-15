@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 6
 CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 - v1.2 rev 1: Drop the empty state_entry (stateless renderer; other handlers satisfy the at-least-one-event rule) — clears the empty-event-body analyzer hint.
 PURPOSE: Menu rendering and visual presentation service
 ARCHITECTURE: Consolidated message bus lanes

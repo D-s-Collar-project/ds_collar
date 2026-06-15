@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_auth.lsl
 VERSION: 1.2
-REVISION: 3
+REVISION: 6
 PURPOSE: Authoritative ACL engine over the user-record roster
 CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 - v1.2 rev 3: Decoupled readiness from the settings roster-format version. state_entry and the linkset_data sentinel watch now flip ready on a NON-EMPTY sentinel (was == SCHEMA_VERSION), and the SCHEMA_VERSION constant is removed. This restores a working UI against kmod_settings rev 2 (whose sentinel is "1", not "userrec-1") — the == SCHEMA_VERSION gate left auth permanently not-ready there, so touch produced no menu. Sentinel-driven readiness + the linkset_data flip + no settings.sync dependency are all kept.
 - v1.2 rev 2: Sentinel-driven readiness; dropped the settings.sync dependency. SettingsReady is now seeded in state_entry from the schema-versioned bootstrap sentinel (settings.bootstrapped == SCHEMA_VERSION) and flipped the instant that stamp lands via linkset_data, draining queued boot-time queries then. An independent restart of this module (script deploy/edit) re-reads the durable sentinel and serves immediately instead of queueing every touch forever; an in-flight roster-format upgrade (older sentinel) reads as not-ready and queues until the new stamp. The SETTINGS_BUS settings.sync handler and the bus constant are removed. Fixes "touch yields nothing" after the rev-1 removal of kmod_ui's local ACL fast path made all touches depend on this gate. CROSS-MODULE: SCHEMA_VERSION is shared with kmod_settings.
 - v1.2 rev 1: Rebuilt on user.<uuid> records (kmod_settings rev 2). ACL for a named actor is ONE LSD read (the record's leading acl field); wearer/stranger paths read the isowned/tpe/public scalars. Deleted: the in-memory roster mirror + apply_settings_sync re-reads, enforce_role_exclusivity (structural now), the JSON list-compare change detection, the acl.<uuid>.cache layer (TTL cache, store/clear, precompute_known_acl), acl.timestamp, and the write-only acl.owners/trustees/blacklist/public/wearertpe debris keys. auth.acl.update now fires from a debounced linkset_data watch on user.* / public.mode / tpe.mode / access.isowned. Query queueing until the first settings.sync is kept (boot-order safety). Response templates and the auth.acl.query/result protocol are unchanged.

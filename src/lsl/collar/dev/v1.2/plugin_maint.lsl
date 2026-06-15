@@ -1,8 +1,9 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 6
 CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 1: Settings view enumerates owners/trustees from the user-record roster (user.<uuid>, rank-ordered, fmt_role_person_lines) instead of the retired access.owner-/trustee- keys; mode label stays on the notecard-only access.multiowner policy flag.
 PURPOSE: Maintenance and utility functions for collar management
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
@@ -75,45 +76,32 @@ integer btn_allowed(string label) {
 string PLUGIN_CATEGORY = "Options";
 integer PLUGIN_ACL_MASK = 62;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    // Write button visibility policy to LSD (default-deny per ACL level)
+    // Per-button visibility policy (default-deny per ACL level). Was written
+    // straight to LSD here; now announced to the kernel, which is the SOLE
+    // writer of acl.policycontext (and reg.<ctx>) — see collar_kernel rev 6.
     // Update Collar gated to wearer (ACL 2/4) and primary owner (ACL 5).
     // Trustees (ACL 3) deliberately excluded — updates rewrite scripts and
     // are wearer/owner business. TPE wearer becomes ACL 0 and gets nothing
     // here, so no runtime tpe.mode check is needed.
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    string policy = llList2Json(JSON_OBJECT, [
         "1", "Get HUD,User Manual",
         "2", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
         "3", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual",
         "4", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
         "5", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Update Collar"
-    ]));
+    ]);
 
-    // Self-declared menu presence for kmod_ui.
-    write_plugin_reg(PLUGIN_LABEL);
-
-    // Register with kernel (for ping/pong health tracking and alias table).
+    // Announce full registration. The kernel writes reg.<ctx> + the policy to
+    // LSD itself, draining its queue serially — no concurrent write burst.
     string msg = llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]);
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, msg, NULL_KEY);
 }
@@ -694,9 +682,8 @@ default {
                         return; // Not for us, ignore
                     }
                 }
-                // Either no context (broadcast) or matches our context
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Either no context (broadcast) or matches our context.
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
 

@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_tpe.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Manage TPE mode with wearer confirmation and owner oversight
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
+CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare reset write-storm); register now announces cat/mask/policy via kernel.register.declare and the kernel is the sole serial writer. Removed write_plugin_reg + the reset-handler reg/policy deletes (kept the plugin.<x>.state delete). Revision baseline normalized to rev 6. See collar_kernel rev 6.
 --------------------*/
 
 
@@ -97,22 +99,6 @@ integer btn_allowed(string label) {
 string PLUGIN_CATEGORY = "Access";
 integer PLUGIN_ACL_MASK = 32;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 // Tell kmod_dialogs how to render this plugin's button based on state:
 //   state == 0 → PLUGIN_LABEL_OFF
 //   state != 0 → PLUGIN_LABEL_ON
@@ -138,26 +124,28 @@ send_state_update() {
 }
 
 register_with_kernel() {
-    // Write button visibility policy to LSD (only primary owner ACL 5 gets toggle)
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Button visibility policy (only primary owner ACL 5 gets toggle).
+    // Announced to the kernel — sole writer of acl.policycontext/reg.<ctx>
+    // (collar_kernel rev 6) — instead of being written here (the reset storm).
+    string policy = llList2Json(JSON_OBJECT, [
         "5", "toggle"
-    ]));
+    ]);
 
-    // Self-declared menu presence for kmod_ui. The label here is the
-    // kmod_dialogs fallback used before buttonconfig lands — stable
-    // default, never rewritten on toggle.
-    write_plugin_reg(PLUGIN_LABEL_OFF);
-
-    // State-based label resolution.
+    // State-based label resolution (separate buttonconfig path — unchanged).
     register_button_config();
     send_state_update();
 
-    // Register with kernel (for ping/pong health tracking and alias table).
+    // Announce full registration. The kernel writes reg.<ctx> + policy serially.
+    // The declared label is the kmod_dialogs cold-start fallback — a stable
+    // default, never rewritten on toggle (live label rides buttonconfig).
     string msg = llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL_OFF,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]);
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, msg, NULL_KEY);
 }
@@ -383,9 +371,8 @@ default
                     }
                 }
                 // Either no context (broadcast) or matches our context
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llLinksetDataDelete("plugin.tpe.state");
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
                 llResetScript();
             }
         }

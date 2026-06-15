@@ -1,9 +1,11 @@
 /*--------------------
 MODULE: kmod_remote.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: External HUD communication bridge for remote control workflows
 ARCHITECTURE: Consolidated message bus lanes, namespaced internal message protocol
+CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 --------------------*/
 
 

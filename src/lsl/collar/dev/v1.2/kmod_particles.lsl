@@ -1,10 +1,10 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.2
-REVISION: 3
+REVISION: 6
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 CHANGES:
-- v1.2 rev 3: OC/LM holder discovery fixed. handle_lm_enable now fires the Lockmeister query IMMEDIATELY (it only opened the listen before — never asked, so a passive/self-keyed OpenCollar holder stayed silent and the engine's 2s deferred-restraint window denied it; the in-world trace showed zero -8888 outbound). New send_lm_query() also queries the HOLDER's key ("<holder>handle"/"collar"), not just the wearer's — an OC leash holder's `handle` listen is an exact match on its OWN owner key, so a wearer-keyed query never reached it. lm_ping routes through the same helper so the keep-alive re-queries the holder (whose own announce timer stops after a couple pulses).
+- v1.2 rev 6: OC/LM holder discovery fixed. handle_lm_enable now fires the Lockmeister query IMMEDIATELY (it only opened the listen before — never asked, so a passive/self-keyed OpenCollar holder stayed silent and the engine's 2s deferred-restraint window denied it; the in-world trace showed zero -8888 outbound). New send_lm_query() also queries the HOLDER's key ("<holder>handle"/"collar"), not just the wearer's — an OC leash holder's `handle` listen is an exact match on its OWN owner key, so a wearer-keyed query never reached it. lm_ping routes through the same helper so the keep-alive re-queries the holder (whose own announce timer stops after a couple pulses).
 - v1.2 rev 2: find_leashpoint_link matches "leashpoint" as a SUBSTRING of the prim description (was exact ==), so an OpenCollar leashpoint — whose desc carries a slew of config after the word "leashpoint" — is recognized. Engine's findLeashpointPrim updated to match.
 - v1.2 rev 1: find_leashpoint_link now identifies the leashpoint prim by its DESCRIPTION == "leashpoint" (was name AND desc, which made a desc-only/name-only leashpoint fall through to LINK_ROOT — the beam emitted from the collar root instead of the ring). Matches the engine's findLeashpointPrim convention so both scripts emit from / dock at the same prim.
 ARCHITECTURE: Consolidated message bus lanes

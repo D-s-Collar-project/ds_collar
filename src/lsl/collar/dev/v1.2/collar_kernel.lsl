@@ -1,9 +1,11 @@
 /*--------------------
 MODULE: collar_kernel.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Plugin registry, lifecycle management, heartbeat monitoring
 ARCHITECTURE: Consolidated message bus lanes
+CHANGES:
+- v1.2 rev 6: kernel is again the SOLE serial writer of reg.<ctx> + acl.policycontext:<ctx>. Self-declare (each plugin writing both LSD keys in register_self) caused a ~36-way concurrent write burst on every reset.factory; LSD has no transaction/retry so contended writes silently dropped and ~12 of 18 plugins ended up with no reg row (in-world: reg collapsed to 6). Fix: plugins now ANNOUNCE cat/mask/policy in kernel.register.declare; process_queue drains the queue serially and writes both keys one at a time (idempotent read-before-write), so no burst is possible. Queue stride 5->8 (+cat/mask/policy). UNREG now deletes both LSD keys too (kernel owns clearing in every path). Readers unchanged.
 --------------------*/
 
 
@@ -24,12 +26,16 @@ integer REG_SCRIPT = 2;
 integer REG_SCRIPT_UUID = 3;
 integer REG_LAST_SEEN = 4;
 
-/* Plugin operation queue stride: [op_type, context, label, script, timestamp] */
-integer QUEUE_STRIDE = 5;
+/* Plugin operation queue stride:
+   [op_type, context, label, script, cat, mask, policy, timestamp] */
+integer QUEUE_STRIDE = 8;
 integer QUEUE_OP_TYPE = 0;    // "REG" or "UNREG"
 integer QUEUE_CONTEXT = 1;
 integer QUEUE_LABEL = 2;
 integer QUEUE_SCRIPT = 3;
+integer QUEUE_CAT = 4;        // PLUGIN_CATEGORY (for reg.<ctx>)
+integer QUEUE_MASK = 5;       // PLUGIN_ACL_MASK as string (for reg.<ctx>)
+integer QUEUE_POLICY = 6;     // per-button policy JSON (for acl.policycontext:<ctx>)
 
 
 /* -------------------- STATE -------------------- */
@@ -74,7 +80,7 @@ integer count_scripts() {
 // - Deduplicating at insertion prevents duplicate operations in batch
 // - Guarantees queue contains at most one operation per context
 // - Alternative (defer to batch) would process duplicates and cause multiple broadcasts
-integer queue_add(string op_type, string context, string label, string script) {
+integer queue_add(string op_type, string context, string label, string script, string cat, string mask, string policy) {
     // Locate any existing queue entry for this context (newest wins) and
     // delete its stride in place, then append. The old implementation
     // rebuilt new_queue via `+=` inside the scan loop — O(N²) heap churn
@@ -99,7 +105,7 @@ integer queue_add(string op_type, string context, string label, string script) {
             found_at, found_at + QUEUE_STRIDE - 1);
     }
 
-    RegistrationQueue += [op_type, context, label, script, now()];
+    RegistrationQueue += [op_type, context, label, script, cat, mask, policy, now()];
 
 
     // Schedule batch processing if not already scheduled
@@ -140,10 +146,35 @@ integer process_queue() {
             // Returns TRUE if new plugin OR if existing plugin data changed
             integer reg_delta = registry_upsert(context, label, script);
             if (reg_delta) changes_made = TRUE;
+
+            // SOLE WRITER: the kernel writes both LSD keys here, serially.
+            // This is the whole point of the hybrid — one writer draining the
+            // queue one entry at a time means the reg.<ctx>/policy writes can
+            // never collide the way 18 plugins writing at once did. Idempotent
+            // read-before-write so an unchanged re-declare doesn't churn
+            // kmod_ui's debounced rebuild.
+            string cat = llList2String(RegistrationQueue, i + QUEUE_CAT);
+            string mask = llList2String(RegistrationQueue, i + QUEUE_MASK);
+            string policy = llList2String(RegistrationQueue, i + QUEUE_POLICY);
+            string reg_key = "reg." + context;
+            string reg_val = llList2Json(JSON_OBJECT,
+                ["cat", cat, "label", label, "script", script, "mask", mask]);
+            if (llLinksetDataRead(reg_key) != reg_val) {
+                llLinksetDataWrite(reg_key, reg_val);
+            }
+            // Empty policy => no gate; an empty write deletes the key, which is
+            // exactly "absent == no policy". Guard so we don't churn either way.
+            string pol_key = "acl.policycontext:" + context;
+            if (llLinksetDataRead(pol_key) != policy) {
+                llLinksetDataWrite(pol_key, policy);
+            }
         }
         else if (op_type == "UNREG") {
             integer was_removed = registry_remove(context);
             if (was_removed) changes_made = TRUE;
+            // Kernel owns clearing in every path (matches prune_missing_scripts).
+            llLinksetDataDelete("reg." + context);
+            llLinksetDataDelete("acl.policycontext:" + context);
         }
 
         i += QUEUE_STRIDE;
@@ -436,7 +467,17 @@ handle_register(string msg) {
     string script = llJsonGetValue(msg, ["script"]);
     if (script == JSON_INVALID) return;
 
-    queue_add("REG", context, label, script);
+    // Enriched declare carries cat/mask/policy so the kernel can write the
+    // LSD rows itself. Tolerate their absence (default empty) so a stale
+    // plugin can't wedge the queue.
+    string cat = llJsonGetValue(msg, ["cat"]);
+    if (cat == JSON_INVALID) cat = "";
+    string mask = llJsonGetValue(msg, ["mask"]);
+    if (mask == JSON_INVALID) mask = "0";
+    string policy = llJsonGetValue(msg, ["policy"]);
+    if (policy == JSON_INVALID) policy = "";
+
+    queue_add("REG", context, label, script, cat, mask, policy);
 }
 
 handle_pong(string msg) {

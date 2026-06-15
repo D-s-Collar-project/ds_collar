@@ -1,9 +1,9 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.2
-REVISION: 2
+REVISION: 6
 CHANGES:
-- v1.2 rev 2: Touch-guard. touch_start ignores touches while boot.ready is unset (kmod_bootstrap clears it at boot start, sets "1" at startup complete). A touch mid-boot fires the menu render + view rebuild, piling concurrent LSD writes onto the plugin self-declare window — under load that drops registrations and strands plugins from the menu. CROSS-MODULE CONTRACT: boot.ready, written by kmod_bootstrap.
+- v1.2 rev 6: Touch-guard. touch_start ignores touches while boot.ready is unset (kmod_bootstrap clears it at boot start, sets "1" at startup complete). A touch mid-boot fires the menu render + view rebuild, piling concurrent LSD writes onto the plugin self-declare window — under load that drops registrations and strands plugins from the menu. CROSS-MODULE CONTRACT: boot.ready, written by kmod_bootstrap.
 - v1.2 rev 1: User-record roster (kmod_settings rev 2): dropped the local acl.<uuid>.cache fast path + acl.timestamp staleness check entirely — every session start now round-trips auth.acl.query (one link-message hop, no staleness window, single ACL implementation in kmod_auth).
 PURPOSE: Session management, categorized per-ACL menu views (LSD-resident),
          and plugin dispatch orchestration

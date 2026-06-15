@@ -1,11 +1,13 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 6
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy filtering (animation buttons are dynamic content).
+CHANGES:
+- v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
 
@@ -111,41 +113,29 @@ stop_all_animations() {
 string PLUGIN_CATEGORY = "Standalone";
 integer PLUGIN_ACL_MASK = 62;
 
-write_plugin_reg(string label) {
-    string k = "reg." + PLUGIN_CONTEXT;
-    string v = llList2Json(JSON_OBJECT, [
-        "cat",    PLUGIN_CATEGORY,
-        "label",  label,
-        "script", llGetScriptName(),
-        "mask",   PLUGIN_ACL_MASK
-    ]);
-    // Skip the write (and its linkset_data event) when the stored value
-    // is already what we would write. Idempotent re-registrations on
-    // state_entry or kernel.register.refresh then no longer trigger
-    // kmod_ui's debounced rebuild + session invalidation.
-    if (llLinksetDataRead(k) == v) return;
-    llLinksetDataWrite(k, v);
-}
-
 register_self() {
-    // Write button visibility policy to LSD (all ACL levels see same buttons)
-    llLinksetDataWrite("acl.policycontext:" + PLUGIN_CONTEXT, llList2Json(JSON_OBJECT, [
+    // Per-button visibility policy (all ACL levels see same buttons). Was
+    // written straight to LSD here; now announced to the kernel, which is the
+    // SOLE writer of acl.policycontext (and reg.<ctx>) — see collar_kernel rev 6.
+    string policy = llList2Json(JSON_OBJECT, [
         "1", "<<,>>,Stop",
         "2", "<<,>>,Stop",
         "3", "<<,>>,Stop",
         "4", "<<,>>,Stop",
         "5", "<<,>>,Stop"
-    ]));
-
-    // Self-declared menu presence for kmod_ui.
-    write_plugin_reg(PLUGIN_LABEL);
+    ]);
 
     // Register with kernel (for ping/pong health tracking and alias table).
+    // The kernel writes reg.<ctx> + the policy to LSD itself, draining its
+    // queue serially — no concurrent write burst.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type", "kernel.register.declare",
         "context", PLUGIN_CONTEXT,
         "label", PLUGIN_LABEL,
-        "script", llGetScriptName()
+        "script", llGetScriptName(),
+        "cat", PLUGIN_CATEGORY,
+        "mask", (string)PLUGIN_ACL_MASK,
+        "policy", policy
     ]), NULL_KEY);
 
     // Declare chat subcommand roots. Consumed by kmod_chat only; invisible
@@ -462,8 +452,7 @@ default {
                 if (target_context != JSON_INVALID) {
                     if (target_context != "" && target_context != PLUGIN_CONTEXT) return;
                 }
-                llLinksetDataDelete("reg." + PLUGIN_CONTEXT);
-                llLinksetDataDelete("acl.policycontext:" + PLUGIN_CONTEXT);
+                // Kernel owns clearing reg.<ctx>/acl.policycontext now (rev 6).
                 llResetScript();
             }
 
