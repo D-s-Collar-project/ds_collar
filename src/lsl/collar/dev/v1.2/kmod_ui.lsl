@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.2
-REVISION: 1
+REVISION: 2
 CHANGES:
+- v1.2 rev 2: Touch-guard. touch_start ignores touches while boot.ready is unset (kmod_bootstrap clears it at boot start, sets "1" at startup complete). A touch mid-boot fires the menu render + view rebuild, piling concurrent LSD writes onto the plugin self-declare window — under load that drops registrations and strands plugins from the menu. CROSS-MODULE CONTRACT: boot.ready, written by kmod_bootstrap.
 - v1.2 rev 1: User-record roster (kmod_settings rev 2): dropped the local acl.<uuid>.cache fast path + acl.timestamp staleness check entirely — every session start now round-trips auth.acl.query (one link-message hop, no staleness window, single ACL implementation in kmod_auth).
 PURPOSE: Session management, categorized per-ACL menu views (LSD-resident),
          and plugin dispatch orchestration
@@ -37,6 +38,11 @@ string SOS_PREFIX = "ui.sos.";  // Prefix for SOS plugin contexts
 integer MAX_FUNC_BTNS = 9;
 float TOUCH_RANGE_M = 5.0;
 float LONG_TOUCH_THRESHOLD = 1.5;
+
+// Touch-guard: kmod_bootstrap clears this at boot start and sets it "1" at
+// "startup complete". We ignore touches while it is unset so a touch mid-boot
+// can't pile a menu render onto the plugin-registration window. CROSS-MODULE.
+string KEY_BOOT_READY = "boot.ready";
 
 integer MAX_SESSIONS = 5;
 integer SESSION_MAX_AGE = 60;  // Seconds before ACL refresh required
@@ -894,6 +900,8 @@ default
                 TouchStartTimes = llDeleteSubList(TouchStartTimes, idx, idx);
 
                 if (duration >= LONG_TOUCH_THRESHOLD && toucher == wearer) {
+                    // SOS (emergency eject) is exempt from the touch-guard — it
+                    // must work even mid-boot.
                     start_session(toucher, SOS_CONTEXT);
                 }
                 else {
@@ -901,7 +909,15 @@ default
                     if (duration >= LONG_TOUCH_THRESHOLD && toucher != wearer) {
                         send_message(toucher, "Long-touch SOS is only available to the wearer.");
                     }
-                    start_session(toucher, ROOT_CONTEXT);
+                    // Touch-guard: swallow the normal menu while the collar is
+                    // still booting, so the render + view rebuild don't contend
+                    // with the plugin-registration burst.
+                    if (llLinksetDataRead(KEY_BOOT_READY) != "1") {
+                        send_message(toucher, "Collar is still starting up — one moment.");
+                    }
+                    else {
+                        start_session(toucher, ROOT_CONTEXT);
+                    }
                 }
             }
 

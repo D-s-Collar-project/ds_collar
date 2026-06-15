@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.2
-REVISION: 4
+REVISION: 5
 CHANGES:
+- v1.2 rev 5: Touch-guard. Clears boot.ready at boot start and sets it "1" at "Collar startup complete", so kmod_ui ignores touches until startup finishes. Automates the manual "don't touch until startup done" workaround — a touch mid-boot fires kmod_ui's menu render + view rebuild, piling concurrent LSD writes/bus traffic onto the plugin-registration window (which under load drops registrations and strands plugins from the menu). CROSS-MODULE CONTRACT: boot.ready, read by kmod_ui. Also tightened the RLV probe: 3 retries (was 10), first at +2s (was +5s), 30s deadline (was 60s) — caps the no-RLV touch-guard wait at 30s.
 - v1.2 rev 4: Card streaming is gated on settings.cardapplied, not the readiness sentinel. The notecard is an OVERRIDE, never a requirement: kmod_settings now stamps readiness (settings.bootstrapped) immediately and independently, so gating the stream on the readiness sentinel was both wrong (a missed handshake left readiness unstamped = no UI) and circular. We stream once per fresh boot (card present + settings.cardapplied unset) and the self-heal retry re-points to the same marker — now non-fatal, since readiness no longer waits on the card. Fixes "new owner / blank-card collar gets no UI".
 - v1.2 rev 3: Self-healing card-stream handshake. The 'starting' timer re-streams the card while the sentinel is still unset and a card is present, so a missed first settings.card.streamed (kmod_settings still resetting on a fresh owner-change boot) is recovered until kmod_settings processes one and stamps the sentinel. Fixes "new owner gets no UI" — the owner-change re-bootstrap path never exercised on an already-bootstrapped collar. Bounded by the sentinel check + bootstrap timeout.
 - v1.2 rev 2: Owns the settings-notecard I/O now (relocated from kmod_settings, which collided at ~90% of the Mono budget when it parsed). At boot, if the bootstrap sentinel is unset, stream_card() reads the card line-by-line and deposits each as a raw key=value into LSD (dumb deposit: comments/blanks skipped, user.* refused, dotted keys only), then emits settings.card.streamed so kmod_settings converts it. Reload/Reset/card-edit arrive as settings.card.restream (handled in both states). We build no records and hold no parse memory — this module sits at ~46%. CROSS-MODULE CONTRACT: streamed key names + settings.card.streamed / settings.card.restream.
@@ -18,10 +19,14 @@ integer REMOTE_BUS       = 600;
 integer SETTINGS_BUS     = 800;
 
 /* -------------------- RLV DETECTION CONFIG -------------------- */
-integer RLV_PROBE_TIMEOUT_SEC = 60;
+// 3 probes, first at +2s (then +7s, +12s), give up at the 30s deadline. An RLV
+// viewer answers the first probe in ~1s; a no-RLV viewer resolves at 30s (which
+// is also the worst-case touch-guard wait, since boot.ready lifts at startup
+// complete).
+integer RLV_PROBE_TIMEOUT_SEC = 30;
 integer RLV_RETRY_INTERVAL_SEC = 5;
-integer RLV_MAX_RETRIES = 10;
-integer RLV_INITIAL_DELAY_SEC = 5;
+integer RLV_MAX_RETRIES = 3;
+integer RLV_INITIAL_DELAY_SEC = 2;
 
 // Probe multiple channels for better compatibility
 integer UseFixed4711;
@@ -38,6 +43,12 @@ string NAME_LOADING = "(loading...)";
 // the readiness sentinel: the notecard is an override, never a requirement, so it
 // must not gate (and can't be gated by) collar readiness. CROSS-MODULE CONTRACT.
 string KEY_CARD_APPLIED = "settings.cardapplied";
+
+// Touch-guard flag. Cleared at the start of every boot and set "1" once startup
+// finishes (announce_status). kmod_ui ignores touches while it is unset, so a
+// touch mid-boot can't pile a menu render onto the plugin-registration window.
+// CROSS-MODULE CONTRACT with kmod_ui.
+string KEY_BOOT_READY = "boot.ready";
 
 /* -------------------- NOTECARD STREAMING --------------------
 
@@ -299,6 +310,9 @@ start_bootstrap() {
     SettingsRetryCount = 0;
     NamesReadyDeadline = 0;
 
+    // Arm the touch-guard: ignore collar touches until startup finishes.
+    llLinksetDataDelete(KEY_BOOT_READY);
+
     BootstrapDeadline = now() + BOOTSTRAP_TIMEOUT_SEC;
 
     sendIM("D/s Collar starting up. Please wait...");
@@ -379,6 +393,10 @@ announce_status() {
     }
 
     sendIM("Collar startup complete.");
+
+    // Lift the touch-guard — registrations have long since settled by the time
+    // RLV detection + name resolution complete, so the menu is safe to open.
+    llLinksetDataWrite(KEY_BOOT_READY, "1");
 }
 
 /* -------------------- EVENTS -------------------- */

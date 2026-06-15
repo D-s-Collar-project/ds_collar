@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.2
-REVISION: 2
+REVISION: 3
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 CHANGES:
+- v1.2 rev 3: OC/LM holder discovery fixed. handle_lm_enable now fires the Lockmeister query IMMEDIATELY (it only opened the listen before — never asked, so a passive/self-keyed OpenCollar holder stayed silent and the engine's 2s deferred-restraint window denied it; the in-world trace showed zero -8888 outbound). New send_lm_query() also queries the HOLDER's key ("<holder>handle"/"collar"), not just the wearer's — an OC leash holder's `handle` listen is an exact match on its OWN owner key, so a wearer-keyed query never reached it. lm_ping routes through the same helper so the keep-alive re-queries the holder (whose own announce timer stops after a couple pulses).
 - v1.2 rev 2: find_leashpoint_link matches "leashpoint" as a SUBSTRING of the prim description (was exact ==), so an OpenCollar leashpoint — whose desc carries a slew of config after the word "leashpoint" — is recognized. Engine's findLeashpointPrim updated to match.
 - v1.2 rev 1: find_leashpoint_link now identifies the leashpoint prim by its DESCRIPTION == "leashpoint" (was name AND desc, which made a desc-only/name-only leashpoint fall through to LINK_ROOT — the beam emitted from the collar root instead of the ring). Matches the engine's findLeashpointPrim convention so both scripts emit from / dock at the same prim.
 ARCHITECTURE: Consolidated message bus lanes
@@ -93,20 +94,33 @@ close_lm_listen() {
     }
 }
 
+// Send the Lockmeister point query to the controller. Two key conventions:
+//   • WEARER-keyed (standard Lockmeister: the leashed avatar's own points).
+//   • HOLDER-keyed: an OpenCollar leash holder advertises/answers about its OWN
+//     owner (its `handle` listen is an exact match on "<holder>handle"), so a
+//     query keyed to the wearer never reaches it. Querying the holder's key is
+//     what makes a self-keyed OC handle respond "<holder>handle ok".
+send_lm_query() {
+    if (LmController == NULL_KEY) return;
+    if (llGetAgentSize(LmController) == ZERO_VECTOR) return;
+    string wearer = (string)llGetOwner();
+    string holder = (string)LmController;
+    llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "collar");
+    llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "handle");
+    llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "|LMV2|RequestPoint|handle");
+    llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "|LMV2|RequestPoint|collar");
+    llRegionSayTo(LmController, LEASH_CHAN_LM, holder + "collar");
+    llRegionSayTo(LmController, LEASH_CHAN_LM, holder + "handle");
+}
+
 lm_ping() {
     if (!LmActive || LmController == NULL_KEY) return;
-    
+
     integer t = llGetUnixTime();
     if ((t - LmLastPing) < LM_PING_INTERVAL) return;
     LmLastPing = t;
-    
-    if (llGetAgentSize(LmController) != ZERO_VECTOR) {
-        string wearer = (string)llGetOwner();
-        llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "collar");
-        llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "handle");
-        llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "|LMV2|RequestPoint|handle");
-        llRegionSayTo(LmController, LEASH_CHAN_LM, wearer + "|LMV2|RequestPoint|collar");
-    }
+
+    send_lm_query();
 }
 
 handle_lm_message(key id, string msg) {
@@ -394,7 +408,13 @@ handle_lm_enable(string msg) {
     LmController = (key)llJsonGetValue(msg, ["controller"]);
     LmAuthorized = TRUE;  // Mark as authorized
     open_lm_listen();
-    
+
+    // Fire the discovery query NOW (this was missing — the listen opened but we
+    // never asked, so a passive/self-keyed OC holder stayed silent and the
+    // deferred-restraint window denied it). One region-wide query reaches the
+    // holder immediately; a present one answers well inside the deny window.
+    send_lm_query();
+
     // Start pinging
     LmLastPing = now();
     llSetTimerEvent(PARTICLE_UPDATE_RATE);
