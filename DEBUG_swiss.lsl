@@ -211,6 +211,18 @@ sweep(float gap) {
         + (string)reg_count() + " (give kmod_ui a sec, then /9090 reg)");
 }
 
+// Like sweep, but FIRST does a full llLinksetDataReset() — the real reset path
+// (Escape/owner-change) wipes LSD then re-registers, so this reproduces it: from
+// reg=0, does a staggered bring-up climb back to ~18? Destructive: nukes the
+// sentinel/roster/settings too, so the collar needs a re-wear afterward (the
+// kmods aren't reset here — only the plugins).
+wipesweep(float gap) {
+    out("=== WIPESWEEP: full llLinksetDataReset(), then staggered plugin reset ===");
+    out("(nukes sentinel/roster/settings/reg — re-wear the collar afterward)");
+    llLinksetDataReset();
+    sweep(gap);
+}
+
 /* -------------------- INJECTOR -------------------- */
 
 inject(string what) {
@@ -259,6 +271,8 @@ run_command(string cmd) {
     else if (cmd == "regwatch")  regwatch();
     else if (cmd == "sweep")     sweep(0.4);
     else if (llSubStringIndex(cmd, "sweep ") == 0) sweep((float)llGetSubString(cmd, 6, -1));
+    else if (cmd == "wipesweep") wipesweep(0.4);
+    else if (llSubStringIndex(cmd, "wipesweep ") == 0) wipesweep((float)llGetSubString(cmd, 10, -1));
     else if (cmd == "lsd") {
         out("LSD keys = " + (string)llLinksetDataCountKeys()
             + "   free bytes = " + (string)llLinksetDataAvailable()
