@@ -1,0 +1,208 @@
+/*--------------------
+MODULE: kmod_menu.lsl
+VERSION: 1.2
+REVISION: 6
+CHANGES:
+- v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
+- v1.2 rev 1: Drop the empty state_entry (stateless renderer; other handlers satisfy the at-least-one-event rule) — clears the empty-event-body analyzer hint.
+PURPOSE: Menu rendering and visual presentation service
+ARCHITECTURE: Consolidated message bus lanes
+--------------------*/
+
+
+/* -------------------- CONSOLIDATED ISP -------------------- */
+integer KERNEL_LIFECYCLE = 500;
+integer UI_BUS = 900;
+integer DIALOG_BUS = 950;
+
+/* -------------------- CONTEXT CONSTANTS -------------------- */
+// Must match ROOT_CONTEXT / SOS_CONTEXT in kmod_ui.lsl, control_hud.lsl, kmod_remote.lsl
+string ROOT_CONTEXT = "ui.core.root";
+string SOS_CONTEXT  = "ui.sos.root";
+
+/* -------------------- HELPERS -------------------- */
+
+string get_msg_type(string msg) {
+    string t = llJsonGetValue(msg, ["type"]);
+    if (t == JSON_INVALID) return "";
+    return t;
+}
+
+integer validate_required_fields(string json_str, list field_names) {
+    integer i = 0;
+    integer len = llGetListLength(field_names);
+    while (i < len) {
+        string field = llList2String(field_names, i);
+        if (llJsonGetValue(json_str, [field]) == JSON_INVALID) {
+            return FALSE;
+        }
+        i += 1;
+    }
+    return TRUE;
+}
+
+/* -------------------- BUTTON LAYOUT -------------------- */
+
+list reverse_complete_rows(list button_list, integer row_size) {
+    list reordered = [];
+    integer count = llGetListLength(button_list);
+    if (count == 0) return [];
+
+    integer num_rows = count / row_size;
+    integer row = num_rows - 1;
+    while (row >= 0) {
+        integer row_start = row * row_size;
+        // OPTIMIZATION: Bulk copy row instead of iterating
+        reordered += llList2List(button_list, row_start, row_start + row_size - 1);
+        row = row - 1;
+    }
+    return reordered;
+}
+
+list reorder_buttons_for_display(list buttons) {
+
+    integer count = llGetListLength(buttons);
+    if (count == 0) return [];
+
+    integer row_size = 3;
+    integer partial_count = count % row_size;
+
+    if (partial_count == 0) {
+        return reverse_complete_rows(buttons, row_size);
+    }
+    else {
+        list partial_row = llList2List(buttons, 0, partial_count - 1);
+        list complete_buttons = llList2List(buttons, partial_count, -1);
+        list reordered_complete = reverse_complete_rows(complete_buttons, row_size);
+        return reordered_complete + partial_row;
+    }
+}
+
+/* -------------------- RENDERING -------------------- */
+
+render_menu(string msg) {
+    if (!validate_required_fields(msg, ["user", "session_id", "menu_type", "buttons"])) {
+        return;
+    }
+
+    key user = (key)llJsonGetValue(msg, ["user"]);
+
+    string session_id = llJsonGetValue(msg, ["session_id"]);
+    string menu_type = llJsonGetValue(msg, ["menu_type"]);
+    integer current_page = (integer)llJsonGetValue(msg, ["page"]);
+    integer total_pages = (integer)llJsonGetValue(msg, ["total_pages"]);
+    string buttons_json = llJsonGetValue(msg, ["buttons"]);
+    integer has_nav = (integer)llJsonGetValue(msg, ["has_nav"]);
+
+    // Category tier (kmod_ui sets "category" when rendering inside one):
+    // nav swaps Close for Back (returns to the root tier) and the title is
+    // the category name.
+    string category = "";
+    string cat_tmp = llJsonGetValue(msg, ["category"]);
+    if (cat_tmp != JSON_INVALID) category = cat_tmp;
+
+    list button_data_list = llJson2List(buttons_json);
+    list reordered = reorder_buttons_for_display(button_data_list);
+
+    // Nav row sits at slots 0-2 (bottom row) per the dialog convention.
+    string nav_exit = "Close";
+    if (category != "") nav_exit = "Back";
+
+    list final_button_data = [];
+    if (has_nav) {
+        final_button_data = ["<<", ">>", nav_exit] + reordered;
+    }
+    else {
+        final_button_data = [nav_exit] + reordered;
+    }
+
+    string title = "";
+    if (category != "") {
+        title = category;
+    }
+    else if (menu_type == ROOT_CONTEXT) {
+        title = "Main Menu";
+    }
+    else if (menu_type == SOS_CONTEXT) {
+        title = "Emergency Menu";
+    }
+    else {
+        title = "Menu";
+    }
+
+    if (total_pages > 1) {
+        title = title + " (" + (string)(current_page + 1) + "/" + (string)total_pages + ")";
+    }
+
+    // Plugins may supply their own status body (e.g. bell's volume/visibility
+    // readout); fall back to the generic prompt keyed by menu_type.
+    string body_text = llJsonGetValue(msg, ["body"]);
+    if (body_text == JSON_INVALID) {
+        if (menu_type == SOS_CONTEXT) {
+            body_text = "Emergency options:";
+        }
+        else {
+            body_text = "Select an option:";
+        }
+    }
+
+    string final_button_data_json = llList2Json(JSON_ARRAY, final_button_data);
+
+    string dialog_msg = llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "session_id", session_id,
+        "user", (string)user,
+        "title", title,
+        "body", body_text,
+        "button_data", final_button_data_json,
+        "timeout", 60
+    ]);
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, dialog_msg, NULL_KEY);
+}
+
+show_message(string msg) {
+    if (!validate_required_fields(msg, ["user", "message"])) {
+        return;
+    }
+
+    key user = (key)llJsonGetValue(msg, ["user"]);
+    string message_text = llJsonGetValue(msg, ["message"]);
+
+    llRegionSayTo(user, 0, message_text);
+}
+
+/* -------------------- EVENTS -------------------- */
+
+// Stateless renderer — no init needed, so no state_entry; the state's
+// other handlers satisfy LSL's at-least-one-event requirement.
+default
+{
+    link_message(integer sender_num, integer num, string msg, key id) {
+        string msg_type = get_msg_type(msg);
+        if (msg_type == "") return;
+
+        if (num == KERNEL_LIFECYCLE) {
+            // Owner-change wipe / external soft reset from collar_kernel.
+            if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
+                llResetScript();
+            }
+            return;
+        }
+
+        if (num == UI_BUS) {
+            if (msg_type == "ui.menu.render") {
+                render_menu(msg);
+            }
+            else if (msg_type == "ui.message.show") {
+                show_message(msg);
+            }
+        }
+    }
+
+    changed(integer change) {
+        if (change & CHANGED_OWNER) {
+            llResetScript();
+        }
+    }
+}
