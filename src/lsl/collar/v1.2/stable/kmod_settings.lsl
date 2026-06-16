@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Validation guards, roster conversion, and LSD settings store
 CHANGES:
+- v1.2 rev 7: Reset Config no longer has its own card parser. The bespoke path (snapshot owner+lock → llLinksetDataReset → request card re-stream → finalize_reset_config) was redundant with kmod_bootstrap (which owns card I/O) AND bricked: readiness was stamped only in finalize, which fired only after the card re-stream handshake completed — a stalled stream (e.g. bootstrap's `Streaming` in-flight guard stuck) left the sentinel unset = pre-boot brick. Now handle_reset_config just WIPES config (deletes every LSD key except user.* roster + access.isowned/multiowner + lock.locked + safeguard.last_owner) and broadcasts kernel.reset.factory — the standard boot rebuilds everything: plugins re-seed their OWN defaults (the config source; the card is NOT — see feedback_card_not_config_source), kmod_settings re-stamps readiness, kmod_bootstrap re-applies the card OVERRIDE if present / ignores if absent (the wipe cleared settings.cardapplied). Removed finalize_reset_config + the InResetConfig/ResetConfigKeys/ResetConfigValues state. Reload/card-edit paths unchanged.
 - v1.2 rev 6: The notecard is an OVERRIDE, never a requirement — decouple readiness from the card so a present-but-unstreamable card can't brick the UI. Two markers now: settings.bootstrapped (readiness; kmod_auth's gate) is stamped IMMEDIATELY in state_entry on any fresh boot (the old "card present → wait for settings.card.streamed" branch is gone — that branch left the sentinel unstamped forever on owner-change boots whose card handshake didn't land, so auth never went ready = no UI). New settings.cardapplied marker gates the card override: process_streamed_card + finalize_reset_config set it; Reload Settings / card-edit clear it (NOT the readiness sentinel, so the UI stays up through a reload); a wipe clears both so the card re-applies for a new owner. kmod_bootstrap now streams the card gated on settings.cardapplied, not the readiness sentinel.
 - v1.2 rev 3: Notecard I/O relocated to kmod_bootstrap (memory: rev 2 sat at 90.6% of the Mono budget and stack-heap-collided when it parsed). kmod_settings no longer reads the card: kmod_bootstrap streams each card line into LSD verbatim and signals "settings.card.streamed"; we convert in process_streamed_card() (normalize flag scalars, migrate_legacy_roster() rebuilds the user.* roster from the deposited access-roster and blacklist scratch keys via the retained card builders, deferred TPE guard, stamp sentinel, broadcast). kmod_settings stays the SOLE user.* writer (bootstrap only deposits scratch + scalar keys). Removed: parse_notecard_line, start_notecard_reading, the card-ownership manifest (record_card_key / apply_card_manifest_clear / finalize_card_manifest — migrate clears+rebuilds wholesale via delete_role), clear_owner_keys / clear_trustee_keys, csv_read / csv_write, the notecard dataserver branch, and the Notecard-reading globals (CardProvided, COMMENT_PREFIX, SEPARATOR, CARD_MULTI_OWNER, KEY_CARDMANIFEST). Reload Settings / Reset Config / card-edit now request a re-stream (settings.card.restream) instead of reading directly; no-card paths rebroadcast/finalize without touching the roster. Estimator: 90.6% -> 82.7%. The multiowner FEATURE is unchanged (KEY_MULTI_OWNER_MODE + is_multi_owner_mode + card_add_owner refusal all intact).
 - v1.2 rev 2: User-record roster (/etc/passwd model). The 13 role-segregated keys (the access.owner- and access.trustee- parallel CSVs, access.multiowner, the blacklist.blklist- pair) are replaced by one record per person: user.<uuid> = "<acl>,<rank>,<name>,<honorific>" (acl 5/3/-1; rank orders owners, 0 = primary, and correlates card honorifics). Role exclusivity is structural (one record per uuid; a role write overwrites). access.multiowner KEPT as an explicit notecard-only POLICY flag (commitment semantics, never derived from count): off ⇒ the parser refuses extra card owners ("there can be only one"), on ⇒ several owner records permitted; runtime writes refused; preserved by reset-config. access.isowned kept as the derived fast flag. Card syntax unchanged: roster lines build records (uuid+honorific lines order-independent via EOF application; *names lines accepted-and-ignored; place access.multiowner BEFORE the owner lines). Name policy: username at write when in-region, else placeholder + async upgrade (display name for owners/trustees, username for blacklist); handle_name_response collapses to a single record-field update. Reset-config preserves owner records dynamically. CLEAN BREAK: no legacy keys, no migration — existing collars re-seed from the notecard.
@@ -108,11 +109,6 @@ key LastOwner = NULL_KEY;
 
 key NotecardKey = NULL_KEY;
 
-// Reset Config in-flight state. When TRUE, process_streamed_card routes to
-// finalize_reset_config() instead of the normal bootstrap completion.
-integer InResetConfig = FALSE;
-list ResetConfigKeys   = [];
-list ResetConfigValues = [];
 
 integer MaxListLen = 64;
 
@@ -696,20 +692,17 @@ process_streamed_card() {
 
     migrate_legacy_roster();
 
-    if (InResetConfig) {
-        finalize_reset_config();
-    }
-    else {
-        // Readiness is normally already stamped (state_entry on a fresh boot);
-        // keep it idempotent here for the Reload path. Mark the card override as
-        // applied so bootstrap won't re-stream on the next normal reboot.
-        llLinksetDataWrite(KEY_SENTINEL, "1");
-        llLinksetDataWrite(KEY_CARD_APPLIED, "1");
-        broadcast_settings_changed();
-        llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
-            "type", "settings.notecard.loaded"
-        ]), NULL_KEY);
-    }
+    // Readiness is normally already stamped (state_entry on a fresh boot); keep
+    // it idempotent here for the boot/Reload paths. Mark the card override as
+    // applied so bootstrap won't re-stream on the next normal reboot. (Reset
+    // Config no longer routes through here — it wipes config + resets all
+    // scripts, and this fires as part of the resulting fresh boot.)
+    llLinksetDataWrite(KEY_SENTINEL, "1");
+    llLinksetDataWrite(KEY_CARD_APPLIED, "1");
+    broadcast_settings_changed();
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type", "settings.notecard.loaded"
+    ]), NULL_KEY);
 }
 
 
@@ -844,82 +837,45 @@ handle_runaway() {
     factory_reset();
 }
 
-/* -------------------- RESET CONFIG (preserve owner+lock) -------------------- */
+/* -------------------- RESET CONFIG -------------------- */
 
-// Reset Config: wipe LSD except owner block and lock state, then re-parse the
-// notecard so its defaults re-populate everything else. Card writes win for
-// any key the card touches; preserved values fill the slots the card is
-// silent on. Sentinel is set on completion so subsequent restarts don't
-// re-parse. Trust assumption: wearer is consenting and the notecard is fine.
-// Abuse-recovery is the Runaway path, not this.
+// Reset Config: wipe the config and let the STANDARD boot rebuild it. Delete
+// every LSD key EXCEPT the roster (user.*) + ownership flags + lock + the
+// kernel's owner-identity marker, then broadcast kernel.reset.factory. That's
+// all — bootstrap re-stamps readiness, every plugin re-seeds its OWN defaults
+// (the config source; the card is NOT — see feedback_card_not_config_source),
+// and bootstrap re-applies the card OVERRIDE if present (the wipe cleared
+// settings.cardapplied) or ignores it if absent. No card parsing / re-stream /
+// finalize here — that was redundant with bootstrap and bricked on a stalled
+// card stream. The reset handler wipes config and calls bootstrap, nothing more.
 handle_reset_config() {
-    // Preserve the owner block (every acl-5 user record) + flags. Keys are
-    // enumerated dynamically; the snapshot/restore loops below are generic.
-    ResetConfigKeys = [KEY_ISOWNED, KEY_MULTI_OWNER_MODE, KEY_LOCKED];
-    list ks = user_keys();
-    integer ki;
-    integer kn = llGetListLength(ks);
-    for (ki = 0; ki < kn; ki++) {
-        string uk = llList2String(ks, ki);
-        if ((integer)llLinksetDataRead(uk) == 5) {
-            ResetConfigKeys += [uk];
-        }
-    }
-    ResetConfigValues = [];
-
-    integer i;
-    integer n = llGetListLength(ResetConfigKeys);
-    for (i = 0; i < n; i++) {
-        ResetConfigValues += [llLinksetDataRead(llList2String(ResetConfigKeys, i))];
-    }
-
     llRegionSayTo(llGetOwner(), 0, "Resetting configuration...");
 
-    // Wipe LSD (the snapshot lives in script vars, so it survives). Notecard
-    // stays in inventory (preserve trust). The sentinel is gone with the wipe.
-    llLinksetDataReset();
-
-    InResetConfig = TRUE;
-
-    if (llGetInventoryType(NOTECARD_NAME) == INVENTORY_NOTECARD) {
-        // Ask bootstrap to re-stream; settings.card.streamed routes to
-        // process_streamed_card → finalize_reset_config (InResetConfig set).
-        request_card_restream();
-    }
-    else {
-        // No notecard — restore the preserved block + finalize immediately.
-        finalize_reset_config();
-    }
-}
-
-finalize_reset_config() {
-    integer i;
-    integer n = llGetListLength(ResetConfigKeys);
-    for (i = 0; i < n; i++) {
-        string k = llList2String(ResetConfigKeys, i);
-        if (llLinksetDataRead(k) == "") {
-            string v = llList2String(ResetConfigValues, i);
-            if (v != "") {
-                llLinksetDataWrite(k, v);
-            }
+    // Delete all config keys; keep the roster + ownership flags + lock + the
+    // kernel's owner-identity marker. (settings.bootstrapped / settings.cardapplied
+    // are NOT preserved — gone with the wipe, so readiness re-stamps and the card
+    // override re-applies on the reboot.)
+    list all = llLinksetDataFindKeys("", 0, -1);
+    integer n = llGetListLength(all);
+    integer i = 0;
+    while (i < n) {
+        string k = llList2String(all, i);
+        if (llSubStringIndex(k, "user.") != 0
+            && k != KEY_ISOWNED
+            && k != KEY_MULTI_OWNER_MODE
+            && k != KEY_LOCKED
+            && k != "safeguard.last_owner") {
+            llLinksetDataDelete(k);
         }
+        i += 1;
     }
 
-    // Mark readiness + card override applied (reset-config re-derived from card).
-    llLinksetDataWrite(KEY_SENTINEL, "1");
-    llLinksetDataWrite(KEY_CARD_APPLIED, "1");
-
-    InResetConfig = FALSE;
-    ResetConfigKeys = [];
-    ResetConfigValues = [];
-
-    // Tell other plugins to reset against the final LSD state.
+    // Hand off to the standard boot: resets every script; bootstrap + plugins
+    // rebuild config, readiness, and (if present) the card override.
     llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
         "type", "kernel.reset.factory",
         "from", "reset_config"
     ]), NULL_KEY);
-
-    broadcast_settings_changed();
 }
 
 /* -------------------- EVENTS -------------------- */
