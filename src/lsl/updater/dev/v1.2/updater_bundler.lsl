@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl  (v1.2)
 VERSION: 1.2
-REVISION: 1
+REVISION: 2
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,6 +25,14 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+  r2 — Debounce the CHANGED_INVENTORY park. r1's "drop-in is race-free" held
+       for DROPPING a fresh script, but not for EDITING one: a recompile fires
+       CHANGED_INVENTORY while the script is momentarily not-found, so the
+       instant park shouted "Could not find script" (cosmetic — the park
+       re-ran on the next change, so nothing broke). Now CHANGED_INVENTORY
+       arms a PARK_DEBOUNCE_SEC timer and parks once it settles; this also
+       collapses folder-drop bursts (one changed per item) into a single park.
+       The bundler's only use of its timer.
   r1 — Rez-race fix. The staged collar scripts are parked on CHANGED_INVENTORY
        ONLY (drop-in: each is already instantiated, so llSetScriptState is
        race-free), and NEVER at state_entry — at rez the siblings aren't
@@ -180,12 +188,17 @@ integer is_updater_machinery(string name) {
     return llSubStringIndex(name, "updater_") == 0;
 }
 
-// Park every staged non-machinery script in this prim. Call ONLY from
-// CHANGED_INVENTORY: a just-dropped script is already instantiated, so
-// llSetScriptState is race-free. NEVER call at state_entry/on_rez — at rez
-// the siblings aren't instantiated, so the call shouts "Could not find
-// script" and fails to disable them. Run-state is durable, so this one-time
-// park persists across rez and edits; the rez path needs no action.
+// Debounce window for the staged-script park (CHANGED_INVENTORY -> timer ->
+// park_staged_scripts). Long enough to outlast an edit's recompile.
+float PARK_DEBOUNCE_SEC = 2.0;
+
+// Park every staged non-machinery script in this prim. Called from the
+// debounce timer, NOT directly from CHANGED_INVENTORY: a DROP leaves the
+// script instantiated, but an EDIT recompiles it, and during that window
+// llSetScriptState shouts "Could not find script". The debounce waits the
+// recompile out. NEVER call at state_entry/on_rez either — at rez the
+// siblings aren't instantiated. Run-state is durable, so this park persists
+// across rez and edits; the rez path needs no action.
 park_staged_scripts() {
     integer count = llGetInventoryNumber(INVENTORY_SCRIPT);
     integer i = 0;
@@ -728,11 +741,20 @@ default {
 
     changed(integer change) {
         if (change & CHANGED_OWNER) llResetScript();
-        // Park staged scripts at drop-in (assembly time). Each just-dropped
-        // script is already live, so this is race-free, and run-state is
-        // durable so the park persists across rez/edits — no rez park needed.
-        // Folder drops fire changed once per item; each pass re-parks all.
-        if (change & CHANGED_INVENTORY) park_staged_scripts();
+        // Debounce the staged-script park. A DROP fires CHANGED_INVENTORY with
+        // the script already instantiated, but an EDIT fires it mid-recompile,
+        // when the script is momentarily not-found — so parking instantly
+        // shouts "Could not find script". Arm a timer and park once it settles;
+        // this also collapses folder-drop bursts (one changed per item) into a
+        // single park. Run-state is durable, so the park persists across edits.
+        if (change & CHANGED_INVENTORY) llSetTimerEvent(PARK_DEBOUNCE_SEC);
+    }
+
+    timer() {
+        // Debounced park: inventory has settled and any recompile has
+        // finished, so llSetScriptState now finds every script.
+        llSetTimerEvent(0.0);
+        park_staged_scripts();
     }
 
     link_message(integer sender, integer num, string msg, key id) {
