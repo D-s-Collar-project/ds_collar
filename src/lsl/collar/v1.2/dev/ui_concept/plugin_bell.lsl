@@ -119,14 +119,21 @@ show_menu(string context, string title, string body, list button_data) {
     SessionId = generate_session_id();
     MenuContext = context;
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // UI-CONCEPT: route through kmod_menu instead of building the dialog
+    // ourselves. We hand over only the CONTENT buttons + title/body; kmod_menu
+    // adds the Back nav row, reverse-orders the content per the dialog
+    // convention, pads, and forwards to kmod_dialogs. "category" non-empty makes
+    // the nav a Back (vs Close). The click still returns by session_id.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.menu.render",
         "session_id", SessionId,
         "user", (string)CurrentUser,
+        "menu_type", PLUGIN_CONTEXT,
         "title", title,
         "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "category", PLUGIN_CATEGORY,
+        "has_nav", 0,
+        "buttons", llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -196,10 +203,10 @@ show_main_menu() {
         sound_label = "Sound: Off";
     }
 
-    // Button order for layout:
-    // [Volume +] [Volume -] [.]
-    // [Back]     [Show: Y/N] [Sound: On/Off]
-    list button_data = [btn("Back", "back")];
+    // CONTENT buttons only, in top-to-bottom reading order — kmod_menu adds the
+    // Back nav row and reverse-orders these to render top-down. No per-plugin
+    // layout work anymore.
+    list button_data = [];
     if (btn_allowed("Show")) button_data += [btn(visible_label, "toggle_visible")];
     if (btn_allowed("Sound")) button_data += [btn(sound_label, "toggle_sound")];
     if (btn_allowed("Volume +")) button_data += [btn("Volume +", "vol_up")];
@@ -322,11 +329,13 @@ handle_subpath(key user, integer acl_level, string subpath) {
 
 /* -------------------- BUTTON HANDLER -------------------- */
 handle_button_click(string msg) {
+    // Content buttons carry a context; nav buttons (Back, blank padders) arrive
+    // with an empty context, so fall back to the button label for those.
     string cmd = llJsonGetValue(msg, ["context"]);
-    if (cmd == JSON_INVALID) cmd = llJsonGetValue(msg, ["button"]);
+    if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
 
     if (MenuContext == "main") {
-        if (cmd == "back") {
+        if (cmd == "Back") {
             return_to_root();
         }
         else if (cmd == "vol_up") {

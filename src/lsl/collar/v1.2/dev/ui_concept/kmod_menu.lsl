@@ -108,6 +108,9 @@ render_menu(string msg) {
     string nav_exit = "Close";
     if (category != "") nav_exit = "Back";
 
+    // No padding — a lone Back/Close simply leads the content (these layouts
+    // prefer packed buttons over blank fillers). Paginated menus lead with the
+    // full << >> <exit> nav row.
     list final_button_data = [];
     if (has_nav) {
         final_button_data = ["<<", ">>", nav_exit] + reordered;
@@ -116,30 +119,38 @@ render_menu(string msg) {
         final_button_data = [nav_exit] + reordered;
     }
 
-    string title = "";
-    if (category != "") {
-        title = category;
-    }
-    else if (menu_type == ROOT_CONTEXT) {
-        title = "Main Menu";
-    }
-    else if (menu_type == SOS_CONTEXT) {
-        title = "Emergency Menu";
-    }
-    else {
-        title = "Menu";
+    // Plugins may supply their own title (e.g. bell's "Bell"); else derive one
+    // from the category / menu_type for the root + category tiers.
+    string title = llJsonGetValue(msg, ["title"]);
+    if (title == JSON_INVALID) {
+        if (category != "") {
+            title = category;
+        }
+        else if (menu_type == ROOT_CONTEXT) {
+            title = "Main Menu";
+        }
+        else if (menu_type == SOS_CONTEXT) {
+            title = "Emergency Menu";
+        }
+        else {
+            title = "Menu";
+        }
     }
 
     if (total_pages > 1) {
         title = title + " (" + (string)(current_page + 1) + "/" + (string)total_pages + ")";
     }
 
-    string body_text = "";
-    if (menu_type == SOS_CONTEXT) {
-        body_text = "Emergency options:";
-    }
-    else {
-        body_text = "Select an option:";
+    // Plugins may supply their own status body (e.g. bell's volume/visibility
+    // readout); fall back to the generic prompt keyed by menu_type.
+    string body_text = llJsonGetValue(msg, ["body"]);
+    if (body_text == JSON_INVALID) {
+        if (menu_type == SOS_CONTEXT) {
+            body_text = "Emergency options:";
+        }
+        else {
+            body_text = "Select an option:";
+        }
     }
 
     string final_button_data_json = llList2Json(JSON_ARRAY, final_button_data);

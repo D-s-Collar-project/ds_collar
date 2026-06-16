@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_bell.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 8
 PURPOSE: Bell visibility and jingling control for the collar
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.2 rev 8: show/hide ALL prims whose description contains "bell", not just the first. set_bell_visibility walked the linkset once, cached the first match in BellLink, and only toggled that one prim — so a multi-prim bell only half-showed. Now toggles every match each call (mirrors plugin_lock's set_lock_prims); removed the BellLink cache + its CHANGED_LINK invalidation.
 - v1.2 rev 7: bell prim now matched by DESCRIPTION (case-insensitive substring "bell") instead of link name == "bell", the same convention as the leashpoint prim — frees the prim NAME for designers.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare write-storm that stranded plugins on reset). register_self now ANNOUNCES cat/mask/policy in kernel.register.declare; the kernel is the sole serial writer. Removed write_plugin_reg helper + the reset-handler LSD deletes (kernel owns clearing). See collar_kernel rev 6.
 --------------------*/
@@ -30,7 +31,6 @@ integer BellSoundEnabled = FALSE;
 float BellVolume = 0.3;
 string BellSound = "16fcf579-82cb-b110-c1a4-5fa5e1385406";
 integer IsMoving = FALSE;
-integer BellLink = 0;
 
 // Jingle timing
 float JINGLE_INTERVAL = 1.75;  // Play sound every 1.75 seconds while moving
@@ -78,27 +78,24 @@ integer btn_allowed(string label) {
     return (llListFindList(gPolicyButtons, [label]) != -1);
 }
 
+// Show/hide EVERY prim whose description contains "bell" (case-insensitive) —
+// a bell can be built from several prims. Walks the linkset each toggle (toggles
+// are infrequent, so the cost is negligible). Mirrors plugin_lock's
+// set_lock_prims; replaces the old single cached BellLink that only ever
+// toggled the first matching prim.
 set_bell_visibility(integer visible) {
-    if (BellLink == 0) {
-        integer link_count = llGetNumberOfPrims();
-        integer i;
-        for (i = 1; i <= link_count; i++) {
-            string desc = llToLower(llList2String(
-                llGetLinkPrimitiveParams(i, [PRIM_DESC]), 0));
-            if (llSubStringIndex(desc, "bell") != -1) {
-                BellLink = i;
-                jump found_bell;
-            }
+    float alpha = 0.0;
+    if (visible) alpha = 1.0;
+    integer count = llGetNumberOfPrims();
+    integer i = 1;
+    while (i <= count) {
+        string desc = llToLower(llList2String(
+            llGetLinkPrimitiveParams(i, [PRIM_DESC]), 0));
+        if (llSubStringIndex(desc, "bell") != -1) {
+            llSetLinkAlpha(i, alpha, ALL_SIDES);
         }
-        @found_bell;
+        i += 1;
     }
-
-    if (BellLink != 0) {
-        float alpha = 0.0;
-        if (visible) alpha = 1.0;
-        llSetLinkAlpha(BellLink, alpha, ALL_SIDES);
-    }
-
     BellVisible = visible;
 }
 
@@ -449,9 +446,6 @@ default {
     changed(integer change) {
         if (change & CHANGED_OWNER) {
             llResetScript();
-        }
-        if (change & CHANGED_LINK) {
-            BellLink = 0;
         }
     }
 
