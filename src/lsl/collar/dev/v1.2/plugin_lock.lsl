@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_lock.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 8
 PURPOSE: Toggle collar lock and RLV detach control labels
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.2 rev 8: lock indicator desc match changed EXACT -> SUBSTRING ("lock.locked"/"lock.unlocked"), so one prim can serve as BOTH a leashpoint and a lock indicator (e.g. desc "leashpoint lock.locked"). Safe because the "lock." prefix breaks the overlap — "lock.locked" is not a substring of "lock.unlocked".
 - v1.2 rev 7: lock-state indicator prims now matched by DESCRIPTION — same idea as the leashpoint prim, but EXACT (case-insensitive) "lock.locked"/"lock.unlocked", not substring, since "locked" is a substring of "unlocked" and an ambiguous match could strand the visual in the wrong state. Frees the prim NAME for designers. Consolidated the two name-matched show_*_prim functions into set_lock_prims(); removed the PRIM_LOCKED/PRIM_UNLOCKED name constants.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare reset write-storm); register now announces cat/mask/policy via kernel.register.declare and the kernel is the sole serial writer. Removed write_plugin_reg + the reset-handler reg/policy deletes (kept the plugin.<x>.state delete). Revision baseline normalized to rev 6. See collar_kernel rev 6.
 --------------------*/
@@ -30,11 +31,12 @@ string SOUND_TOGGLE = "3aacf116-f060-b4c8-bb58-07aefc0af33a";
 float SOUND_VOLUME = 1.0;
 
 /* -------------------- VISUAL FEEDBACK CONVENTION --------------------
-   Lock-state indicator prims are marked by DESCRIPTION, the same idea as the
-   leashpoint prim, but matched EXACTLY (case-insensitive): "lock.locked" is
-   the locked indicator, "lock.unlocked" the unlocked one. Exact rather than
-   substring because the two state words overlap ("locked" is a substring of
-   "unlocked"); an ambiguous match could strand the visual in the wrong state.
+   Lock-state indicator prims are marked by DESCRIPTION, the same way as the
+   leashpoint prim: a desc CONTAINING (case-insensitive) "lock.locked" is the
+   locked indicator, one containing "lock.unlocked" the unlocked one. Substring
+   is unambiguous here because the "lock." prefix breaks the overlap —
+   "lock.locked" is NOT a substring of "lock.unlocked" — so a single prim can
+   carry both this and the leashpoint marker (e.g. desc "leashpoint lock.locked").
    The prim NAME stays free for the designer. Consumed by set_lock_prims(). */
 
 /* -------------------- STATE -------------------- */
@@ -193,21 +195,22 @@ apply_lock_state() {
 
 /* -------------------- VISUAL FEEDBACK (optional prims) -------------------- */
 
-// Toggle the lock-state indicator prims, matched by an EXACT (case-insensitive)
-// DESCRIPTION — see the convention note up top. Exact rather than substring so
-// the "locked"/"unlocked" overlap can never strand the visual in one state.
+// Toggle the lock-state indicator prims, matched by a DESCRIPTION substring —
+// see the convention note up top. The "lock." prefix makes substring safe
+// ("lock.locked" isn't a substring of "lock.unlocked"), so one prim can be
+// both a leashpoint and a lock indicator.
 set_lock_prims(integer locked) {
     integer count = llGetNumberOfPrims();
     integer i = 1;
     while (i <= count) {
         string desc = llToLower(llList2String(
             llGetLinkPrimitiveParams(i, [PRIM_DESC]), 0));
-        if (desc == "lock.locked") {
+        if (llSubStringIndex(desc, "lock.locked") != -1) {
             // Locked indicator: shown only when locked.
             if (locked) llSetLinkAlpha(i, 1.0, ALL_SIDES);
             else llSetLinkAlpha(i, 0.0, ALL_SIDES);
         }
-        else if (desc == "lock.unlocked") {
+        else if (llSubStringIndex(desc, "lock.unlocked") != -1) {
             // Unlocked indicator: shown only when unlocked.
             if (locked) llSetLinkAlpha(i, 0.0, ALL_SIDES);
             else llSetLinkAlpha(i, 1.0, ALL_SIDES);
