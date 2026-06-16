@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_bell.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Bell visibility and jingling control for the collar
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.2 rev 7: bell prim now matched by DESCRIPTION (case-insensitive substring "bell") instead of link name == "bell", the same convention as the leashpoint prim — frees the prim NAME for designers.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare write-storm that stranded plugins on reset). register_self now ANNOUNCES cat/mask/policy in kernel.register.declare; the kernel is the sole serial writer. Removed write_plugin_reg helper + the reset-handler LSD deletes (kernel owns clearing). See collar_kernel rev 6.
 --------------------*/
 
@@ -82,7 +83,9 @@ set_bell_visibility(integer visible) {
         integer link_count = llGetNumberOfPrims();
         integer i;
         for (i = 1; i <= link_count; i++) {
-            if (llToLower(llGetLinkName(i)) == "bell") {
+            string desc = llToLower(llList2String(
+                llGetLinkPrimitiveParams(i, [PRIM_DESC]), 0));
+            if (llSubStringIndex(desc, "bell") != -1) {
                 BellLink = i;
                 jump found_bell;
             }

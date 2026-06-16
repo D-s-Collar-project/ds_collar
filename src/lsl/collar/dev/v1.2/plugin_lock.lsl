@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_lock.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Toggle collar lock and RLV detach control labels
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.2 rev 7: lock-state indicator prims now matched by DESCRIPTION — same idea as the leashpoint prim, but EXACT (case-insensitive) "lock.locked"/"lock.unlocked", not substring, since "locked" is a substring of "unlocked" and an ambiguous match could strand the visual in the wrong state. Frees the prim NAME for designers. Consolidated the two name-matched show_*_prim functions into set_lock_prims(); removed the PRIM_LOCKED/PRIM_UNLOCKED name constants.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare reset write-storm); register now announces cat/mask/policy via kernel.register.declare and the kernel is the sole serial writer. Removed write_plugin_reg + the reset-handler reg/policy deletes (kept the plugin.<x>.state delete). Revision baseline normalized to rev 6. See collar_kernel rev 6.
 --------------------*/
 
@@ -28,9 +29,13 @@ string KEY_LOCKED = "lock.locked";
 string SOUND_TOGGLE = "3aacf116-f060-b4c8-bb58-07aefc0af33a";
 float SOUND_VOLUME = 1.0;
 
-/* -------------------- VISUAL PRIM NAMES (optional) -------------------- */
-string PRIM_LOCKED = "locked";
-string PRIM_UNLOCKED = "unlocked";
+/* -------------------- VISUAL FEEDBACK CONVENTION --------------------
+   Lock-state indicator prims are marked by DESCRIPTION, the same idea as the
+   leashpoint prim, but matched EXACTLY (case-insensitive): "lock.locked" is
+   the locked indicator, "lock.unlocked" the unlocked one. Exact rather than
+   substring because the two state words overlap ("locked" is a substring of
+   "unlocked"); an ambiguous match could strand the visual in the wrong state.
+   The prim NAME stays free for the designer. Consumed by set_lock_prims(). */
 
 /* -------------------- STATE -------------------- */
 integer Locked = FALSE;
@@ -181,50 +186,33 @@ persist_locked(integer new_value) {
 /* -------------------- LOCK STATE APPLICATION -------------------- */
 
 apply_lock_state() {
-
-    if (Locked) {
-        // Lock collar - prevent detach
-        llOwnerSay("@detach=n");
-        show_locked_prim();
-    }
-    else {
-        // Unlock collar - allow detach
-        llOwnerSay("@detach=y");
-        show_unlocked_prim();
-    }
+    if (Locked) llOwnerSay("@detach=n");   // prevent detach
+    else llOwnerSay("@detach=y");          // allow detach
+    set_lock_prims(Locked);
 }
 
 /* -------------------- VISUAL FEEDBACK (optional prims) -------------------- */
 
-show_locked_prim() {
-    integer link_count = llGetNumberOfPrims();
-    integer i;
-
-    for (i = 1; i <= link_count; i++) {
-        string name = llGetLinkName(i);
-
-        if (name == PRIM_LOCKED) {
-            llSetLinkAlpha(i, 1.0, ALL_SIDES);
+// Toggle the lock-state indicator prims, matched by an EXACT (case-insensitive)
+// DESCRIPTION — see the convention note up top. Exact rather than substring so
+// the "locked"/"unlocked" overlap can never strand the visual in one state.
+set_lock_prims(integer locked) {
+    integer count = llGetNumberOfPrims();
+    integer i = 1;
+    while (i <= count) {
+        string desc = llToLower(llList2String(
+            llGetLinkPrimitiveParams(i, [PRIM_DESC]), 0));
+        if (desc == "lock.locked") {
+            // Locked indicator: shown only when locked.
+            if (locked) llSetLinkAlpha(i, 1.0, ALL_SIDES);
+            else llSetLinkAlpha(i, 0.0, ALL_SIDES);
         }
-        else if (name == PRIM_UNLOCKED) {
-            llSetLinkAlpha(i, 0.0, ALL_SIDES);
+        else if (desc == "lock.unlocked") {
+            // Unlocked indicator: shown only when unlocked.
+            if (locked) llSetLinkAlpha(i, 0.0, ALL_SIDES);
+            else llSetLinkAlpha(i, 1.0, ALL_SIDES);
         }
-    }
-}
-
-show_unlocked_prim() {
-    integer link_count = llGetNumberOfPrims();
-    integer i;
-
-    for (i = 1; i <= link_count; i++) {
-        string name = llGetLinkName(i);
-
-        if (name == PRIM_LOCKED) {
-            llSetLinkAlpha(i, 0.0, ALL_SIDES);
-        }
-        else if (name == PRIM_UNLOCKED) {
-            llSetLinkAlpha(i, 1.0, ALL_SIDES);
-        }
+        i += 1;
     }
 }
 
