@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: kmod_rlv.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: RLV subsystem. Single point of @-command emission for all
   refcount-stateful RLV restrictions in the collar. Owns the third-party
   RLV relay protocol (RELAY_CHANNEL listen, auth queue, ASK dialog,
@@ -20,6 +20,7 @@ ARCHITECTURE: Spun off from plugin_relay v1.10 rev 21 to keep that
     (one-shot or pre-existing semantics — Phase 2 migration), and
     kmod_leash (=force / =clear only, no refcount overlap).
 CHANGES:
+- v1.2 rev 7: Removed vestigial kernel registration. As an engine, kmod_rlv has no menu presence and no other module reads its reg.* row — it was the lone kmod registering with the kernel (a leftover from the plugin_relay split, rev 21). Deleted register_self() + its state_entry/refresh calls, send_pong(), and the kernel.ping handler (it was the only module that ponged — a closed loop sustaining only its own last_seen row). Now consistent with auth/settings/bootstrap/menu/dialogs/chat. KMOD_CONTEXT retained (reset-target filter). No functional change to the RLV engine or bus API.
 - v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 --------------------*/
 
@@ -110,25 +111,6 @@ integer lsd_int(string lsd_key, integer fallback) {
 
 
 /* -------------------- LIFECYCLE -------------------- */
-
-register_self() {
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "kernel.register.declare",
-        "context", KMOD_CONTEXT,
-        "label", "RLV Subsystem",
-        "script", llGetScriptName()
-    ]);
-    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, msg, NULL_KEY);
-}
-
-send_pong() {
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "kernel.pong",
-        "context", KMOD_CONTEXT
-    ]);
-    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, msg, NULL_KEY);
-}
-
 
 /* -------------------- RELAY LISTEN MANAGEMENT -------------------- */
 
@@ -789,8 +771,6 @@ default {
             Hardcore = lsd_int(KEY_RELAY_HARDCORE, FALSE);
             update_relay_listen_state();
         }
-
-        register_self();
     }
 
     on_rez(integer start_param) {
@@ -828,13 +808,7 @@ default {
         if (msg_type == JSON_INVALID) return;
 
         if (num == KERNEL_LIFECYCLE) {
-            if (msg_type == "kernel.register.refresh") {
-                register_self();
-            }
-            else if (msg_type == "kernel.ping") {
-                send_pong();
-            }
-            else if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
+            if (msg_type == "kernel.reset.soft" || msg_type == "kernel.reset.factory") {
                 string ctx = llJsonGetValue(msg, ["context"]);
                 if (ctx != JSON_INVALID && ctx != "" && ctx != KMOD_CONTEXT) return;
                 llResetScript();
