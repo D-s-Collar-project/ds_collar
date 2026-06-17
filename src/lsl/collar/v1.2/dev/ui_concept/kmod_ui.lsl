@@ -1,8 +1,23 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 CHANGES:
+- v1.2 rev 7 (sandbox): ACL is now read DIRECTLY off the user-record table
+  (resolve_acl mirrors kmod_auth route_acl_query rung-for-rung) instead of the
+  async auth.acl.query round-trip. Sessions hold navigation state only; the ACL
+  level is resolved LIVE at render + dispatch, so a session survives reg.*
+  rebuilds and role changes with no teardown and the next click always reflects
+  the current table. Removed: SessionACLs / SessionBlacklisted /
+  SessionCreatedTimes / PendingAcl* lists, handle_acl_result, start_session's
+  query hop, the auth.acl.update session-invalidation, invalidate_all_sessions
+  on rebuild, and the SESSION_MAX_AGE re-auth. This is the documented hot-path
+  model (see kmod_auth header). Fixes the mid-session menu death traced to the
+  reg.*-rebuild + acl.update teardowns. Dispatch still re-checks acl.policycontext
+  live, so authorization tightens (no cached snapshot can act stale).
+  CROSS-MODULE CONTRACT: resolve_acl MUST stay in lockstep with kmod_auth
+  route_acl_query; the user.* record format + isowned/tpe/public flag keys are
+  owned by kmod_settings.
 - v1.2 rev 6: Touch-guard. touch_start ignores touches while boot.ready is unset (kmod_bootstrap clears it at boot start, sets "1" at startup complete). A touch mid-boot fires the menu render + view rebuild, piling concurrent LSD writes onto the plugin self-declare window — under load that drops registrations and strands plugins from the menu. CROSS-MODULE CONTRACT: boot.ready, written by kmod_bootstrap.
 - v1.2 rev 1: User-record roster (kmod_settings rev 2): dropped the local acl.<uuid>.cache fast path + acl.timestamp staleness check entirely — every session start now round-trips auth.acl.query (one link-message hop, no staleness window, single ACL implementation in kmod_auth).
 PURPOSE: Session management, categorized per-ACL menu views (LSD-resident),
@@ -18,18 +33,28 @@ ARCHITECTURE: BIND9-style views. Each plugin self-declares one LSD entry
   root; empty/missing cat groups under "Other"; ui.sos.* prefix routes to
   the SOS view regardless of cat. Per touch: one LSD read (the toucher's
   view) fully describes the menu — no recompute, and views survive a script
-  reset. ACL itself comes from kmod_auth's acl.<uuid>.cache as before.
-  acl.policycontext:<ctx> is NOT used for menu visibility any more — it
-  remains the per-button policy store inside plugins, and dispatch still
-  re-checks it as the authorization gate.
+  reset. ACL is resolved synchronously from the user-record table by
+  resolve_acl (the same ladder kmod_auth runs); there is no cached snapshot.
+  acl.policycontext:<ctx> is NOT used for menu visibility — it remains the
+  per-button policy store inside plugins, and dispatch re-checks it (against
+  the live ACL) as the authorization gate.
 --------------------*/
 
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
-integer AUTH_BUS = 700;
 integer UI_BUS = 900;
 integer DIALOG_BUS = 950;
+
+/* -------------------- ACL CONSTANTS -------------------- */
+// Mirror of kmod_auth's ladder values. CROSS-MODULE CONTRACT.
+integer ACL_BLACKLIST     = -1;
+integer ACL_NOACCESS      = 0;
+integer ACL_PUBLIC        = 1;
+integer ACL_OWNED         = 2;
+integer ACL_TRUSTEE       = 3;
+integer ACL_UNOWNED       = 4;
+integer ACL_PRIMARY_OWNER = 5;
 
 /* -------------------- CONSTANTS -------------------- */
 string ROOT_CONTEXT = "ui.core.root";
@@ -45,7 +70,14 @@ float LONG_TOUCH_THRESHOLD = 1.5;
 string KEY_BOOT_READY = "boot.ready";
 
 integer MAX_SESSIONS = 5;
-integer SESSION_MAX_AGE = 60;  // Seconds before ACL refresh required
+
+// User records + flags read by resolve_acl. user.<uuid> =
+// "<acl>,<rank>,<name>,<honorific>"; the leading acl field parses off the raw
+// value with an integer cast. Written solely by kmod_settings. CROSS-MODULE.
+string USER_PREFIX       = "user.";
+string KEY_ISOWNED       = "access.isowned";
+string KEY_PUBLIC_ACCESS = "public.mode";
+string KEY_TPE_MODE      = "tpe.mode";
 
 // Per-plugin self-declared registry entry. Written by plugins during
 // registration: reg.<context> = {"cat","label","script","mask"}.
@@ -81,20 +113,14 @@ float REBUILD_DEBOUNCE = 0.1;
 // categories and masks live in the LSD views — not duplicated in heap.
 list PluginContexts;
 
-// Parallel Lists for Sessions
+// Parallel lists for sessions. NAVIGATION STATE ONLY — ACL is never cached
+// here; it is resolved live from the table on every render/dispatch.
 list SessionUsers;
-list SessionACLs;
-list SessionBlacklisted;
 list SessionPages;
 list SessionTotalPages;
 list SessionIDs;
-list SessionCreatedTimes;
 list SessionContexts;    // ROOT_CONTEXT or SOS_CONTEXT
 list SessionCategories;  // "" = root tier; "<Cat>" = inside that category
-
-// Parallel Lists for Pending ACL
-list PendingAclAvatars;
-list PendingAclContexts;
 
 // Parallel Lists for Touch Data
 list TouchKeys;
@@ -129,13 +155,37 @@ string generate_session_id(key user) {
     return "ui_" + (string)user + "_" + (string)llGetUnixTime();
 }
 
-/* -------------------- PENDING ACL -------------------- */
-// Every session start round-trips auth.acl.query → auth.acl.result (one
-// link-message hop against the user-record roster — no local cache, no
-// staleness window; kmod_auth is the single ACL implementation).
+/* -------------------- ACL RESOLUTION (TABLE READ) -------------------- */
+// The hot-path ACL read: resolve a level straight off the user-record table
+// and the isowned/tpe/public flags. This is the SAME ladder kmod_auth's
+// route_acl_query runs (blacklist > primary owner > wearer{tpe/owned/unowned}
+// > trustee > public > unauthorized stranger). kmod_auth remains the async
+// responder for plugins/HUDs; kmod_ui reads directly so a session never holds
+// a stale ACL snapshot. CROSS-MODULE CONTRACT: keep in lockstep with kmod_auth.
+integer resolve_acl(key avatar) {
+    integer role = (integer)llLinksetDataRead(USER_PREFIX + (string)avatar);  // 0 if no record
 
-integer find_pending_acl_idx(key avatar_key) {
-    return llListFindList(PendingAclAvatars, [avatar_key]);
+    if (role == ACL_BLACKLIST) return ACL_BLACKLIST;
+    if (role == ACL_PRIMARY_OWNER) return ACL_PRIMARY_OWNER;
+
+    // The wearer never has a record — derive from the flags.
+    if (avatar == llGetOwner()) {
+        if ((integer)llLinksetDataRead(KEY_TPE_MODE)) return ACL_NOACCESS;
+        if ((integer)llLinksetDataRead(KEY_ISOWNED)) return ACL_OWNED;
+        return ACL_UNOWNED;
+    }
+
+    if (role == ACL_TRUSTEE) return ACL_TRUSTEE;
+    if ((integer)llLinksetDataRead(KEY_PUBLIC_ACCESS)) return ACL_PUBLIC;
+
+    // Unauthorized stranger: level -1, but NOT blacklisted (no record).
+    return ACL_BLACKLIST;
+}
+
+// TRUE only for an actor with an explicit blacklist (-1) record — distinguishes
+// the barred case from the unauthorized-stranger case (both resolve to -1).
+integer actor_is_blacklisted(key avatar) {
+    return ((integer)llLinksetDataRead(USER_PREFIX + (string)avatar) == ACL_BLACKLIST);
 }
 
 /* -------------------- SESSION MANAGEMENT -------------------- */
@@ -157,17 +207,14 @@ cleanup_session(key user) {
     llMessageLinked(LINK_SET, DIALOG_BUS, close_msg, NULL_KEY);
 
     SessionUsers = llDeleteSubList(SessionUsers, idx, idx);
-    SessionACLs = llDeleteSubList(SessionACLs, idx, idx);
-    SessionBlacklisted = llDeleteSubList(SessionBlacklisted, idx, idx);
     SessionPages = llDeleteSubList(SessionPages, idx, idx);
     SessionTotalPages = llDeleteSubList(SessionTotalPages, idx, idx);
     SessionIDs = llDeleteSubList(SessionIDs, idx, idx);
-    SessionCreatedTimes = llDeleteSubList(SessionCreatedTimes, idx, idx);
     SessionContexts = llDeleteSubList(SessionContexts, idx, idx);
     SessionCategories = llDeleteSubList(SessionCategories, idx, idx);
 }
 
-create_session(key user, integer acl, integer is_blacklisted, string context_filter) {
+create_session(key user, string context_filter) {
     integer existing_idx = find_session_idx(user);
     if (existing_idx != -1) {
         cleanup_session(user);
@@ -179,15 +226,11 @@ create_session(key user, integer acl, integer is_blacklisted, string context_fil
     }
 
     string session_id = generate_session_id(user);
-    integer created_time = llGetUnixTime();
 
     SessionUsers += [user];
-    SessionACLs += [acl];
-    SessionBlacklisted += [is_blacklisted];
     SessionPages += [0];
     SessionTotalPages += [0];
     SessionIDs += [session_id];
-    SessionCreatedTimes += [created_time];
     SessionContexts += [context_filter];
     SessionCategories += [""];
 }
@@ -370,13 +413,14 @@ send_message(key user, string message_text) {
     llMessageLinked(LINK_SET, UI_BUS, msg, NULL_KEY);
 }
 
-// Render the session's current tier from the LSD view. One LSD read per
-// render; pairs are [ctx,label] JSON arrays straight from the view.
+// Render the session's current tier from the LSD view. ACL is resolved live
+// from the table here — one read, always current. One LSD read for the view;
+// pairs are [ctx,label] JSON arrays straight from the view.
 render_session(key user) {
     integer session_idx = find_session_idx(user);
     if (session_idx == -1) return;
 
-    integer acl = llList2Integer(SessionACLs, session_idx);
+    integer acl = resolve_acl(user);
     string menu_type = llList2String(SessionContexts, session_idx);
     string category = llList2String(SessionCategories, session_idx);
 
@@ -408,15 +452,12 @@ render_session(key user) {
             return;
         }
 
-        integer user_acl = llList2Integer(SessionACLs, session_idx);
-        integer is_blacklisted = llList2Integer(SessionBlacklisted, session_idx);
-
         if (menu_type == SOS_CONTEXT) {
             send_message(user, "No emergency options are currently available.");
         }
         else {
-            if (user_acl == -1) {
-                if (is_blacklisted) {
+            if (acl == ACL_BLACKLIST) {
+                if (actor_is_blacklisted(user)) {
                     send_message(user, "You have been barred from using this collar.");
                 }
                 else {
@@ -429,7 +470,7 @@ render_session(key user) {
                     }
                 }
             }
-            else if (user_acl == 0) {
+            else if (acl == ACL_NOACCESS) {
                 send_message(user, "You have relinquished control of the collar.");
             }
             else {
@@ -521,11 +562,11 @@ string extract_subpath(string requested, string plugin_context) {
     return llGetSubString(requested, plen + 1, -1);
 }
 
-// Dispatch ui.menu.start to a specific plugin, with ACL from an existing session.
-// Policy is re-checked here (LSD read) as the authorization gate — the view
-// mask only governs visibility.
-dispatch_to_plugin(key user, string context, string subpath, integer session_idx) {
-    integer user_acl = llList2Integer(SessionACLs, session_idx);
+// Dispatch ui.menu.start to a specific plugin. ACL is resolved LIVE here and
+// the policy (acl.policycontext:<ctx>) is re-checked against it as the
+// authorization gate — the view mask only governs visibility.
+dispatch_to_plugin(key user, string context, string subpath) {
+    integer user_acl = resolve_acl(user);
     string policy = llLinksetDataRead("acl.policycontext:" + context);
     if (policy == "") {
         send_message(user, "Access denied.");
@@ -549,9 +590,8 @@ handle_button_click(key user, string button, string context) {
     integer session_idx = find_session_idx(user);
     if (session_idx == -1) return;
 
-    // Blacklist gate
-    integer is_blacklisted = llList2Integer(SessionBlacklisted, session_idx);
-    if (is_blacklisted) {
+    // Blacklist gate (resolved live).
+    if (actor_is_blacklisted(user)) {
         send_message(user, "You have been barred from using this collar.");
         cleanup_session(user);
         return;
@@ -603,78 +643,13 @@ handle_button_click(key user, string button, string context) {
     if (context != "") {
         integer i = llListFindList(PluginContexts, [context]);
         if (i != -1) {
-            dispatch_to_plugin(user, context, "", session_idx);
+            dispatch_to_plugin(user, context, "");
         }
         return;
     }
 }
 
 /* -------------------- MESSAGE HANDLERS -------------------- */
-
-// Called after a rebuild actually applies. Closes any open dialogs and drops
-// all sessions so the next touch re-creates them against the fresh views.
-invalidate_all_sessions() {
-    if (llGetListLength(SessionUsers) == 0) return;
-
-    integer i = 0;
-    integer len = llGetListLength(SessionIDs);
-    while (i < len) {
-        string session_id = llList2String(SessionIDs, i);
-        string close_msg = llList2Json(JSON_OBJECT, [
-            "type", "ui.dialog.close",
-            "session_id", session_id
-        ]);
-        llMessageLinked(LINK_SET, DIALOG_BUS, close_msg, NULL_KEY);
-        i += 1;
-    }
-
-    SessionUsers = [];
-    SessionACLs = [];
-    SessionBlacklisted = [];
-    SessionPages = [];
-    SessionTotalPages = [];
-    SessionIDs = [];
-    SessionCreatedTimes = [];
-    SessionContexts = [];
-    SessionCategories = [];
-
-    PendingAclAvatars = [];
-    PendingAclContexts = [];
-}
-
-handle_acl_result(string msg) {
-    if (!validate_required_fields(msg, ["avatar", "level", "is_blacklisted"])) return;
-
-    key avatar = (key)llJsonGetValue(msg, ["avatar"]);
-    integer level = (integer)llJsonGetValue(msg, ["level"]);
-    integer is_blacklisted = (integer)llJsonGetValue(msg, ["is_blacklisted"]);
-
-    integer idx = find_pending_acl_idx(avatar);
-    if (idx == -1) return;
-
-    string requested_context = llList2String(PendingAclContexts, idx);
-
-    PendingAclAvatars = llDeleteSubList(PendingAclAvatars, idx, idx);
-    PendingAclContexts = llDeleteSubList(PendingAclContexts, idx, idx);
-
-    if (requested_context == ROOT_CONTEXT || requested_context == SOS_CONTEXT) {
-        create_session(avatar, level, is_blacklisted, requested_context);
-        render_session(avatar);
-    }
-    else {
-        // Plugin context from chat dispatch — create root session for navigation,
-        // then dispatch directly to the plugin (with subpath if namespaced).
-        create_session(avatar, level, is_blacklisted, ROOT_CONTEXT);
-        integer session_idx = find_session_idx(avatar);
-        if (session_idx != -1) {
-            string matched = resolve_plugin_context(requested_context);
-            if (matched != "") {
-                string subpath = extract_subpath(requested_context, matched);
-                dispatch_to_plugin(avatar, matched, subpath, session_idx);
-            }
-        }
-    }
-}
 
 handle_start(string msg, key user_key) {
     // Messages with an acl field are already routed — destined for a plugin,
@@ -710,38 +685,19 @@ handle_start(string msg, key user_key) {
     }
     string subpath = extract_subpath(context, matched);
 
-    // Existing session — dispatch immediately using the session's ACL.
-    integer session_idx = find_session_idx(user_key);
-    if (session_idx != -1) {
-        dispatch_to_plugin(user_key, matched, subpath, session_idx);
-        return;
+    // Ensure a root session exists so the plugin's Back has somewhere to land,
+    // then dispatch immediately (ACL resolved live inside dispatch).
+    if (find_session_idx(user_key) == -1) {
+        create_session(user_key, ROOT_CONTEXT);
     }
-
-    // No session — queue ACL query, storing the original requested context
-    // so the subpath is preserved when handle_acl_result resumes dispatch.
-    integer pending_idx = find_pending_acl_idx(user_key);
-    if (pending_idx != -1) return;
-    PendingAclAvatars += [user_key];
-    PendingAclContexts += [context];
-    llMessageLinked(LINK_SET, AUTH_BUS, llList2Json(JSON_OBJECT, [
-        "type",   "auth.acl.query",
-        "avatar", (string)user_key
-    ]), NULL_KEY);
+    dispatch_to_plugin(user_key, matched, subpath);
 }
 
-// Open a menu session (root or SOS) for a user via the auth round-trip;
-// handle_acl_result creates the session and renders when the level lands.
+// Open a menu session (root or SOS) for a user. ACL is resolved synchronously
+// at render time — no auth round-trip, no pending queue.
 start_session(key user_key, string context_filter) {
-    integer idx = find_pending_acl_idx(user_key);
-    if (idx != -1) return;
-
-    PendingAclAvatars += [user_key];
-    PendingAclContexts += [context_filter];
-
-    llMessageLinked(LINK_SET, AUTH_BUS, llList2Json(JSON_OBJECT, [
-        "type", "auth.acl.query",
-        "avatar", (string)user_key
-    ]), NULL_KEY);
+    create_session(user_key, context_filter);
+    render_session(user_key);
 }
 
 handle_return(string msg) {
@@ -749,31 +705,19 @@ handle_return(string msg) {
     if (user_key_str == JSON_INVALID) return;
     key user_key = (key)user_key_str;
 
-    // Re-validate stale sessions
-    integer session_idx = find_session_idx(user_key);
-    if (session_idx != -1) {
-        integer created_time = llList2Integer(SessionCreatedTimes, session_idx);
-        integer age = llGetUnixTime() - created_time;
-
-        if (age > SESSION_MAX_AGE) {
-            string session_context = llList2String(SessionContexts, session_idx);
-            cleanup_session(user_key);
-            start_session(user_key, session_context);
-        }
-        else {
-            // Land on the tier the plugin was launched from (its category
-            // page, or root for Standalone plugins).
-            render_session(user_key);
-        }
+    // Land on the tier the plugin was launched from (its category page, or
+    // root). ACL is re-resolved live by render_session, so there is no
+    // staleness window to re-auth around.
+    if (find_session_idx(user_key) != -1) {
+        render_session(user_key);
     }
     else {
         start_session(user_key, ROOT_CONTEXT);
     }
 }
 
-// Force-close a user's open dialog and drop their session. Cached ACL is
-// dropped along with the session, so the next touch re-auths from scratch.
-// Primary caller: plugin_tpe on TPE acceptance.
+// Force-close a user's open dialog and drop their session. Primary caller:
+// plugin_tpe on TPE acceptance (an explicit process-end close).
 handle_close(string msg) {
     string user_key_str = llJsonGetValue(msg, ["user"]);
     if (user_key_str == JSON_INVALID) return;
@@ -820,17 +764,11 @@ default
         PluginContexts = [];
 
         SessionUsers = [];
-        SessionACLs = [];
-        SessionBlacklisted = [];
         SessionPages = [];
         SessionTotalPages = [];
         SessionIDs = [];
-        SessionCreatedTimes = [];
         SessionContexts = [];
         SessionCategories = [];
-
-        PendingAclAvatars = [];
-        PendingAclContexts = [];
 
         TouchKeys = [];
         TouchStartTimes = [];
@@ -946,23 +884,6 @@ default
             return;
         }
 
-        /* -------------------- AUTH BUS -------------------- */
-        if (num == AUTH_BUS) {
-            if (msg_type == "auth.acl.result") handle_acl_result(msg);
-            else if (msg_type == "auth.acl.update") {
-                // ACL roles changed (ownership, trustees, public, TPE, etc.)
-                // Invalidate all active sessions so they re-create with fresh ACL
-                // on next touch.
-                integer si = llGetListLength(SessionUsers) - 1;
-                while (si >= 0) {
-                    key sess_user = llList2Key(SessionUsers, si);
-                    cleanup_session(sess_user);
-                    si -= 1;
-                }
-            }
-            return;
-        }
-
         /* -------------------- UI BUS -------------------- */
         if (num == UI_BUS) {
             if (msg_type == "ui.menu.start") handle_start(msg, id);
@@ -983,7 +904,8 @@ default
     // Registry changes: any reg.* write/delete arms a debounced rebuild.
     // Our own ui.view.* writes don't match the prefix, so the rebuild can't
     // retrigger itself. A full LSD reset (factory wipe) also forces a
-    // rebuild so we don't hold onto dangling state.
+    // rebuild so we don't hold onto dangling state. Active sessions are NOT
+    // invalidated — they re-read the fresh view on the user's next click.
     linkset_data(integer action, string name, string value) {
         if (action == LINKSETDATA_RESET) {
             schedule_rebuild();
@@ -999,7 +921,6 @@ default
             ViewsStale = FALSE;
             llSetTimerEvent(0.0);
             rebuild_views();
-            invalidate_all_sessions();
         }
     }
 
