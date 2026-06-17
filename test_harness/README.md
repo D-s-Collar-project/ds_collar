@@ -1,10 +1,10 @@
-# LSL Test Harness for DS Collar v2.0
+# LSL Test Harness for D/s Collar v2.0
 
 A minimal, standalone LSL script testing environment extracted from OpenSimulator components. This allows testing LSL scripts without running a full 3D virtual world simulator.
 
 ## Purpose
 
-Test DS Collar scripts by:
+Test D/s Collar scripts by:
 - Compiling actual LSL code
 - Injecting events (touch, timer, link_message)
 - Capturing outputs (llOwnerSay, llMessageLinked, llDialog)
@@ -178,7 +178,7 @@ test_harness/
 │   ├── MockLSLApi.cs           # Mock LSL API functions
 │   ├── EventInjector.cs        # Event injection system
 │   └── OutputCapture.cs        # Capture script outputs
-├── DSCollarTests.csproj        # DS Collar test project
+├── DSCollarTests.csproj        # D/s Collar test project
 ├── DSCollarTests/
 │   ├── RoutingTests.cs         # Test routing system
 │   ├── ACLTests.cs             # Test ACL validation
@@ -224,4 +224,4 @@ When adding new tests:
 ## License
 
 Test harness components extracted from OpenSimulator are under BSD license.
-DS Collar test code follows the main project license.
+D/s Collar test code follows the main project license.

@@ -3,7 +3,7 @@ using Newtonsoft.Json.Linq;
 namespace DSCollarTests;
 
 /// <summary>
-/// Helper utilities for DS Collar testing
+/// Helper utilities for D/s Collar testing
 /// </summary>
 public static class TestHelpers
 {

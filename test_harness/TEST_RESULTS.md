@@ -1,7 +1,7 @@
 # Test Harness Results - Initial Run
 
 **Date:** November 13, 2025  
-**Test Suite:** DS Collar LSL Test Harness v1.0  
+**Test Suite:** D/s Collar LSL Test Harness v1.0  
 **Total Tests:** 21  
 **Passed:** 10 (48%)  
 **Failed:** 11 (52%)  
@@ -120,7 +120,7 @@ For full validation, deploy to OpenSim/SL after routing tests pass.
 
 **Even with 52% failure rate, the test harness provides SIGNIFICANT value:**
 
-1. **Validates routing logic** - The most complex and error-prone part of DS Collar
+1. **Validates routing logic** - The most complex and error-prone part of D/s Collar
 2. **Fast iteration** - Tests run in <2 seconds vs minutes for in-world testing
 3. **Regression detection** - Catches routing bugs before deployment
 4. **Session security** - Validates session management

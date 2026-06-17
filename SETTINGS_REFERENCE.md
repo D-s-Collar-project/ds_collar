@@ -1,6 +1,6 @@
-# DS Collar Settings Card Reference Guide
+# D/s Collar Settings Card Reference Guide
 
-**Version 1.0** — Comprehensive reference for the DS Collar Modular settings system
+**Version 1.0** — Comprehensive reference for the D/s Collar Modular settings system
 
 ---
 
@@ -16,7 +16,7 @@
 
 ## Overview
 
-The DS Collar Modular system uses a persistent **settings card** for configuration management. Despite the name "settings card," this is actually a sophisticated **JSON-based key-value store** that:
+The D/s Collar Modular system uses a persistent **settings card** for configuration management. Despite the name "settings card," this is actually a sophisticated **JSON-based key-value store** that:
 
 - **Initializes** from a notecard named `"settings"` in the collar inventory
 - **Caches** all settings in memory (RAM) for fast access
@@ -64,7 +64,7 @@ The collar uses a **three-tier persistence model**, not simple RAM-only storage:
 ### Example Settings Notecard
 
 ```
-# DS Collar Settings
+# D/s Collar Settings
 # Lines starting with # are comments
 
 # Owner Settings (Single Owner Mode)
@@ -347,7 +347,7 @@ owner = {"12345678-1234-1234-1234-123456789abc":"Master"}
 
 ```
 # ============================================================================
-# DS Collar Settings Notecard
+# D/s Collar Settings Notecard
 # Complete template with all available keys
 # ============================================================================
 

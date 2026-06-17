@@ -1,4 +1,4 @@
-# DS Collar Kmod Settings Technical Reference
+# D/s Collar Kmod Settings Technical Reference
 
 ## Settings Architecture
 

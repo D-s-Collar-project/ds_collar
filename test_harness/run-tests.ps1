@@ -1,4 +1,4 @@
-# DS Collar Test Harness - Build and Test Script
+# D/s Collar Test Harness - Build and Test Script
 # Run this to build and execute all tests
 
 param(
@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== DS Collar LSL Test Harness ===" -ForegroundColor Cyan
+Write-Host "=== D/s Collar LSL Test Harness ===" -ForegroundColor Cyan
 Write-Host ""
 
 # Check .NET installation

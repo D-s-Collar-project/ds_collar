@@ -5,7 +5,7 @@ using static DSCollarTests.TestHelpers;
 namespace DSCollarTests;
 
 /// <summary>
-/// Tests for DS Collar ACL (Access Control List) validation
+/// Tests for D/s Collar ACL (Access Control List) validation
 /// </summary>
 [TestFixture]
 public class ACLTests

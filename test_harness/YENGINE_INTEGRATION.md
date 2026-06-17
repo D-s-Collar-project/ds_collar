@@ -1,6 +1,6 @@
 # OpenSimulator YEngine Integration Guide
 
-**Goal:** Integrate OpenSimulator's YEngine LSL compiler and runtime into the DS Collar test harness for **full LSL script execution** instead of simplified pattern matching.
+**Goal:** Integrate OpenSimulator's YEngine LSL compiler and runtime into the D/s Collar test harness for **full LSL script execution** instead of simplified pattern matching.
 
 ---
 

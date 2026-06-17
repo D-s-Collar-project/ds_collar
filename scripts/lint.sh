@@ -1,5 +1,5 @@
 #!/bin/bash
-# LSL Linting Script for DS Collar Modular
+# LSL Linting Script for D/s Collar Modular
 # Usage: ./lint.sh [file|directory]
 # If no argument is provided, lints all .lsl files in src/
 

@@ -1,8 +1,8 @@
-# DS Collar LSL Test Harness - Quick Start Guide
+# D/s Collar LSL Test Harness - Quick Start Guide
 
 ## What You Have
 
-A complete, lightweight LSL testing framework that validates DS Collar scripts without needing a full Second Life/OpenSim simulator. Tests routing logic, ACL flows, and dialog interactions.
+A complete, lightweight LSL testing framework that validates D/s Collar scripts without needing a full Second Life/OpenSim simulator. Tests routing logic, ACL flows, and dialog interactions.
 
 ## Project Structure
 
@@ -54,7 +54,7 @@ OpenSim extraction is OPTIONAL and only needed if you want:
 - Real LSL type system
 - Advanced script execution
 
-**For DS Collar testing, the current implementation is SUFFICIENT.**
+**For D/s Collar testing, the current implementation is SUFFICIENT.**
 
 ### 3. Build Test Harness
 ```powershell
@@ -291,4 +291,4 @@ For issues or questions:
 
 **Version:** 1.0  
 **Created:** 2025-01-03  
-**DS Collar Modular Project**
+**D/s Collar Modular Project**

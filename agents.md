@@ -280,5 +280,5 @@ integer reset_listen() {
 
 **Document Version:** 2.0
 **Last Updated:** 2025-11-03
-**Maintained by:** DS Collar Modular Project
+**Maintained by:** D/s Collar Modular Project
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lint all files in the stable branch of DS Collar
+# Lint all files in the stable branch of D/s Collar
 
 set -e
 
@@ -8,7 +8,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STABLE_DIR="$PROJECT_ROOT/src/stable"
 
 echo "========================================"
-echo "Linting DS Collar Stable Branch"
+echo "Linting D/s Collar Stable Branch"
 echo "========================================"
 echo ""
 

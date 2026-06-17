@@ -1,4 +1,4 @@
-\# VS Code Copilot Instructions for DS Collar v2.0 Development
+\# VS Code Copilot Instructions for D/s Collar v2.0 Development
 
 
 
@@ -2058,7 +2058,7 @@ This snippet follows ALL the rules: proper naming, channel constants, JSON valid
 
 
 
-Every LSL script for DS Collar v2.0 should follow this exact order:
+Every LSL script for D/s Collar v2.0 should follow this exact order:
 
 
 

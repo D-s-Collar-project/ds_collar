@@ -146,7 +146,7 @@ public class EventInjector
 
     public void InjectLinkMessage(string scriptCode, int sender, int num, string msg, string id)
     {
-        // This is the critical event for DS Collar testing
+        // This is the critical event for D/s Collar testing
         // We need to simulate the routing logic execution
         
         // Extract link_message handler

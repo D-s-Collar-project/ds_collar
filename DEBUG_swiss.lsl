@@ -1,7 +1,7 @@
 /*--------------------
 THROWAWAY DEBUG TOOL — NOT part of the product. DELETE before any build/bundle.
 
-DS Collar Swiss-army debugger. Drop into ANY prim of the collar linkset (it
+D/s Collar Swiss-army debugger. Drop into ANY prim of the collar linkset (it
 shares the internal link-message bus, so it sees every ISP lane natively — the
 lanes are llMessageLinked(LINK_SET,...) and never leave the object, which is
 why this has to live IN the collar, not in a detached HUD).
@@ -307,7 +307,7 @@ show_main(key who) {
         "Roster", "Reg", "Views",
         "Flags", "Leash", "Sentinel",
         "Inject", "Verbose", "Scratch"];
-    llDialog(who, "DS Collar debugger — pick a probe.\ntap verbose=" + (string)TapVerbose
+    llDialog(who, "D/s Collar debugger — pick a probe.\ntap verbose=" + (string)TapVerbose
         + "  tap=" + (string)TapOn, b, DialogChan);
 }
 
@@ -326,7 +326,7 @@ default {
         if (CmdListen) llListenRemove(CmdListen);
         CmdListen = llListen(DEBUG_CMD_CHAN, "", llGetOwner(), "");
         LastT = llGetTime();
-        llOwnerSay("=== DS Collar Swiss debugger armed ===\n"
+        llOwnerSay("=== D/s Collar Swiss debugger armed ===\n"
             + "Type commands in chat, e.g.:  /9090 snapshot   /9090 tap on   "
             + "/9090 inject menu   /9090 inject acl   /9090 dump views");
     }

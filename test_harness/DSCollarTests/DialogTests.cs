@@ -5,7 +5,7 @@ using static DSCollarTests.TestHelpers;
 namespace DSCollarTests;
 
 /// <summary>
-/// Tests for DS Collar dialog system interactions
+/// Tests for D/s Collar dialog system interactions
 /// </summary>
 [TestFixture]
 public class DialogTests

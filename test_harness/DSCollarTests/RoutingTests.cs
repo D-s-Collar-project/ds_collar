@@ -5,7 +5,7 @@ using static DSCollarTests.TestHelpers;
 namespace DSCollarTests;
 
 /// <summary>
-/// Tests for DS Collar message routing system (STRICT mode)
+/// Tests for D/s Collar message routing system (STRICT mode)
 /// </summary>
 [TestFixture]
 public class RoutingTests

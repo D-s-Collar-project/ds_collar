@@ -5,7 +5,7 @@ namespace LSLTestHarness;
 
 /// <summary>
 /// Main test harness for LSL scripts. Provides script loading, event injection,
-/// and output capture for testing DS Collar scripts without a full simulator.
+/// and output capture for testing D/s Collar scripts without a full simulator.
 /// </summary>
 public class LSLTestHarness
 {

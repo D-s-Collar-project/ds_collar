@@ -505,7 +505,7 @@ link_message(integer sender, integer num, string str, key id) {
 
 ## 7) Versioning Specification
 
-**Official versioning scheme for DS Collar Modular project**
+**Official versioning scheme for D/s Collar Modular project**
 
 ### 7.1) Version Format
 
@@ -615,5 +615,5 @@ TODO: Known unimplemented or as-yet not developed functionality
 
 **Document Version:** 2.1
 **Last Updated:** 2025-11-11
-**Maintained by:** DS Collar Modular Project
+**Maintained by:** D/s Collar Modular Project
 
