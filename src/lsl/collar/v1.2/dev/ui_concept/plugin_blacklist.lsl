@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 8
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 8 (sandbox): main menu now renders via the menu service (pager mode, has_nav=1) instead of a raw ui.dialog.open — the nav row (<< >> Back) takes row0 so the +/-/Show action buttons sit in row1, not the nav row. Sheds the local Back button + layout. Handler unchanged (Back via top check, actions via main branch, inert <</>> redraw via fallback).
+- v1.2 rev 7 (sandbox): remove + add-scan pickers render via the menu service's ORDERED (OL) mode (ui.menu.render mode="ordered") instead of kmod_dialogs' numbered_list. Names go in the numbered body (display names exceed llDialog's 24-char button cap), buttons are index numbers, response is pick:<global-index> → Blacklist/CandidateKeys[idx] → UUID (index-keyed, no name-collision risk). Gains real paging (<</>> + CurrentPage; OL_PAGE_SIZE 9 must match kmod_menu); dropped the 11-item cap. Main menu + Show list unchanged.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 2: Read the user-record roster (kmod_settings rev 2): blacklist = user.<uuid> records with acl -1, enumerated name-sorted into parallel Blacklist/BlacklistNames caches on settings.sync. Names come from the record (no fallback chain needed). Mutation messages unchanged.
 - v1.2 rev 1: Show Blklst button (policy-gated, ACL 2-5); names captured at add-time ("name" field on settings.blacklist.add); sensor radius 5 → 20 m.
@@ -22,7 +24,9 @@ string PLUGIN_CONTEXT = "ui.core.blacklist";
 string PLUGIN_LABEL = "Blacklist";
 
 /* -------------------- CONSTANTS -------------------- */
-integer MAX_NUMBERED_LIST_ITEMS = 11;  // 12 dialog buttons - 1 Back button
+// OL picker page size = 12 slots - 3 nav (<<,>>,Back), no fixed buttons.
+// CROSS-MODULE: must match kmod_menu's ordered-mode content slot count.
+integer OL_PAGE_SIZE = 9;
 
 /* ACL levels for reference:
    -1 = Blacklisted
@@ -59,6 +63,7 @@ integer CurrentUserAcl = -999;
 list gPolicyButtons = [];
 string SessionId = "";
 string MenuContext = "";  // "main", "add_scan", "add_pick", "remove"
+integer CurrentPage = 0;  // page cursor for the OL pickers (remove / add_pick)
 
 // Sensor results
 list CandidateKeys = [];
@@ -196,10 +201,12 @@ show_main_menu() {
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, CurrentUserAcl);
 
     integer count = llGetListLength(Blacklist);
-    string body = "Blacklist Management\n\n";
-    body += "Currently blacklisted: " + (string)count;
+    string body = "Blacklist Management\n\nCurrently blacklisted: " + (string)count;
 
-    list button_data = [btn(BTN_BACK, "back")];
+    // Content buttons only (policy-gated). The menu service (pager mode) owns
+    // the nav row (<< >> Back) so actions never sit in row0; has_nav=1 keeps
+    // the full nav row even though this menu is a single page.
+    list button_data = [];
     if (btn_allowed("+Blacklist")) button_data += [btn(BTN_ADD, "add")];
     if (btn_allowed("-Blacklist")) button_data += [btn(BTN_REMOVE, "remove")];
     if (btn_allowed("Show Blklst")) button_data += [btn(BTN_SHOW, "show")];
@@ -207,17 +214,18 @@ show_main_menu() {
     SessionId = generate_session_id();
     MenuContext = "main";
 
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Blacklist",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
-    ]);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Blacklist",
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
+    ]), NULL_KEY);
 }
 
 // Chat subcommand handler. Enters the add-scan or remove-list flow as
@@ -236,6 +244,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         gPolicyButtons = [];
+        CurrentPage = 0;
         MenuContext = "add_scan";
         CandidateKeys = [];
         llSensor("", NULL_KEY, AGENT, BLACKLIST_RADIUS, PI);
@@ -248,6 +257,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         gPolicyButtons = [];
+        CurrentPage = 0;
         show_remove_menu();
         return;
     }
@@ -303,23 +313,23 @@ show_remove_menu() {
         return;
     }
 
-    list names = blacklist_names();
-
     SessionId = generate_session_id();
     MenuContext = "remove";
 
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "dialog_type", "numbered_list",
+    // OL picker: names go in the body (numbered) since display names can exceed
+    // the 24-char button cap; buttons are the index. blacklist_names() is
+    // parallel to Blacklist, so pick:<idx> maps straight back to the UUID.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "ordered",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Remove from Blacklist",
-        "prompt", "Select avatar to remove:",
-        "items", llList2Json(JSON_ARRAY, names),
-        "timeout", 60
-    ]);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Remove from Blacklist",
+        "body",       "Select an avatar to remove:",
+        "items",      llList2Json(JSON_ARRAY, blacklist_names()),
+        "page",       CurrentPage
+    ]), NULL_KEY);
 }
 
 show_add_candidates() {
@@ -329,10 +339,12 @@ show_add_candidates() {
         return;
     }
 
-    // Build list of names
+    // Display name for every candidate (OL pages them — no 11-item cap).
+    // names[] is parallel to CandidateKeys, so pick:<idx> maps to the UUID.
     list names = [];
     integer i = 0;
-    while (i < llGetListLength(CandidateKeys) && i < MAX_NUMBERED_LIST_ITEMS) {
+    integer n = llGetListLength(CandidateKeys);
+    while (i < n) {
         key k = (key)llList2String(CandidateKeys, i);
         string name = llGetDisplayName(k);
         if (name == "") name = (string)k;
@@ -343,18 +355,17 @@ show_add_candidates() {
     SessionId = generate_session_id();
     MenuContext = "add_pick";
 
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "dialog_type", "numbered_list",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "ordered",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Add to Blacklist",
-        "prompt", "Select avatar to blacklist:",
-        "items", llList2Json(JSON_ARRAY, names),
-        "timeout", 60
-    ]);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Add to Blacklist",
+        "body",       "Select an avatar to blacklist:",
+        "items",      llList2Json(JSON_ARRAY, names),
+        "page",       CurrentPage
+    ]), NULL_KEY);
 }
 
 /* -------------------- NAVIGATION -------------------- */
@@ -382,6 +393,7 @@ cleanup_session() {
     gPolicyButtons = [];
     SessionId = "";
     MenuContext = "";
+    CurrentPage = 0;
     CandidateKeys = [];
 }
 
@@ -397,7 +409,7 @@ handle_dialog_response(string msg) {
     string cmd = llJsonGetValue(msg, ["context"]);
     if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
 
-    // Handle Back button (context-routed or numbered_list Back)
+    // Back button: the main-menu "back" context, or the OL nav "Back" label.
     if (cmd == "back" || cmd == BTN_BACK) {
         if (MenuContext == "main") {
             return_to_root();
@@ -407,15 +419,64 @@ handle_dialog_response(string msg) {
         return;
     }
 
+    // OL picker (remove / add_pick): << >> page; pick:<idx> selects.
+    if (MenuContext == "remove" || MenuContext == "add_pick") {
+        integer cnt = llGetListLength(Blacklist);
+        if (MenuContext == "add_pick") cnt = llGetListLength(CandidateKeys);
+
+        if (cmd == "<<" || cmd == ">>") {
+            integer max_page = 0;
+            if (cnt > 0) max_page = (cnt - 1) / OL_PAGE_SIZE;
+            if (cmd == "<<") {
+                if (CurrentPage == 0) CurrentPage = max_page;
+                else CurrentPage -= 1;
+            }
+            else {
+                if (CurrentPage >= max_page) CurrentPage = 0;
+                else CurrentPage += 1;
+            }
+            if (MenuContext == "remove") show_remove_menu();
+            else show_add_candidates();
+            return;
+        }
+
+        if (llGetSubString(cmd, 0, 4) == "pick:") {
+            integer idx = (integer)llGetSubString(cmd, 5, -1);
+            if (idx >= 0 && idx < cnt) {
+                if (MenuContext == "remove") {
+                    send_blacklist_remove(llList2String(Blacklist, idx));
+                    llRegionSayTo(CurrentUser, 0, "Removed from blacklist.");
+                }
+                else {
+                    string entry = llList2String(CandidateKeys, idx);
+                    if (entry != "") {
+                        // Resolve the name NOW, while the avatar is in-region
+                        // from the sensor pass — kmod_settings persists it
+                        // alongside the UUID.
+                        string nm = llGetDisplayName((key)entry);
+                        if (nm == "") nm = llGetUsername((key)entry);
+                        send_blacklist_add(entry, nm);
+                        llRegionSayTo(CurrentUser, 0, "Added to blacklist.");
+                    }
+                }
+            }
+            show_main_menu();
+            return;
+        }
+        return;
+    }
+
     // Main menu actions
     if (MenuContext == "main") {
         if (cmd == "add") {
+            CurrentPage = 0;
             MenuContext = "add_scan";
             CandidateKeys = [];
             llSensor("", NULL_KEY, AGENT, BLACKLIST_RADIUS, PI);
             return;
         }
         if (cmd == "remove") {
+            CurrentPage = 0;
             show_remove_menu();
             return;
         }
@@ -423,36 +484,6 @@ handle_dialog_response(string msg) {
             show_list_menu();
             return;
         }
-    }
-
-    // Remove menu - numbered selection
-    if (MenuContext == "remove") {
-        integer idx = (integer)cmd - 1;
-        if (idx >= 0 && idx < llGetListLength(Blacklist)) {
-            send_blacklist_remove(llList2String(Blacklist, idx));
-            llRegionSayTo(CurrentUser, 0, "Removed from blacklist.");
-        }
-        show_main_menu();
-        return;
-    }
-
-    // Add pick menu - numbered selection
-    if (MenuContext == "add_pick") {
-        integer idx = (integer)cmd - 1;
-        if (idx >= 0 && idx < llGetListLength(CandidateKeys)) {
-            string entry = llList2String(CandidateKeys, idx);
-            if (entry != "") {
-                // Resolve the name NOW, while the avatar is in-region from
-                // the sensor pass (display name, username fallback) — this
-                // is what kmod_settings persists alongside the UUID.
-                string nm = llGetDisplayName((key)entry);
-                if (nm == "") nm = llGetUsername((key)entry);
-                send_blacklist_add(entry, nm);
-                llRegionSayTo(CurrentUser, 0, "Added to blacklist.");
-            }
-        }
-        show_main_menu();
-        return;
     }
 
     // Unknown context - return to main

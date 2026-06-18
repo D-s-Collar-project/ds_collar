@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -10,6 +10,7 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
 CHANGES:
+- v1.2 rev 7 (sandbox): RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (60→124) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -111,7 +112,7 @@ refresh_mode() {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "RLV";
-integer PLUGIN_ACL_MASK = 60;
+integer PLUGIN_ACL_MASK = 124;  // 60 (ACL 2-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     string policy = llList2Json(JSON_OBJECT, [

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 8
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -13,6 +13,8 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              @getpath at picker render; this plugin does NOT maintain any
              shadow lock vector.
 CHANGES:
+- v1.2 rev 8 (sandbox): RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (60→124) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
+- v1.2 rev 7 (sandbox): menu-service migration. show_folder_pick now renders via kmod_menu OL mode (ui.menu.render mode="ordered") + the `fixed` param for the Attach/Detach/Lock|Unlock action buttons — the first consumer of fixed-button OL, which resolves kmod_menu's deferred "flanking fixed-button" note (layout_buttons handles nav+fixed at the low slots, content above, NO padding). Shed the hand-rolled target_slots/padding block (~50 lines): worn/lock indicators now ride in each item's label, breadcrumb+legend stay as the body, the page counter moves to the title. Nav realigned from context (prev/next/back) to button-label (<< >> Back) since the service renders nav as plain buttons (empty context); actions + pick:<idx> still route by context. Browse/drill/lock logic unchanged.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -91,7 +93,7 @@ integer btn_allowed(string label) {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "Avatar";
-integer PLUGIN_ACL_MASK = 60;
+integer PLUGIN_ACL_MASK = 124;  // 60 (ACL 2-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     // Per-button visibility policy. Was written straight to LSD here; now
@@ -316,11 +318,11 @@ string worn_indicator(string raw) {
     return "[ ]";
 }
 
-// Shows a paginated numbered list of subfolders at CurrentPath plus, when
-// at a subfolder, inline action buttons (Attach / Detach / Lock|Unlock)
-// that operate on CurrentPath. Tapping a numbered folder drills into it
-// directly — no action submenu. Layout: at root, 3 nav slots + 9 folder
-// slots; at subfolder, 3 nav + up to 3 action + 6 folder slots.
+// Renders the subfolders at CurrentPath via the menu service's OL mode: the
+// numbered folders pack above a nav row (<< >> Back) plus, at a subfolder, the
+// fixed action buttons (Attach / Detach / Lock|Unlock) that operate on
+// CurrentPath. Tapping a number drills into that subfolder. The worn/lock
+// indicators ride in each item's label; the service owns the slot layout.
 show_folder_pick(integer page) {
     integer at_subfolder = (CurrentPath != "");
 
@@ -363,12 +365,21 @@ show_folder_pick(integer page) {
     PickPage    = page;
     LastMaxPage = max_page;
 
-    integer start   = page * page_size;
-    integer end_idx = start + page_size;
-    if (end_idx > total) end_idx = total;
-    integer count = end_idx - start;
+    // Items: each label carries the worn indicator + name + lock mark; OL keys
+    // the click by index (pick:<global>), so the item's own context is unused.
+    list items = [];
+    integer i = 0;
+    while (i < total) {
+        string folder_name = llList2String(Folders, 2 * i);
+        string worn_ind    = worn_indicator(llList2String(Folders, 2 * i + 1));
+        string lock_mark   = "";
+        if (llListFindList(LockedNames, [full_path(folder_name)]) != -1) lock_mark = "*";
+        items += [worn_ind + " " + folder_name + lock_mark];
+        i += 1;
+    }
 
-    // Body text (natural 1..N order, top-to-bottom)
+    // Breadcrumb + legend; the menu service (OL) appends the numbered folder
+    // lines and moves the page counter into the title.
     string body = crumb;
     if (at_subfolder) {
         if (current_locked) body += "  (Locked)";
@@ -380,69 +391,24 @@ show_folder_pick(integer page) {
     }
     else {
         body += "Tap a number to open a subfolder.\n";
-        body += "[+]=worn  [-]=partial  *=locked\n";
-        body += "Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
-        integer k = 0;
-        while (k < count) {
-            integer stride_idx = 2 * (start + k);
-            string folder_name = llList2String(Folders, stride_idx);
-            string worn        = llList2String(Folders, stride_idx + 1);
-            string worn_ind    = worn_indicator(worn);
-            string lock_mark   = "";
-            if (llListFindList(LockedNames, [full_path(folder_name)]) != -1) lock_mark = "*";
-            body += (string)(k + 1) + ". " + worn_ind + " " + folder_name + lock_mark + "\n";
-            k += 1;
-        }
+        body += "[+]=worn  [-]=partial  *=locked";
     }
 
-    // Layout per project dialog convention (canonical: plugin_animate):
-    //   slots 0-2 : nav (<<, >>, Back)
-    //   slot 3-N  : action buttons (0 at root; 2 or 3 at subfolder per ACL)
-    //   remaining : folder content, slot-mapped top-to-bottom, left-to-right
-    //               so folder 1 is always top-left of the content area.
-    list button_data = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
-    button_data += action_buttons;
-    // Pad placeholder slots; llListReplaceList below overwrites each one.
-    // " " is the project's blank-slot filler (kmod_dialogs accepts it).
-    integer pad_i;
-    for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
-
-    integer first_content_slot = 3 + action_count;
-    integer total_buttons      = first_content_slot + count;
-
-    // Build target_slots in display order: row 4 (top) left→right, row 3,
-    // then row 2 (only slots not consumed by actions).
-    list target_slots = [];
-    if (total_buttons > 9)  target_slots += [9];
-    if (total_buttons > 10) target_slots += [10];
-    if (total_buttons > 11) target_slots += [11];
-    if (total_buttons > 6)  target_slots += [6];
-    if (total_buttons > 7)  target_slots += [7];
-    if (total_buttons > 8)  target_slots += [8];
-    if (first_content_slot <= 3 && total_buttons > 3) target_slots += [3];
-    if (first_content_slot <= 4 && total_buttons > 4) target_slots += [4];
-    if (first_content_slot <= 5 && total_buttons > 5) target_slots += [5];
-
-    integer ci = 0;
-    while (ci < count) {
-        integer slot     = llList2Integer(target_slots, ci);
-        integer item_idx = start + ci;
-        button_data = llListReplaceList(
-            button_data,
-            [btn((string)(ci + 1), "pick:" + (string)item_idx)],
-            slot, slot
-        );
-        ci += 1;
-    }
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
+    // OL via the menu service: the nav row (<< >> Back) + the fixed action
+    // buttons reserve the low slots; numbered folders pack above (no padding).
+    // The service slices the page off `page` and numbers them; action buttons
+    // return their own context, nav returns its arrow label.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "ordered",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "items",      llList2Json(JSON_ARRAY, items),
+        "fixed",      llList2Json(JSON_ARRAY, action_buttons),
+        "page",       page
     ]), NULL_KEY);
 }
 
@@ -551,10 +517,14 @@ handle_dialog_response(string msg) {
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
+    // Nav (<< >> Back) renders as plain buttons → empty context, so route nav
+    // by the button LABEL; actions + folder picks carry their own context.
+    string button = llJsonGetValue(msg, ["button"]);
+    if (button == JSON_INVALID) button = "";
 
     if (MenuContext != "pick") return;
 
-    if (ctx == "back") {
+    if (button == "Back" || ctx == "back") {
         // At root, exit the plugin. At a subfolder, pop one level and
         // re-scan so Back walks the user back up the path.
         if (CurrentPath == "") {
@@ -570,12 +540,12 @@ handle_dialog_response(string msg) {
     // Wrap-around paging per plugin_animate convention. LastMaxPage was
     // stashed by the most recent show_folder_pick render — current by the
     // time a click reaches us.
-    if (ctx == "prev") {
+    if (button == "<<") {
         if (PickPage == 0) show_folder_pick(LastMaxPage);
         else               show_folder_pick(PickPage - 1);
         return;
     }
-    if (ctx == "next") {
+    if (button == ">>") {
         if (PickPage >= LastMaxPage) show_folder_pick(0);
         else                         show_folder_pick(PickPage + 1);
         return;

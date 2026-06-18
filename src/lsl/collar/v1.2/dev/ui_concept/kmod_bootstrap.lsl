@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 CHANGES:
+- v1.2 rev 7 (sandbox): publish rlv.active to LSD in announce_status ("1"/"0" per RLV detection). CROSS-MODULE: kmod_ui reads it to hide RLV-required plugins (mask bit 0x40) when RLV is off. Written each boot (and re-detected on attach), so it tracks the real state.
 - v1.2 rev 6: Touch-guard. Clears boot.ready at boot start and sets it "1" at "Collar startup complete", so kmod_ui ignores touches until startup finishes. Automates the manual "don't touch until startup done" workaround — a touch mid-boot fires kmod_ui's menu render + view rebuild, piling concurrent LSD writes/bus traffic onto the plugin-registration window (which under load drops registrations and strands plugins from the menu). CROSS-MODULE CONTRACT: boot.ready, read by kmod_ui. Also tightened the RLV probe: 3 retries (was 10), first at +2s (was +5s), 30s deadline (was 60s) — caps the no-RLV touch-guard wait at 30s.
 - v1.2 rev 4: Card streaming is gated on settings.cardapplied, not the readiness sentinel. The notecard is an OVERRIDE, never a requirement: kmod_settings now stamps readiness (settings.bootstrapped) immediately and independently, so gating the stream on the readiness sentinel was both wrong (a missed handshake left readiness unstamped = no UI) and circular. We stream once per fresh boot (card present + settings.cardapplied unset) and the self-heal retry re-points to the same marker — now non-fatal, since readiness no longer waits on the card. Fixes "new owner / blank-card collar gets no UI".
 - v1.2 rev 3: Self-healing card-stream handshake. The 'starting' timer re-streams the card while the sentinel is still unset and a card is present, so a missed first settings.card.streamed (kmod_settings still resetting on a fresh owner-change boot) is recovered until kmod_settings processes one and stamps the sentinel. Fixes "new owner gets no UI" — the owner-change re-bootstrap path never exercised on an already-bootstrapped collar. Bounded by the sentinel check + bootstrap timeout.
@@ -348,12 +349,16 @@ check_bootstrap_complete() {
 }
 
 announce_status() {
-    // RLV Status
+    // RLV Status. Publish rlv.active to LSD (CROSS-MODULE: kmod_ui reads it to
+    // hide RLV-required plugins — mask bit 0x40 — when RLV is off). Written
+    // each boot (and re-detected on attach), so it tracks the real state.
     if (RlvActive) {
         sendIM("RLV: " + RlvVersion);
+        llLinksetDataWrite("rlv.active", "1");
     }
     else {
         sendIM("RLV: Not detected");
+        llLinksetDataWrite("rlv.active", "0");
     }
 
     if (!SettingsReceived) {

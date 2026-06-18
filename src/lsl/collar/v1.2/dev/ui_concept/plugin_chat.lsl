@@ -1,11 +1,13 @@
 /*--------------------
 PLUGIN: plugin_chat.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 8
 PURPOSE: Configuration UI for kmod_chat — change command prefix and toggle
          public chat (channel 0) listening.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 8 (sandbox): has_nav 0 → 1 so the menu service reserves the full nav row (<< >> Back) — Set Prefix/Channel/Toggle no longer spill into row0 (all menus need nav). Added a fallback redraw in handle_dialog_response for the now-present inert <</>> on this single-page menu.
+- v1.2 rev 7 (sandbox): render via kmod_menu (ui.menu.render) instead of ui.dialog.open — the plugin_bell model. show_main hands over content buttons only; kmod_menu adds the Back nav + layout. handle_dialog_response falls back to the button label for the nav Back (was the "back" context). Textbox prompts (Set Prefix/Channel) unchanged.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -214,19 +216,22 @@ show_main() {
                   "\n\nChannel " + (string)ChatChan + " is the private channel." +
                   "\nChannel 0 allows public commands.";
 
-    list button_data = [btn("Back", "back")];
+    // Content buttons only — kmod_menu adds the Back nav and lays out the rows.
+    list button_data = [];
     if (btn_allowed("Set Prefix"))    button_data += [btn("Set Prefix",   "set_prefix")];
     if (btn_allowed("Set Channel"))   button_data += [btn("Set Channel",  "set_channel")];
     if (btn_allowed("Toggle Public")) button_data += [btn(public_label,   "toggle_public")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.menu.render",
         "session_id", SessionId,
         "user", (string)CurrentUser,
+        "menu_type", PLUGIN_CONTEXT,
         "title", PLUGIN_LABEL,
         "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "category", PLUGIN_CATEGORY,
+        "has_nav", 1,
+        "buttons", llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -268,9 +273,14 @@ handle_dialog_response(string msg) {
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
+    // The nav Back arrives with an empty context — fall back to the label.
+    if (ctx == "") {
+        string navb = llJsonGetValue(msg, ["button"]);
+        if (navb != JSON_INVALID) ctx = navb;
+    }
 
     if (MenuContext == "main") {
-        if (ctx == "back") {
+        if (ctx == "Back") {
             return_to_root();
         }
         else if (ctx == "set_channel") {
@@ -303,6 +313,11 @@ handle_dialog_response(string msg) {
                 persist_public_chat(TRUE);
                 llRegionSayTo(CurrentUser, 0, "Public chat commands enabled.");
             }
+            show_main();
+        }
+        else {
+            // Unknown button (e.g. the inert << >> on a single-page menu) —
+            // just redraw.
             show_main();
         }
     }

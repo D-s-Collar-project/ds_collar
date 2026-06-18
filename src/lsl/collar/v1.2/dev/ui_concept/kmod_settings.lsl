@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 8
 PURPOSE: Validation guards, roster conversion, and LSD settings store
 CHANGES:
+- v1.2 rev 8 (sandbox): ownership changes now REBOOT the collar instead of a light settings.sync, split by ENTRY vs EXIT. ENTRY (handle_set_owner: add/transfer) → request_owner_reboot() = kernel.reset.soft: scripts reset, roster + notecard KEPT (the new owner inherits a working collar; the card's "only one" guard blocks any stale card owner re-streaming). EXIT (handle_clear_owner: release) → factory_reset() = notecard removed + LSD wiped, SAME as runaway: a released/fled wearer's collar is fully cleared because the dom's authority — and their card settings — cease to apply, and an emptied owner slot would otherwise let the card re-stream the owner back. Removed clear_owner_records (subsumed by the wipe). Boot-safe: card path seeds via card_add_owner → user_write, never these handlers; trustee/blacklist mutations keep the light sync.
 - v1.2 rev 7: Reset Config no longer has its own card parser. The bespoke path (snapshot owner+lock → llLinksetDataReset → request card re-stream → finalize_reset_config) was redundant with kmod_bootstrap (which owns card I/O) AND bricked: readiness was stamped only in finalize, which fired only after the card re-stream handshake completed — a stalled stream (e.g. bootstrap's `Streaming` in-flight guard stuck) left the sentinel unset = pre-boot brick. Now handle_reset_config just WIPES config (deletes every LSD key except user.* roster + access.isowned/multiowner + lock.locked + safeguard.last_owner) and broadcasts kernel.reset.factory — the standard boot rebuilds everything: plugins re-seed their OWN defaults (the config source; the card is NOT — see feedback_card_not_config_source), kmod_settings re-stamps readiness, kmod_bootstrap re-applies the card OVERRIDE if present / ignores if absent (the wipe cleared settings.cardapplied). Removed finalize_reset_config + the InResetConfig/ResetConfigKeys/ResetConfigValues state. Reload/card-edit paths unchanged.
 - v1.2 rev 6: The notecard is an OVERRIDE, never a requirement — decouple readiness from the card so a present-but-unstreamable card can't brick the UI. Two markers now: settings.bootstrapped (readiness; kmod_auth's gate) is stamped IMMEDIATELY in state_entry on any fresh boot (the old "card present → wait for settings.card.streamed" branch is gone — that branch left the sentinel unstamped forever on owner-change boots whose card handshake didn't land, so auth never went ready = no UI). New settings.cardapplied marker gates the card override: process_streamed_card + finalize_reset_config set it; Reload Settings / card-edit clear it (NOT the readiness sentinel, so the UI stays up through a reload); a wipe clears both so the card re-applies for a new owner. kmod_bootstrap now streams the card gated on settings.cardapplied, not the readiness sentinel.
 - v1.2 rev 3: Notecard I/O relocated to kmod_bootstrap (memory: rev 2 sat at 90.6% of the Mono budget and stack-heap-collided when it parsed). kmod_settings no longer reads the card: kmod_bootstrap streams each card line into LSD verbatim and signals "settings.card.streamed"; we convert in process_streamed_card() (normalize flag scalars, migrate_legacy_roster() rebuilds the user.* roster from the deposited access-roster and blacklist scratch keys via the retained card builders, deferred TPE guard, stamp sentinel, broadcast). kmod_settings stays the SOLE user.* writer (bootstrap only deposits scratch + scalar keys). Removed: parse_notecard_line, start_notecard_reading, the card-ownership manifest (record_card_key / apply_card_manifest_clear / finalize_card_manifest — migrate clears+rebuilds wholesale via delete_role), clear_owner_keys / clear_trustee_keys, csv_read / csv_write, the notecard dataserver branch, and the Notecard-reading globals (CardProvided, COMMENT_PREFIX, SEPARATOR, CARD_MULTI_OWNER, KEY_CARDMANIFEST). Reload Settings / Reset Config / card-edit now request a re-stream (settings.card.restream) instead of reading directly; no-card paths rebroadcast/finalize without touching the roster. Estimator: 90.6% -> 82.7%. The multiowner FEATURE is unchanged (KEY_MULTI_OWNER_MODE + is_multi_owner_mode + card_add_owner refusal all intact).
@@ -244,6 +245,20 @@ broadcast_settings_changed() {
     ]), NULL_KEY);
 }
 
+// Owner ADD / TRANSFER (owner.set) soft-reboots the collar: every script resets
+// and re-reads LSD with the roster + notecard KEPT, so the new ownership applies
+// cleanly everywhere — the "confirms everything" reinit, WITHOUT a card wipe (the
+// new owner inherits a working collar; the card's "only one" guard blocks any
+// stale card owner from re-streaming). EXITS (release/runaway) instead END
+// authority and factory-wipe. Supersedes the light settings.sync. Boot-safe: the
+// card path seeds owners via card_add_owner -> user_write, never this handler.
+request_owner_reboot() {
+    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+        "type", "kernel.reset.soft",
+        "from", "owner_change"
+    ]), NULL_KEY);
+}
+
 // Ask kmod_bootstrap to (re-)stream the notecard into LSD. It deposits the raw
 // card keys and replies with "settings.card.streamed", which we convert in
 // process_streamed_card(). Used for boot is implicit (bootstrap self-triggers);
@@ -462,11 +477,6 @@ integer set_owner_record(string uuid_str, string honorific) {
 
     request_name(uuid_str);
     return TRUE;
-}
-
-clear_owner_records() {
-    delete_role(5);
-    llLinksetDataDelete(KEY_ISOWNED);
 }
 
 integer add_trustee_internal(string uuid_str, string honorific) {
@@ -778,7 +788,8 @@ handle_set_owner(string msg) {
     if (uuid_str == JSON_INVALID || honorific == JSON_INVALID) return;
 
     if (set_owner_record(uuid_str, honorific)) {
-        broadcast_settings_changed();
+        // Owned-state change (add / transfer) — reboot, don't just sync.
+        request_owner_reboot();
     }
 }
 
@@ -787,8 +798,12 @@ handle_clear_owner() {
         llRegionSayTo(llGetOwner(), 0, "ERROR: Cannot clear owner via menu in multi-owner mode (notecard managed)");
         return;
     }
-    clear_owner_records();
-    broadcast_settings_changed();
+    // Release ends the owner's authority, so the collar is wiped entirely —
+    // card + roster + settings, SAME as runaway. The dom's settings cease to
+    // apply once released, and an emptied owner slot would otherwise let the
+    // card re-stream the owner straight back on a later reboot / Reset Config.
+    // The consent bit (plugin_owners) gates only the owner-auth step, not this.
+    factory_reset();
 }
 
 handle_add_trustee(string msg) {

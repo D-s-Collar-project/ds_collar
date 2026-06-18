@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.2 rev 7 (sandbox): RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (62→126) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -153,7 +154,7 @@ list reorder_item_buttons(list nav_buttons, list item_buttons) {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "RLV";
-integer PLUGIN_ACL_MASK = 62;
+integer PLUGIN_ACL_MASK = 126;  // 62 (ACL 1-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     // Per-button visibility policy (default-deny per ACL level). Was written

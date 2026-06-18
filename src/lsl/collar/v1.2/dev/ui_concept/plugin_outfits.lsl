@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 8
 PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -50,6 +50,8 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              click and hides those items for the rest of the session.
              No shared shadow lock vector between plugins.
 CHANGES:
+- v1.2 rev 8 (sandbox): menu-service migration. show_picker → kmod_menu OL mode + the `fixed` param (Help/Disable action buttons); outfit name+lock-mark ride the item label, page counter moves to title, the hand-rolled target_slots/padding block shed. show_disabled/show_empty/show_action → pager (has_nav=0, service supplies Back). Nav realigned from context (prev/next/back) to button-label (<< >> Back); actions + pick:<idx> still route by context. Browse/action logic unchanged. OUTFITS_ROOT stays "outfits" (the .outfits rename is a separate inventory call — @getinv can't enumerate dot-folders).
+- v1.2 rev 7 (sandbox): RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (62→126) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -127,7 +129,7 @@ integer btn_allowed(string label) {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "Avatar";
-integer PLUGIN_ACL_MASK = 62;
+integer PLUGIN_ACL_MASK = 126;  // 62 (ACL 1-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     // Per-button visibility policy. Was written straight to LSD here; now
@@ -336,69 +338,39 @@ show_picker(integer page) {
     PickPage    = page;
     LastMaxPage = max_page;
 
-    integer start_idx = page * page_size;
-    integer end_idx   = start_idx + page_size;
-    if (end_idx > total) end_idx = total;
-    integer count = end_idx - start_idx;
-
-    string body = "Outfits  (#RLV/" + OUTFITS_ROOT + ")\n";
+    string body = "Outfits  (#RLV/" + OUTFITS_ROOT + ")";
     if (total == 0) {
-        body += "\nNo outfits found.\nCreate subfolders under #RLV/" + OUTFITS_ROOT + ".";
-    } else {
-        body += "*=locked\nPage " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
-        integer k = 0;
-        while (k < count) {
-            string outfit_name = llList2String(Outfits, start_idx + k);
-            string mark = "";
-            if (llListFindList(LockedOutfits, [outfit_name]) != -1) mark = " *";
-            body += (string)(k + 1) + ". " + outfit_name + mark + "\n";
-            k += 1;
-        }
+        body += "\n\nNo outfits found.\nCreate subfolders under #RLV/" + OUTFITS_ROOT + ".";
+    }
+    else {
+        body += "\n*=locked";
     }
 
-    // Layout per project dialog convention (canonical: plugin_animate):
-    //   slots 0-2: nav (<<, >>, Back)
-    //   slot 3-N : action buttons (Help, optionally Disable)
-    //   remaining: outfit content, slot-mapped top→bottom, left→right.
-    //              ACL 1 (no Disable): slot 4 becomes content.
-    list button_data = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
-    button_data += action_buttons;
-    integer pad_i;
-    for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
-
-    integer first_content_slot = 3 + action_count;
-    integer total_buttons      = first_content_slot + count;
-
-    list target_slots = [];
-    if (total_buttons > 9)  target_slots += [9];
-    if (total_buttons > 10) target_slots += [10];
-    if (total_buttons > 11) target_slots += [11];
-    if (total_buttons > 6)  target_slots += [6];
-    if (total_buttons > 7)  target_slots += [7];
-    if (total_buttons > 8)  target_slots += [8];
-    if (first_content_slot <= 3 && total_buttons > 3) target_slots += [3];
-    if (first_content_slot <= 4 && total_buttons > 4) target_slots += [4];
-    if (first_content_slot <= 5 && total_buttons > 5) target_slots += [5];
-
-    integer ci = 0;
-    while (ci < count) {
-        integer slot = llList2Integer(target_slots, ci);
-        button_data = llListReplaceList(
-            button_data,
-            [btn((string)(ci + 1), "pick:" + (string)(start_idx + ci))],
-            slot, slot
-        );
-        ci += 1;
+    // Items: outfit name + lock mark; the OL service numbers them and returns
+    // pick:<global-index>. The page counter moves into the title.
+    list items = [];
+    integer i = 0;
+    while (i < total) {
+        string outfit_name = llList2String(Outfits, i);
+        string mark = "";
+        if (llListFindList(LockedOutfits, [outfit_name]) != -1) mark = " *";
+        items += [outfit_name + mark];
+        i += 1;
     }
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
+    // OL via the menu service: nav (<< >> Back) + the fixed Help/Disable action
+    // buttons reserve the low slots; numbered outfits pack above (no padding).
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "ordered",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "items",      llList2Json(JSON_ARRAY, items),
+        "fixed",      llList2Json(JSON_ARRAY, action_buttons),
+        "page",       page
     ]), NULL_KEY);
 }
 
@@ -411,19 +383,22 @@ show_disabled_menu() {
     body += "appearance freely. Re-enable to restore protection and ";
     body += "resume outfit browsing.";
 
+    // Pager (has_nav=0): the menu service supplies Back; content = Enable/Help.
     list button_data = [];
     if (btn_allowed("Disable")) button_data += [btn("Enable", "enable")];
     button_data += [btn("Help", "help")];
-    button_data += [btn("Back", "back")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    0,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -435,18 +410,21 @@ show_empty_menu() {
     body += "Create a subfolder under #RLV/" + OUTFITS_ROOT + " for\n";
     body += "each outfit, then return here. Tap Help for the setup\nnotecard.";
 
+    // Pager (has_nav=0): the menu service supplies Back; content = Help/Disable.
     list button_data = [btn("Help", "help")];
     if (btn_allowed("Disable")) button_data += [btn("Disable", "disable")];
-    button_data += [btn("Back", "back")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    0,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -467,6 +445,7 @@ show_action(string outfit_name) {
         body += "Lock   - toggle protection against removal";
     }
 
+    // Pager (has_nav=0): the menu service supplies Back; content = the actions.
     list button_data = [];
     if (btn_allowed("Add"))    button_data += [btn("Add",    "add")];
     if (btn_allowed("Wear"))   button_data += [btn("Wear",   "wear")];
@@ -475,16 +454,18 @@ show_action(string outfit_name) {
         if (is_locked) button_data += [btn("Lock: On",  "toggle_lock")];
         else           button_data += [btn("Lock: Off", "toggle_lock")];
     }
-    button_data += [btn("Back", "back")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    0,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -550,6 +531,10 @@ handle_dialog_response(string msg) {
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
+    // Nav (<< >> Back) renders as plain buttons → empty context; route nav by
+    // the button LABEL. Actions + pick:<idx> carry their own context.
+    string button = llJsonGetValue(msg, ["button"]);
+    if (button == JSON_INVALID) button = "";
 
     if (MenuContext == "empty") {
         if (ctx == "help") { give_setup_notecard(); show_empty_menu(); return; }
@@ -563,7 +548,7 @@ handle_dialog_response(string msg) {
             show_disabled_menu();
             return;
         }
-        if (ctx == "back") return_to_root();
+        if (button == "Back" || ctx == "back") return_to_root();
         return;
     }
 
@@ -579,18 +564,18 @@ handle_dialog_response(string msg) {
             return;
         }
         if (ctx == "help") { give_setup_notecard(); show_disabled_menu(); return; }
-        if (ctx == "back") return_to_root();
+        if (button == "Back" || ctx == "back") return_to_root();
         return;
     }
 
     if (MenuContext == "pick") {
-        if (ctx == "back") { return_to_root(); return; }
-        if (ctx == "prev") {
+        if (button == "Back" || ctx == "back") { return_to_root(); return; }
+        if (button == "<<") {
             if (PickPage == 0) show_picker(LastMaxPage);
             else               show_picker(PickPage - 1);
             return;
         }
-        if (ctx == "next") {
+        if (button == ">>") {
             if (PickPage >= LastMaxPage) show_picker(0);
             else                         show_picker(PickPage + 1);
             return;
@@ -616,7 +601,7 @@ handle_dialog_response(string msg) {
     }
 
     if (MenuContext == "action") {
-        if (ctx == "back")   { show_picker(PickPage); return; }
+        if (button == "Back" || ctx == "back") { show_picker(PickPage); return; }
         if (ctx == "add")    { apply_add(SelectedOutfit);    show_picker(PickPage); return; }
         if (ctx == "wear")   { apply_wear(SelectedOutfit);   show_picker(PickPage); return; }
         if (ctx == "remove") { apply_remove(SelectedOutfit); show_picker(PickPage); return; }

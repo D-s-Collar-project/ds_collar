@@ -1,12 +1,13 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy filtering (animation buttons are dynamic content).
 CHANGES:
+- v1.2 rev 7 (sandbox): render via the menu service's UNORDERED picker mode (ui.menu.render mode="unordered") instead of building the slot-mapped dialog locally. Hands kmod_menu the full anim list + [Stop] as a fixed button; kmod_menu A-Z-sorts, pages, and lays out. Deleted ~90 lines of hand-rolled slot mapping + the empty-case dialog. Anims are now alphabetized (was inventory order); page indicator moved to the title. Handler/events unchanged (still name-based). PAGE_SIZE 8 must match kmod_menu's 12-3-1.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -165,111 +166,50 @@ send_pong() {
 
 show_animation_menu(integer page) {
     SessionId = generate_session_id();
-    CurrentPage = page;
 
     integer total_anims = get_animation_count();
 
-    // Handle empty animation list
-    if (total_anims == 0) {
-        list buttons = ["Back"];
-        string buttons_json = llList2Json(JSON_ARRAY, buttons);
-
-        string msg = llList2Json(JSON_OBJECT, [
-            "type", "ui.dialog.open",
-            "session_id", SessionId,
-            "user", (string)CurrentUser,
-            "title", PLUGIN_LABEL,
-            "message", "No animations found in inventory.",
-            "buttons", buttons_json,
-            "timeout", 60
-        ]);
-
-        llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
-        return;
-    }
-
-    // Calculate page bounds
-    integer max_page = (total_anims - 1) / PAGE_SIZE;
-
-    // Clamp page
+    // Keep our own page cursor for the << >> wrap in handle_button_click;
+    // kmod_menu also clamps. PAGE_SIZE must match kmod_menu's unordered
+    // page_size = 12 - 3 nav - 1 fixed ([Stop]) = 8. CROSS-MODULE.
+    integer max_page = 0;
+    if (total_anims > 0) max_page = (total_anims - 1) / PAGE_SIZE;
     if (page < 0) page = 0;
     if (page > max_page) page = max_page;
     CurrentPage = page;
 
-    integer start_idx = page * PAGE_SIZE;
-    integer end_idx = start_idx + PAGE_SIZE - 1;
-    if (end_idx >= total_anims) end_idx = total_anims - 1;
-
-    // Fixed layout:
-    // Indices 0-2: Navigation (<<, >>, Back)
-    // Index 3: [Stop]
-    // Indices 4+: Animations (Sorted Top-to-Bottom, Left-to-Right)
-
-    // 1. Extract animations for this page
-    list page_anims = [];
-    integer i;
-    for (i = start_idx; i <= end_idx; i++) {
-        page_anims += [llGetInventoryName(INVENTORY_ANIMATION, i)];
+    // Hand the FULL anim list to the menu service (unordered mode): it A-Z
+    // sorts, pages, and lays out via the shared layout_buttons. [Stop] rides
+    // as a fixed button; the click returns the anim name to handle_button_click.
+    list items = [];
+    integer i = 0;
+    while (i < total_anims) {
+        items += [llGetInventoryName(INVENTORY_ANIMATION, i)];
+        i += 1;
     }
 
-    integer count = llGetListLength(page_anims);
-    integer total_buttons = 4 + count;
-
-    // 2. Initialize button list with placeholders
-    list final_buttons = ["<<", ">>", "Back", "[Stop]"];
-    integer p;
-    for (p = 0; p < count; p++) {
-        final_buttons += [""];
+    string body = "Select an animation to play.";
+    if (total_anims == 0) {
+        body = "No animations found in inventory.";
+    }
+    else if (LastPlayedAnim != "") {
+        body += "\nPlaying: " + LastPlayedAnim;
     }
 
-    // 3. Define visual rows (Top to Bottom)
-    // Row 4: 9, 10, 11
-    // Row 3: 6, 7, 8
-    // Row 2: 4, 5 (Index 3 is Stop)
-
-    list target_slots = [];
-
-    // Row 4
-    if (total_buttons > 9) target_slots += [9];
-    if (total_buttons > 10) target_slots += [10];
-    if (total_buttons > 11) target_slots += [11];
-
-    // Row 3
-    if (total_buttons > 6) target_slots += [6];
-    if (total_buttons > 7) target_slots += [7];
-    if (total_buttons > 8) target_slots += [8];
-
-    // Row 2
-    if (total_buttons > 4) target_slots += [4];
-    if (total_buttons > 5) target_slots += [5];
-
-    // 4. Map animations to slots
-    for (i = 0; i < count; i++) {
-        integer slot = llList2Integer(target_slots, i);
-        string anim = llList2String(page_anims, i);
-        final_buttons = llListReplaceList(final_buttons, [anim], slot, slot);
-    }
-
-    string buttons_json = llList2Json(JSON_ARRAY, final_buttons);
-
-    // Build message
-    string message = "Select an animation to play.\n";
-    message += "Page " + (string)(page + 1) + " of " + (string)(max_page + 1);
-    if (LastPlayedAnim != "") {
-        message += "\nPlaying: " + LastPlayedAnim;
-    }
-
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "unordered",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", PLUGIN_LABEL,
-        "message", message,
-        "buttons", buttons_json,
-        "timeout", 60
-    ]);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "items",      llList2Json(JSON_ARRAY, items),
+        "fixed",      llList2Json(JSON_ARRAY, [
+            llList2Json(JSON_OBJECT, ["label", "[Stop]", "context", "stop"])
+        ]),
+        "page",       CurrentPage
+    ]), NULL_KEY);
 }
 
 /* -------------------- CHAT SUBCOMMAND HANDLING -------------------- */

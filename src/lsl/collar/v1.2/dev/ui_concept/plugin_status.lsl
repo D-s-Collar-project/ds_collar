@@ -1,8 +1,9 @@
 /*--------------------
 PLUGIN: plugin_status.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 CHANGES:
+- v1.2 rev 7 (sandbox): render via kmod_menu (ui.menu.render) instead of building ui.dialog.open directly — the plugin_bell model. Hands over title + body only; kmod_menu owns the Back nav + layout. No behavior change (kmod_dialogs renders body, falls back to message); sheds the local button assembly.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. Status STILL declares its present-but-empty per-ACL policy (levels 1-5) — the kmod_ui dispatch gate authorizes on policy presence, so omitting it denied all access. See collar_kernel rev 6.
 - v1.2 rev 1: Owner/trustee display enumerates the user-record roster (user.<uuid>, rank-ordered) instead of the retired access.owner-/trustee- keys; mode label stays on the notecard-only access.multiowner policy flag.
 PURPOSE: Read-only collar status display for owners and observers
@@ -186,20 +187,21 @@ show_status_menu() {
 
     string status_report = build_status_report();
 
-    list buttons = ["Back"];
-    string buttons_json = llList2Json(JSON_ARRAY, buttons);
-
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Route through kmod_menu: hand over title + body only (no content
+    // buttons — status is view-only). kmod_menu adds the Back nav (category
+    // non-empty → Back, not Close) and forwards to kmod_dialogs. The click
+    // returns on DIALOG_BUS keyed by our session_id.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.menu.render",
         "session_id", SessionId,
         "user", (string)CurrentUser,
+        "menu_type", PLUGIN_CONTEXT,
         "title", PLUGIN_LABEL,
-        "message", status_report,
-        "buttons", buttons_json,
-        "timeout", 60
-    ]);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, msg, NULL_KEY);
+        "body", status_report,
+        "category", PLUGIN_CATEGORY,
+        "has_nav", 0,
+        "buttons", llList2Json(JSON_ARRAY, [])
+    ]), NULL_KEY);
 }
 
 /* -------------------- BUTTON HANDLING -------------------- */

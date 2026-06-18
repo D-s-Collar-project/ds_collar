@@ -1,8 +1,10 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 9
 CHANGES:
+- v1.2 rev 9 (sandbox): RLV-gated visibility. rebuild_views drops any plugin whose mask carries bit 0x40 (RLV-required) while rlv.active=="0" (published by kmod_bootstrap); linkset_data arms a rebuild when rlv.active changes. The ACL test (mask & 1<<lvl, lvl<=5) never touches bit 6, so per-level visibility is unchanged. Fail-open: absent/"1" shows everything.
+- v1.2 rev 8 (sandbox): render_session hands kmod_menu the FULL button list (not a pre-sliced page) — the menu service owns page slicing now (kmod_menu rev 7). kmod_ui still tracks current_page + total_pages for the <</>> wrap in handle_button_click; it just no longer slices. Step 1 of the shape-service split (menu service owns layout+paging).
 - v1.2 rev 7 (sandbox): ACL is now read DIRECTLY off the user-record table
   (resolve_acl mirrors kmod_auth route_acl_query rung-for-rung) instead of the
   async auth.acl.query round-trip. Sessions hold navigation state only; the ACL
@@ -102,6 +104,14 @@ string CAT_OTHER = "Other";
 // view IS the barred state, handled by the empty-menu message paths.
 integer VIEW_LEVEL_MIN = 0;
 integer VIEW_LEVEL_MAX = 5;
+
+// RLV gating: a plugin ORs mask bit 0x40 (bit 6, above the ACL bits 1-5) into
+// its PLUGIN_ACL_MASK to declare it needs RLV. When rlv.active (published by
+// kmod_bootstrap) reads "0", those plugins are dropped from every view. The
+// ACL test (mask & 1<<lvl, lvl<=5) never touches bit 6, so per-level
+// visibility is otherwise unchanged. Absent/"1" rlv.active = show (fail-open).
+integer MASK_RLV_REQUIRED = 0x40;
+string  KEY_RLV_ACTIVE    = "rlv.active";
 
 // Debounce window for linkset_data-driven rebuilds. Small enough to feel
 // instantaneous; large enough to collapse the bootstrap burst of N plugins
@@ -256,6 +266,9 @@ rebuild_views() {
     // member lists come out in reading order for free.
     list keys = llLinksetDataFindKeys("^reg\\.", 0, -1);
     integer prefix_len = llStringLength(LSD_REG_PREFIX);
+    // RLV-required plugins (mask bit 0x40) are dropped from every view while
+    // RLV is off. Read the state once; absent/"1" = show (fail-open).
+    integer rlv_off = (llLinksetDataRead(KEY_RLV_ACTIVE) == "0");
     list tab = [];
     integer i = 0;
     integer n = llGetListLength(keys);
@@ -267,7 +280,9 @@ rebuild_views() {
             string cat = llJsonGetValue(entry, ["cat"]);
             if (cat == JSON_INVALID) cat = "";
             integer mask = (integer)llJsonGetValue(entry, ["mask"]);
-            tab += [label, llGetSubString(k, prefix_len, -1), cat, mask];
+            if (!(rlv_off && (mask & MASK_RLV_REQUIRED))) {
+                tab += [label, llGetSubString(k, prefix_len, -1), cat, mask];
+            }
         }
         i += 1;
     }
@@ -490,13 +505,11 @@ render_session(key user) {
     SessionPages = llListReplaceList(SessionPages, [current_page], session_idx, session_idx);
     SessionTotalPages = llListReplaceList(SessionTotalPages, [total_pages], session_idx, session_idx);
 
+    // kmod_menu owns the page slice now — hand it the FULL list. current_page
+    // + total_pages are kept only for the nav wrap in handle_button_click.
     list button_data = [];
-    integer start_idx = current_page * MAX_FUNC_BTNS;
-    integer end_idx = start_idx + MAX_FUNC_BTNS;
-    if (end_idx > entry_count) end_idx = entry_count;
-
-    integer i = start_idx;
-    while (i < end_idx) {
+    integer i = 0;
+    while (i < entry_count) {
         string pair = llList2String(entries, i);
         // button_data carries context + default label. For toggleable
         // buttons (registered buttonconfig in kmod_dialogs), kmod_dialogs
@@ -912,6 +925,10 @@ default
             return;
         }
         if (llSubStringIndex(name, LSD_REG_PREFIX) == 0) {
+            schedule_rebuild();
+        }
+        // RLV detection result flips which RLV-gated plugins are visible.
+        else if (name == KEY_RLV_ACTIVE) {
             schedule_rebuild();
         }
     }

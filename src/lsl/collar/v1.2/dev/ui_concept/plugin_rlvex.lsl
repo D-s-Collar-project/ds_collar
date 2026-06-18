@@ -1,8 +1,9 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 CHANGES:
+- v1.2 rev 7 (sandbox): RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (56→120) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 1: Enumerate owners/trustees from the user-record roster (user.<uuid> acl 5/3) instead of the retired access.owner-/trustee- keys; single/multi owner mode branching collapses (OwnerKeys always holds every owner).
 PURPOSE: Manage RLV teleport and IM exceptions for owners and trustees
@@ -124,7 +125,7 @@ reconcile_all() {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "RLV";
-integer PLUGIN_ACL_MASK = 56;
+integer PLUGIN_ACL_MASK = 120;  // 56 (ACL 3-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     // Per-button visibility policy (default-deny per ACL level). Was written
