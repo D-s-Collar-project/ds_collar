@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 9
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 9 (sandbox): the read-only Show-Blklst listing now renders via the menu service's INFO mode (ui.menu.render mode="info"; kmod_menu rev 13) instead of the last raw ui.dialog.open — a single OK, no nav row (a display isn't navigated). The info "ok" routes like Back here (returns to the blacklist menu, since it's a sub-view). All blacklist dialogs now flow through kmod_menu.
 - v1.2 rev 8 (sandbox): main menu now renders via the menu service (pager mode, has_nav=1) instead of a raw ui.dialog.open — the nav row (<< >> Back) takes row0 so the +/-/Show action buttons sit in row1, not the nav row. Sheds the local Back button + layout. Handler unchanged (Back via top check, actions via main branch, inert <</>> redraw via fallback).
 - v1.2 rev 7 (sandbox): remove + add-scan pickers render via the menu service's ORDERED (OL) mode (ui.menu.render mode="ordered") instead of kmod_dialogs' numbered_list. Names go in the numbered body (display names exceed llDialog's 24-char button cap), buttons are index numbers, response is pick:<global-index> → Blacklist/CandidateKeys[idx] → UUID (index-keyed, no name-collision risk). Gains real paging (<</>> + CurrentPage; OL_PAGE_SIZE 9 must match kmod_menu); dropped the 11-item cap. Main menu + Show list unchanged.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
@@ -295,14 +296,15 @@ show_list_menu() {
     SessionId = generate_session_id();
     MenuContext = "show";
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Read-only listing → INFO mode (single OK, no nav row). OK returns to the
+    // blacklist main menu (it's a sub-view), handled in handle_dialog_response.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "info",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Blacklist",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, [btn(BTN_BACK, "back")]),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "title",      "Blacklist",
+        "body",       body
     ]), NULL_KEY);
 }
 
@@ -409,8 +411,10 @@ handle_dialog_response(string msg) {
     string cmd = llJsonGetValue(msg, ["context"]);
     if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
 
-    // Back button: the main-menu "back" context, or the OL nav "Back" label.
-    if (cmd == "back" || cmd == BTN_BACK) {
+    // Back / OK: the main-menu "back" context, the OL nav "Back" label, or the
+    // Show-Blklst info dialog's "ok". Main-menu Back exits to root; everything
+    // else (incl. the info OK, a sub-view) returns to the blacklist menu.
+    if (cmd == "back" || cmd == BTN_BACK || cmd == "ok") {
         if (MenuContext == "main") {
             return_to_root();
             return;

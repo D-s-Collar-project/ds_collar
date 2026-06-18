@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_sos.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Emergency wearer-accessible actions (OOC safety hatch)
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 7 (sandbox): menu-service migration. show_sos_menu → pager (ui.menu.render, has_nav=1; the GRADUATED actions — Unleash / Clear RLV / Clear Relay / Escape — are preserved as content, only the local Back drops to the service's nav row), show_runaway_confirm → modal mode (No-first, returns confirm/cancel — unchanged routing). Sends moved DIALOG_BUS→UI_BUS; the response handler now falls back to the button label for nav and redraws on the inert << >>; Back routes by "back"/"Back". Emergency action logic untouched.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -154,7 +155,7 @@ show_sos_menu() {
     // llDialog displays buttons in rows of 3, bottom-left to top-right.
     // Build buttons + matching body lines from policy so non-TPE wearers
     // (Runaway-only) don't see bullets for actions they can't take.
-    list button_data = [btn("Back", "back")];
+    list button_data = [];
     string body = "EMERGENCY ACCESS\n\nChoose an action:\n";
 
     if (btn_allowed("Unleash")) {
@@ -177,26 +178,25 @@ show_sos_menu() {
         body += "• Escape - Escape an abusive setting. Resets the collar to factory settings.";
     }
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Pager (has_nav=1): the service supplies the << >> Back nav row; content =
+    // the graduated emergency actions (preserved — never collapse to one action).
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "SOS Emergency",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "SOS Emergency",
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
-
 }
 
 show_runaway_confirm() {
     MenuContext = "runaway_confirm";
     SessionId = generate_session_id();
-
-    list button_data = [
-        btn("No", "cancel"),
-        btn("Yes", "confirm")
-    ];
 
     string body = "EMERGENCY ESCAPE\n\n";
     body += "This will remove ownership entirely and erase ALL collar settings. ";
@@ -204,14 +204,15 @@ show_runaway_confirm() {
     body += "This cannot be undone.\n\n";
     body += "Proceed?";
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Modal confirm: the service forces No (the safe choice) to slot 0 and
+    // returns confirm/cancel — what the runaway_confirm branch already routes on.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "modal",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Escape",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 30
+        "user",       (string)CurrentUser,
+        "title",      "Escape",
+        "body",       body
     ]), NULL_KEY);
 }
 
@@ -318,7 +319,7 @@ handle_button_click(string cmd) {
         return;
     }
 
-    if (cmd == "back") {
+    if (cmd == "back" || cmd == "Back") {
         return_to_root();
         return;
     }
@@ -345,6 +346,9 @@ handle_button_click(string cmd) {
         show_runaway_confirm();
         return;
     }
+
+    // Inert << >> on this single-page menu — redraw.
+    show_sos_menu();
 }
 
 /* -------------------- NAVIGATION -------------------- */
@@ -453,7 +457,9 @@ default {
                 if (response_session != SessionId) return;
 
                 string cmd = llJsonGetValue(msg, ["context"]);
-                if (cmd == JSON_INVALID) cmd = "";
+                // Nav (<< >> Back) renders as plain buttons with empty context →
+                // fall back to the button label so the handler can route them.
+                if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
                 handle_button_click(cmd);
                 return;
             }
