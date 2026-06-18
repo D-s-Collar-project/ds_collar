@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_tpe.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Manage TPE mode with wearer confirmation and owner oversight
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.2 rev 7 (sandbox): menu-service migration. The OFF→ON wearer-consent dialog now renders via the modal shape (ui.menu.render mode=modal, DIALOG_BUS→UI_BUS) — which keeps the arbitrary-user target (the prompt still goes to the WEARER, not the clicking owner) and returns context confirm/cancel, so handle_button_click is unchanged. The modal enforces No-first, correcting the old Yes-first ordering to match the project confirm convention. ON→OFF stays a silent direct toggle (no dialog). Dropped the now-unused btn() helper.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare reset write-storm); register now announces cat/mask/policy via kernel.register.declare and the kernel is the sole serial writer. Removed write_plugin_reg + the reset-handler reg/policy deletes (kept the plugin.<x>.state delete). Revision baseline normalized to rev 6. See collar_kernel rev 6.
 --------------------*/
 
@@ -45,11 +46,6 @@ string SessionId = "";
 key WearerKey = NULL_KEY;          // Owner of the collar (for confirmation)
 
 /* -------------------- HELPERS -------------------- */
-
-// Helper: create a button_data entry with label and command context
-string btn(string label, string cmd) {
-    return llList2Json(JSON_OBJECT, ["label", label, "context", cmd]);
-}
 
 string gen_session() {
     return (string)llGetKey() + "_" + (string)llGetUnixTime();
@@ -282,21 +278,17 @@ handle_tpe_click(key user, integer acl_level) {
 
         SessionId = gen_session();
 
-        list button_data = [
-            btn("Yes", "confirm"),
-            btn("No", "cancel")
-        ];
-
-        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-            "type", "ui.dialog.open",
+        // Modal confirm rendered to the WEARER (not the clicking owner): the menu
+        // service forces No-first and returns context confirm/cancel — which is
+        // exactly what handle_button_click already routes on, so it's unchanged.
+        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+            "type",       "ui.menu.render",
+            "mode",       "modal",
             "session_id", SessionId,
-            "user", (string)llGetOwner(),  // Send to WEARER, not CurrentUser
-            "title", "TPE Confirmation",
-            "body", msg_body,
-            "button_data", llList2Json(JSON_ARRAY, button_data),
-            "timeout", 60
+            "user",       (string)llGetOwner(),
+            "title",      "TPE Confirmation",
+            "body",       msg_body
         ]), NULL_KEY);
-
     }
 }
 

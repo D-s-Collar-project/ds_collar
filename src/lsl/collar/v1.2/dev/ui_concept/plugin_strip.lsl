@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 9
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.2 rev 9 (sandbox): nav-row consistency — show_category_menu has_nav 0→1 so the << >> Back row matches the rest of the UI; catch-all redraw for the inert << >> (the strip picker already pages).
 - v1.2 rev 8 (sandbox): menu-service migration. show_category_menu → pager (has_nav=0, service supplies Back); show_picker → kmod_menu OL mode — per-item display (ellipsized name [+@slot]) + lock mark ride the item label, page counter moves to title, the hand-rolled target_slots/padding block shed (no fixed buttons, page_size 9). Nav realigned from context (prev/next/back) to button-label (<< >> Back); categories + pick:<idx> still route by context. Strip logic + live @getstatusall lock detection unchanged.
 - v1.2 rev 7 (sandbox): RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (62→126) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
@@ -446,7 +447,7 @@ show_category_menu() {
     body += "Attachments: " + (string)(llGetListLength(WornAttach) / 2) + " strippable\n\n";
     body += "Choose category.";
 
-    // Pager (has_nav=0): the menu service supplies Back; content = the categories.
+    // Pager (has_nav=1: full << >> Back nav row; inert << >> redraw). Content = categories.
     list button_data = [
         btn("Layers",      "layers"),
         btn("Attachments", "attach")
@@ -460,7 +461,7 @@ show_category_menu() {
         "title",      PLUGIN_LABEL,
         "body",       body,
         "category",   PLUGIN_CATEGORY,
-        "has_nav",    0,
+        "has_nav",    1,
         "buttons",    llList2Json(JSON_ARRAY, button_data),
         "page",       0
     ]), NULL_KEY);
@@ -570,7 +571,8 @@ handle_dialog_response(string msg) {
     if (CurrentCategory == "") {
         if (ctx == "layers") { show_picker("L", 0); return; }
         if (ctx == "attach") { show_picker("A", 0); return; }
-        if (button == "Back" || ctx == "back") return_to_root();
+        if (button == "Back" || ctx == "back") { return_to_root(); return; }
+        show_category_menu();   // inert << >> — redraw
         return;
     }
 
