@@ -3,7 +3,7 @@ PLUGIN: plugin_status.lsl
 VERSION: 1.2
 REVISION: 8
 CHANGES:
-- v1.2 rev 8 (sandbox): nav-row consistency — has_nav 0→1 so the view-only status shows the same << >> Back row as every other menu (was a lone Back); catch-all redraw for the inert << >>.
+- v1.2 rev 8 (sandbox): status is an informational dialog, not a navigable menu — render via the new kmod_menu "info" mode (single OK, no nav row; see kmod_menu rev 13); OK closes the UI. Dropped the dead ui_return_root.
 - v1.2 rev 7 (sandbox): render via kmod_menu (ui.menu.render) instead of building ui.dialog.open directly — the plugin_bell model. Hands over title + body only; kmod_menu owns the Back nav + layout. No behavior change (kmod_dialogs renders body, falls back to message); sheds the local button assembly.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. Status STILL declares its present-but-empty per-ACL policy (levels 1-5) — the kmod_ui dispatch gate authorizes on policy presence, so omitting it denied all access. See collar_kernel rev 6.
 - v1.2 rev 1: Owner/trustee display enumerates the user-record roster (user.<uuid>, rank-ordered) instead of the retired access.owner-/trustee- keys; mode label stays on the notecard-only access.multiowner policy flag.
@@ -188,45 +188,25 @@ show_status_menu() {
 
     string status_report = build_status_report();
 
-    // Route through kmod_menu: hand over title + body only (no content
-    // buttons — status is view-only). has_nav=1 reserves the full << >> Back
-    // nav row (the project convention — every menu shows the same nav row); the
-    // inert << >> just redraw via the handler's catch-all. The click returns on
-    // DIALOG_BUS keyed by our session_id.
+    // Status is a view-only INFO dialog, not a navigable menu: render via the
+    // kmod_menu info mode — title + body + a single OK, no nav row. OK returns
+    // context "ok" on DIALOG_BUS and we close the UI.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.menu.render",
+        "mode", "info",
         "session_id", SessionId,
         "user", (string)CurrentUser,
         "menu_type", PLUGIN_CONTEXT,
         "title", PLUGIN_LABEL,
-        "body", status_report,
-        "category", PLUGIN_CATEGORY,
-        "has_nav", 1,
-        "buttons", llList2Json(JSON_ARRAY, [])
+        "body", status_report
     ]), NULL_KEY);
 }
 
 /* -------------------- BUTTON HANDLING -------------------- */
 
 handle_button_click(string button) {
-    if (button == "Back") {
-        ui_return_root();
-        cleanup_session();
-        return;
-    }
-
-    // Inert << >> on this view-only menu — redraw.
-    show_status_menu();
-}
-
-/* -------------------- UI NAVIGATION -------------------- */
-
-ui_return_root() {
-    string msg = llList2Json(JSON_OBJECT, [
-        "type", "ui.menu.return",
-        "user", (string)CurrentUser
-    ]);
-    llMessageLinked(LINK_SET, UI_BUS, msg, NULL_KEY);
+    // The info dialog's single OK closes the UI (info dialogs aren't navigable).
+    if (button == "OK") cleanup_session();
 }
 
 /* -------------------- SESSION CLEANUP -------------------- */

@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 12
+REVISION: 13
 CHANGES:
+- v1.2 rev 13 (sandbox): added the INFO mode (render_info) — a terminal informational dialog: title + body + a single OK button (context "ok"), NO nav row (info dialogs are not navigable menus, so they deliberately skip the << >> Back row). ok_label optional (default "OK"). First consumer: plugin_status. Other view-only displays (e.g. blacklist's list) can adopt it.
 - v1.2 rev 12 (sandbox): merged render_unordered + render_ordered into one render_list(msg, isOrdered) — they shared ~70% boilerplate (validate, reserve nav+fixed, page-math, layout_buttons, forward). isOrdered drives the only differences: UL(0) A-Z-sorts + names the buttons + returns context; OL(1) preserves order + numbers the buttons + appends a numbered body + returns pick:<index>. Wire stays descriptive: mode "unordered"/"ordered" dispatch to render_list(msg, FALSE/TRUE). OL's fix0/fix1 fields fold into the shared `fixed` list (no OL consumer used them). No behavior change for animate (UL) or blacklist (OL).
 - v1.2 rev 11 (sandbox): (1) UNORDERED mode now accepts {label,context} items (not just flat names) — sorts by label, returns the context, so a people-picker can show the name but return the UUID (no name-collision / truncation risk); flat-name items (animate) still work (label==context). (2) Added the MODAL mode (render_modal): forced Yes/No, NO nav row, No/cancel always at slot 0 (enforced in the service), rendered to an arbitrary target; returns context confirm/cancel. For plugin_owners (UL scans + modal confirms).
 - v1.2 rev 10 (sandbox): added the ORDERED picker mode (render_ordered). Items keep caller order, numbered 1..N (page-relative) as index buttons + a matching numbered body; context "pick:<global-index>". Nav (<<,>>,Back) + optional fixed action buttons (fix0/fix1, policy pre-checked by the plugin) reserve the low slots; content packs above them via the shared layout_buttons — NO padding (page_size = 12 - reserved). First consumer: plugin_blacklist (remove + add-scan). NOTE: a "flanking" fixed-button layout (fixed buttons straddling content) would need partial-page padding, which this system forbids — deferred until a fixed-button OL consumer exists.
@@ -341,6 +342,38 @@ render_modal(string msg) {
     ]), NULL_KEY);
 }
 
+// INFO mode: a terminal informational dialog — title + body + a single OK that
+// dismisses. NO nav row (it isn't a navigable menu, so it deliberately does NOT
+// get the << >> Back row every real menu shares). The click returns context
+// "ok"; the caller decides what that means (usually close the UI).
+render_info(string msg) {
+    if (!validate_required_fields(msg, ["user", "session_id"])) {
+        return;
+    }
+
+    key user = (key)llJsonGetValue(msg, ["user"]);
+    string session_id = llJsonGetValue(msg, ["session_id"]);
+
+    string ok_label = llJsonGetValue(msg, ["ok_label"]);
+    if (ok_label == JSON_INVALID) ok_label = "OK";
+    string title = llJsonGetValue(msg, ["title"]);
+    if (title == JSON_INVALID) title = "Info";
+    string body_text = llJsonGetValue(msg, ["body"]);
+    if (body_text == JSON_INVALID) body_text = "";
+
+    list button_data = [llList2Json(JSON_OBJECT, ["label", ok_label, "context", "ok"])];
+
+    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.dialog.open",
+        "session_id", session_id,
+        "user", (string)user,
+        "title", title,
+        "body", body_text,
+        "button_data", llList2Json(JSON_ARRAY, button_data),
+        "timeout", 60
+    ]), NULL_KEY);
+}
+
 show_message(string msg) {
     if (!validate_required_fields(msg, ["user", "message"])) {
         return;
@@ -375,11 +408,12 @@ default
                 // Mode-switch: each mode prepares its slots differently, then
                 // shares the one layout_buttons primitive. Default = pager.
                 // unordered/ordered share one render_list (the bit picks the
-                // flavor); modal + pager are their own renderers.
+                // flavor); modal, info, and pager are their own renderers.
                 string mode = llJsonGetValue(msg, ["mode"]);
                 if (mode == "unordered") render_list(msg, FALSE);
                 else if (mode == "ordered") render_list(msg, TRUE);
                 else if (mode == "modal") render_modal(msg);
+                else if (mode == "info") render_info(msg);
                 else render_menu(msg);
             }
             else if (msg_type == "ui.message.show") {
