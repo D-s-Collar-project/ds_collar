@@ -1,8 +1,11 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 9
 CHANGES:
+- v1.2 rev 9: nav-row consistency — has_nav 0→1 on all four menus so the << >> Back row matches the rest of the UI; added catch-all redraws in main/owner/trustee for the now-inert << >> (toggle menus already self-redraw to the parent).
+- v1.2 rev 8: menu-service migration. show_main / show_owner_menu / show_trustee_menu / show_toggle now render via the pager (ui.menu.render, has_nav=0; the service supplies Back), sends moved DIALOG_BUS→UI_BUS, local "Back" button dropped from each list. Content buttons keep their {label,context} so handle_button's ctx-routing is unchanged; the response handler maps the service's plain Back (button="Back", empty ctx) → "back" so the context-aware up-navigation (toggle→role menu→main→exit) is preserved. Exception logic untouched.
+- v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (56→120) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 1: Enumerate owners/trustees from the user-record roster (user.<uuid> acl 5/3) instead of the retired access.owner-/trustee- keys; single/multi owner mode branching collapses (OwnerKeys always holds every owner).
 PURPOSE: Manage RLV teleport and IM exceptions for owners and trustees
@@ -124,7 +127,7 @@ reconcile_all() {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "RLV";
-integer PLUGIN_ACL_MASK = 56;
+integer PLUGIN_ACL_MASK = 120;  // 56 (ACL 3-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     // Per-button visibility policy (default-deny per ACL level). Was written
@@ -264,18 +267,22 @@ show_main() {
 
     string body = "RLV Exceptions\n\nManage which restrictions can be bypassed by owners and trustees.";
 
-    list button_data = [btn("Back", "back")];
+    // Pager (has_nav=1; full << >> Back nav row, inert << >> redraw). Content =the roles.
+    list button_data = [];
     if (btn_allowed("Owner"))   button_data += [btn("Owner", "owner")];
     if (btn_allowed("Trustee")) button_data += [btn("Trustee", "trustee")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", PLUGIN_LABEL,
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -289,18 +296,22 @@ show_owner_menu() {
     if (ExOwnerIm) body += "IM: Allowed";
     else body += "IM: Denied";
 
-    list button_data = [btn("Back", "back")];
+    // Pager (has_nav=1; full << >> Back nav row, inert << >> redraw). Content =the toggles.
+    list button_data = [];
     if (btn_allowed("TP")) button_data += [btn("TP", "tp")];
     if (btn_allowed("IM")) button_data += [btn("IM", "im")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Owner Exceptions",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Owner Exceptions",
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -314,18 +325,22 @@ show_trustee_menu() {
     if (ExTrusteeIm) body += "IM: Allowed";
     else body += "IM: Denied";
 
-    list button_data = [btn("Back", "back")];
+    // Pager (has_nav=1; full << >> Back nav row, inert << >> redraw). Content =the toggles.
+    list button_data = [];
     if (btn_allowed("TP")) button_data += [btn("TP", "tp")];
     if (btn_allowed("IM")) button_data += [btn("IM", "im")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Trustee Exceptions",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Trustee Exceptions",
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -339,16 +354,20 @@ show_toggle(string role, string exception_type, integer current) {
     body += "Allow = Owner/trustee can bypass restrictions\n";
     body += "Deny = Normal restrictions apply";
 
-    list button_data = [btn("Back", "back"), btn("Allow", "allow"), btn("Deny", "deny")];
+    // Pager (has_nav=1; full << >> Back nav row, inert << >> redraw). Content =Allow / Deny.
+    list button_data = [btn("Allow", "allow"), btn("Deny", "deny")];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", role + " " + exception_type,
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      role + " " + exception_type,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -376,14 +395,17 @@ handle_button(string ctx) {
     if (MenuContext == "main") {
         if (ctx == "owner") show_owner_menu();
         else if (ctx == "trustee") show_trustee_menu();
+        else show_main();                 // inert << >> — redraw
     }
     else if (MenuContext == "owner") {
         if (ctx == "tp") show_toggle("Owner", "TP", ExOwnerTp);
         else if (ctx == "im") show_toggle("Owner", "IM", ExOwnerIm);
+        else show_owner_menu();           // inert << >> — redraw
     }
     else if (MenuContext == "trustee") {
         if (ctx == "tp") show_toggle("Trustee", "TP", ExTrusteeTp);
         else if (ctx == "im") show_toggle("Trustee", "IM", ExTrusteeIm);
+        else show_trustee_menu();         // inert << >> — redraw
     }
     else if (MenuContext == "Owner_TP") {
         if (ctx == "allow") {
@@ -542,7 +564,12 @@ default {
             if (type == "ui.dialog.response") {
                 if ((llJsonGetValue(msg, ["session_id"]) != JSON_INVALID) && (llJsonGetValue(msg, ["context"]) != JSON_INVALID)) {
                     if (llJsonGetValue(msg, ["session_id"]) == SessionId) {
-                        handle_button(llJsonGetValue(msg, ["context"]));
+                        // The menu service renders nav (Back) as a plain button →
+                        // empty context; map it to the legacy "back" context so
+                        // handle_button's context-aware up-navigation still fires.
+                        string resp_ctx = llJsonGetValue(msg, ["context"]);
+                        if (resp_ctx == "" && llJsonGetValue(msg, ["button"]) == "Back") resp_ctx = "back";
+                        handle_button(resp_ctx);
                     }
                 }
             }

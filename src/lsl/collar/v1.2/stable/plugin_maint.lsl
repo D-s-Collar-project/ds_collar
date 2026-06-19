@@ -1,8 +1,9 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 CHANGES:
+- v1.2 rev 7: menu-service migration (last raw-dialog plugin). show_main_menu → pager (ui.menu.render, has_nav=1; the maintenance actions are content, local Back dropped to the service nav row); the three Yes/No confirms (Reset Config / Clear Leash / Update Collar) → modal mode (No-first, returns confirm/cancel — unchanged routing). Sends moved DIALOG_BUS→UI_BUS; response handler falls back to the button label for nav, routes Back via "back"/"Back", and redraws on the inert << >>. View Settings / Access List stay on chat (long dumps exceed a dialog's 511-char body). Action logic untouched.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 1: Settings view enumerates owners/trustees from the user-record roster (user.<uuid>, rank-ordered, fmt_role_person_lines) instead of the retired access.owner-/trustee- keys; mode label stays on the notecard-only access.multiowner policy flag.
 PURPOSE: Maintenance and utility functions for collar management
@@ -126,7 +127,7 @@ show_main_menu() {
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, CurrentUserAcl);
 
     string body = "Maintenance:\n\n";
-    list button_data = [btn("Back", "back")];
+    list button_data = [];
 
     if (btn_allowed("View Settings"))    button_data += [btn("View Settings", "view_settings")];
     if (btn_allowed("Reload Settings"))  button_data += [btn("Reload Settings", "reload_settings")];
@@ -147,14 +148,19 @@ show_main_menu() {
 
     SessionId = generate_session_id();
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Pager (has_nav=1): the service supplies the << >> Back nav row; content =
+    // the maintenance actions.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Maintenance",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Maintenance",
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -310,19 +316,14 @@ show_reset_config_confirm() {
     MenuContext = "reset_config";
     SessionId = generate_session_id();
 
-    list button_data = [
-        btn("No", "cancel"),
-        btn("Yes", "confirm")
-    ];
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Modal confirm: No-first, returns confirm/cancel (handler routes by context).
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "modal",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Reset Config",
-        "body", "This will reset all settings except for ownership and lock state.\n\nIf you need out of an abusive collar, please use Runaway.",
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 30
+        "user",       (string)CurrentUser,
+        "title",      "Reset Config",
+        "body",       "This will reset all settings except for ownership and lock state.\n\nIf you need out of an abusive collar, please use Runaway."
     ]), NULL_KEY);
 }
 
@@ -351,19 +352,14 @@ show_clear_leash_confirm() {
     MenuContext = "clear_leash";
     SessionId = generate_session_id();
 
-    list button_data = [
-        btn("No", "cancel"),
-        btn("Yes", "confirm")
-    ];
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Modal confirm: No-first, returns confirm/cancel.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "modal",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Clear Leash",
-        "body", "Force-release the current leash?\n\nThis bypasses normal permission checks and clears any leash, including one held by a bad actor.\n\nAre you sure?",
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 30
+        "user",       (string)CurrentUser,
+        "title",      "Clear Leash",
+        "body",       "Force-release the current leash?\n\nThis bypasses normal permission checks and clears any leash, including one held by a bad actor.\n\nAre you sure?"
     ]), NULL_KEY);
 }
 
@@ -417,24 +413,19 @@ show_update_confirm() {
     MenuContext = "update_confirm";
     SessionId = generate_session_id();
 
-    list button_data = [
-        btn("No", "cancel"),
-        btn("Yes", "confirm")
-    ];
-
     string body = "Updater found.\n\n";
     body += "Updater: " + (string)UpdateScanUpdater + "\n";
     body += "Version: " + UpdateScanVersion + "\n\n";
     body += "Begin update? Your collar will receive new scripts.";
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Modal confirm: No-first, returns confirm/cancel.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "modal",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Update Collar",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "title",      "Update Collar",
+        "body",       body
     ]), NULL_KEY);
 }
 
@@ -545,10 +536,12 @@ handle_dialog_response(string msg) {
     if (session != SessionId) return;
 
     string cmd = llJsonGetValue(msg, ["context"]);
-    if (cmd == JSON_INVALID) cmd = "";
+    // Nav (<< >> Back) renders as plain buttons with empty context → fall back
+    // to the button label so the handler can route them.
+    if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
 
     // Navigation
-    if (cmd == "back") {
+    if (cmd == "back" || cmd == "Back") {
         if (MenuContext != "main") {
             show_main_menu();
         }
@@ -630,6 +623,9 @@ handle_dialog_response(string msg) {
         do_start_update_scan();
         return;
     }
+
+    // Inert << >> on the main pager — redraw.
+    show_main_menu();
 }
 
 handle_dialog_timeout(string msg) {

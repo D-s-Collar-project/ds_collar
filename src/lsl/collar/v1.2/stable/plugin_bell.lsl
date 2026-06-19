@@ -1,11 +1,12 @@
 /*--------------------
 PLUGIN: plugin_bell.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 9
 PURPOSE: Bell visibility and jingling control for the collar
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility,
   namespaced internal message protocol
 CHANGES:
+- v1.2 rev 9: has_nav 0 → 1 so the menu service reserves the full nav row (<< >> Back) — toggle buttons no longer spill into row0 (all menus need nav). Added a fallback redraw in handle_button_click for the now-present inert <</>> on this single-page menu.
 - v1.2 rev 8: show/hide ALL prims whose description contains "bell", not just the first. set_bell_visibility walked the linkset once, cached the first match in BellLink, and only toggled that one prim — so a multi-prim bell only half-showed. Now toggles every match each call (mirrors plugin_lock's set_lock_prims); removed the BellLink cache + its CHANGED_LINK invalidation.
 - v1.2 rev 7: bell prim now matched by DESCRIPTION (case-insensitive substring "bell") instead of link name == "bell", the same convention as the leashpoint prim — frees the prim NAME for designers.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (the self-declare write-storm that stranded plugins on reset). register_self now ANNOUNCES cat/mask/policy in kernel.register.declare; the kernel is the sole serial writer. Removed write_plugin_reg helper + the reset-handler LSD deletes (kernel owns clearing). See collar_kernel rev 6.
@@ -116,14 +117,21 @@ show_menu(string context, string title, string body, list button_data) {
     SessionId = generate_session_id();
     MenuContext = context;
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // UI-CONCEPT: route through kmod_menu instead of building the dialog
+    // ourselves. We hand over only the CONTENT buttons + title/body; kmod_menu
+    // adds the Back nav, reverse-orders the content per the dialog convention,
+    // and forwards to kmod_dialogs. "category" non-empty makes the nav a Back
+    // (vs Close). The click still returns by session_id.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.menu.render",
         "session_id", SessionId,
         "user", (string)CurrentUser,
+        "menu_type", PLUGIN_CONTEXT,
         "title", title,
         "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "category", PLUGIN_CATEGORY,
+        "has_nav", 1,
+        "buttons", llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -193,10 +201,9 @@ show_main_menu() {
         sound_label = "Sound: Off";
     }
 
-    // Button order for layout:
-    // [Volume +] [Volume -] [.]
-    // [Back]     [Show: Y/N] [Sound: On/Off]
-    list button_data = [btn("Back", "back")];
+    // CONTENT buttons only, in top-to-bottom reading order — kmod_menu adds the
+    // Back nav and reverse-orders these. No per-plugin layout work anymore.
+    list button_data = [];
     if (btn_allowed("Show")) button_data += [btn(visible_label, "toggle_visible")];
     if (btn_allowed("Sound")) button_data += [btn(sound_label, "toggle_sound")];
     if (btn_allowed("Volume +")) button_data += [btn("Volume +", "vol_up")];
@@ -319,11 +326,13 @@ handle_subpath(key user, integer acl_level, string subpath) {
 
 /* -------------------- BUTTON HANDLER -------------------- */
 handle_button_click(string msg) {
+    // Content buttons carry a context; nav buttons (Back) arrive with an empty
+    // context, so fall back to the button label for those.
     string cmd = llJsonGetValue(msg, ["context"]);
-    if (cmd == JSON_INVALID) cmd = llJsonGetValue(msg, ["button"]);
+    if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
 
     if (MenuContext == "main") {
-        if (cmd == "back") {
+        if (cmd == "Back") {
             return_to_root();
         }
         else if (cmd == "vol_up") {
@@ -359,6 +368,11 @@ handle_button_click(string msg) {
             } else {
                 llRegionSayTo(CurrentUser, 0, "Bell sound disabled.");
             }
+            show_main_menu();
+        }
+        else {
+            // Unknown button (e.g. the inert << >> on a single-page menu) —
+            // just redraw.
             show_main_menu();
         }
     }

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 9
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.2 rev 9: nav-row consistency — show_category_menu has_nav 0→1 so the << >> Back row matches the rest of the UI; catch-all redraw for the inert << >> (the strip picker already pages).
+- v1.2 rev 8: menu-service migration. show_category_menu → pager (has_nav=0, service supplies Back); show_picker → kmod_menu OL mode — per-item display (ellipsized name [+@slot]) + lock mark ride the item label, page counter moves to title, the hand-rolled target_slots/padding block shed (no fixed buttons, page_size 9). Nav realigned from context (prev/next/back) to button-label (<< >> Back); categories + pick:<idx> still route by context. Strip logic + live @getstatusall lock detection unchanged.
+- v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (62→126) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -149,7 +152,7 @@ list prealloc(integer n) {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "Avatar";
-integer PLUGIN_ACL_MASK = 62;
+integer PLUGIN_ACL_MASK = 126;  // 62 (ACL 1-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     // Per-button visibility policy. Was written straight to LSD here; now
@@ -444,20 +447,23 @@ show_category_menu() {
     body += "Attachments: " + (string)(llGetListLength(WornAttach) / 2) + " strippable\n\n";
     body += "Choose category.";
 
+    // Pager (has_nav=1: full << >> Back nav row; inert << >> redraw). Content = categories.
     list button_data = [
         btn("Layers",      "layers"),
-        btn("Attachments", "attach"),
-        btn("Back",        "back")
+        btn("Attachments", "attach")
     ];
 
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, button_data),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -483,76 +489,44 @@ show_picker(string category, integer page) {
     PickPage    = page;
     LastMaxPage = max_page;
 
-    integer start_idx = page * page_size;
-    integer end_idx   = start_idx + page_size;
-    if (end_idx > total) end_idx = total;
-    integer count = end_idx - start_idx;
-
     string body = header;
     body += locked_folders_line();
-    if (llGetListLength(DiscoveredLocked) > 0) body += "* = locked\n";
-    if (total == 0) {
-        body += "\nNothing to strip.";
-    } else {
-        body += "Page " + (string)(page + 1) + " of " + (string)(max_page + 1) + "\n\n";
-        integer k = 0;
-        while (k < count) {
-            integer item_idx = start_idx + k;
-            string mark = "";
-            if (category == "L") {
-                string layer_name = llList2String(WornLayers, item_idx);
-                if (llListFindList(DiscoveredLocked, ["L:" + layer_name]) != -1) mark = " *";
-                body += (string)(k + 1) + ". " + ellipsize(layer_name, 28) + mark + "\n";
-            } else {
-                string slot_name = llList2String(WornAttach, item_idx * 2);
-                if (llListFindList(DiscoveredLocked, ["A:" + slot_name]) != -1) mark = " *";
-                // Bound the whole "name @slot" display, not just the name -- the
-                // slot suffix was un-capped, so 9 long rows could exceed 512.
-                string disp = ellipsize(llList2String(WornAttach, item_idx * 2 + 1)
-                              + " @" + slot_name, 30);
-                body += (string)(k + 1) + ". " + disp + mark + "\n";
-            }
-            k += 1;
+    if (llGetListLength(DiscoveredLocked) > 0) body += "* = locked";
+    if (total == 0) body += "\n\nNothing to strip.";
+
+    // Items: per-item display (layer name, or "name @slot", ellipsized) + lock
+    // mark; the OL service numbers them and returns pick:<global-index>. The
+    // page counter moves into the title.
+    list items = [];
+    integer k = 0;
+    while (k < total) {
+        string mark = "";
+        if (category == "L") {
+            string layer_name = llList2String(WornLayers, k);
+            if (llListFindList(DiscoveredLocked, ["L:" + layer_name]) != -1) mark = " *";
+            items += [ellipsize(layer_name, 28) + mark];
         }
+        else {
+            string slot_name = llList2String(WornAttach, k * 2);
+            if (llListFindList(DiscoveredLocked, ["A:" + slot_name]) != -1) mark = " *";
+            // Bound the whole "name @slot" display (slot suffix was un-capped).
+            items += [ellipsize(llList2String(WornAttach, k * 2 + 1) + " @" + slot_name, 30) + mark];
+        }
+        k += 1;
     }
 
-    // Project dialog convention (canonical: plugin_animate):
-    //   slots 0-2 = nav (<<, >>, Back); slots 3-11 = content top→bottom.
-    list button_data = [btn("<<", "prev"), btn(">>", "next"), btn("Back", "back")];
-    integer pad_i;
-    for (pad_i = 0; pad_i < count; pad_i += 1) button_data += [btn(" ", " ")];
-
-    integer total_buttons = 3 + count;
-    list target_slots = [];
-    if (total_buttons > 9)  target_slots += [9];
-    if (total_buttons > 10) target_slots += [10];
-    if (total_buttons > 11) target_slots += [11];
-    if (total_buttons > 6)  target_slots += [6];
-    if (total_buttons > 7)  target_slots += [7];
-    if (total_buttons > 8)  target_slots += [8];
-    if (total_buttons > 3)  target_slots += [3];
-    if (total_buttons > 4)  target_slots += [4];
-    if (total_buttons > 5)  target_slots += [5];
-
-    integer ci = 0;
-    while (ci < count) {
-        integer slot = llList2Integer(target_slots, ci);
-        button_data = llListReplaceList(
-            button_data,
-            [btn((string)(ci + 1), "pick:" + (string)(start_idx + ci))],
-            slot, slot
-        );
-        ci += 1;
-    }
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type",        "ui.dialog.open",
-        "session_id",  SessionId,
-        "user",        (string)CurrentUser,
-        "title",       PLUGIN_LABEL,
-        "body",        body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout",     60
+    // OL via the menu service: nav (<< >> Back) reserves the low slots, numbered
+    // items pack above. No fixed buttons here (page_size 9).
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "ordered",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "items",      llList2Json(JSON_ARRAY, items),
+        "page",       page
     ]), NULL_KEY);
 }
 
@@ -589,21 +563,26 @@ handle_dialog_response(string msg) {
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
+    // Nav (<< >> Back) renders as plain buttons → empty context; route nav by
+    // the button LABEL. Categories + pick:<idx> carry their own context.
+    string button = llJsonGetValue(msg, ["button"]);
+    if (button == JSON_INVALID) button = "";
 
     if (CurrentCategory == "") {
         if (ctx == "layers") { show_picker("L", 0); return; }
         if (ctx == "attach") { show_picker("A", 0); return; }
-        if (ctx == "back")   return_to_root();
+        if (button == "Back" || ctx == "back") { return_to_root(); return; }
+        show_category_menu();   // inert << >> — redraw
         return;
     }
 
-    if (ctx == "back") { show_category_menu(); return; }
-    if (ctx == "prev") {
+    if (button == "Back" || ctx == "back") { show_category_menu(); return; }
+    if (button == "<<") {
         if (PickPage == 0) show_current_picker(LastMaxPage);
         else               show_current_picker(PickPage - 1);
         return;
     }
-    if (ctx == "next") {
+    if (button == ">>") {
         if (PickPage >= LastMaxPage) show_current_picker(0);
         else                         show_current_picker(PickPage + 1);
         return;

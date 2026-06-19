@@ -1,13 +1,16 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 9
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.2 rev 9: nav-row consistency — show_main has_nav 0→1 so the << >> Back row matches the rest of the UI (the category menu already paged); catch-all redraw for the inert << >>.
+- v1.2 rev 8: menu-service migration. show_main → pager (has_nav=0; actions + category buttons, service supplies Back). show_category_menu → pager (has_nav=1): hands the FULL [X]/[ ] toggle list and lets the service slice/page + title-suffix the page; click returns the bare @cmd. display_sit_targets → OL mode (object names in the numbered body, pick:<global-index> into SitCandidates). Nav realigned from context (prev_page/next_page/back) to button-label (<< >> Back); category toggles + sit picks route by context. Dropped reorder_item_buttons (the service's layout_buttons now does it). Restriction/sit/sittp logic unchanged.
+- v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (62→126) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -111,41 +114,6 @@ integer btn_allowed(string label) {
     return (llListFindList(gPolicyButtons, [label]) != -1);
 }
 
-/* -------------------- DIALOG LAYOUT HELPER -------------------- */
-// Lays out a dialog in the project's bottom-nav + top-to-bottom-L-R
-// content convention (canonical: plugin_animate, plugin_leash_target).
-// Caller provides 1-3 nav buttons (slots 0..nav_count-1) and 0..N content
-// items, which fill the remaining slots in visual top-to-bottom-L-R
-// order. No filler is left in the output when items consume all
-// qualifying slots (true for total <= 12 here).
-list reorder_item_buttons(list nav_buttons, list item_buttons) {
-    integer nav_count  = llGetListLength(nav_buttons);
-    integer item_count = llGetListLength(item_buttons);
-    integer total      = nav_count + item_count;
-
-    list reading_order = [9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2];
-    list slots = [];
-    integer ri = 0;
-    while (ri < 12) {
-        integer rs = llList2Integer(reading_order, ri);
-        if (rs < total && rs >= nav_count) slots += [rs];
-        ri++;
-    }
-
-    list final_buttons = nav_buttons;
-    integer p = 0;
-    while (p < item_count) { final_buttons += [btn(" ", " ")]; p++; }
-
-    integer i = 0;
-    while (i < item_count) {
-        integer slot = llList2Integer(slots, i);
-        final_buttons = llListReplaceList(final_buttons,
-            [llList2String(item_buttons, i)], slot, slot);
-        i++;
-    }
-    return final_buttons;
-}
-
 /* -------------------- LIFECYCLE -------------------- */
 
 // Self-declared menu presence. kmod_ui enumerates via llLinksetDataFindKeys
@@ -153,7 +121,7 @@ list reorder_item_buttons(list nav_buttons, list item_buttons) {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "RLV";
-integer PLUGIN_ACL_MASK = 62;
+integer PLUGIN_ACL_MASK = 126;  // 62 (ACL 1-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     // Per-button visibility policy (default-deny per ACL level). Was written
@@ -398,49 +366,28 @@ display_sit_targets() {
     SessionId = generate_session_id();
     MenuContext = "sit_select";
 
-    // Calculate pagination (9 items per page to leave room for nav buttons)
-    integer items_per_page = 9;
-    integer total_pages = (total_items + items_per_page - 1) / items_per_page;
-    integer start_idx = SitPage * items_per_page;
-    integer end_idx = start_idx + items_per_page;
-    if (end_idx > total_items) end_idx = total_items;
-
-    // Build numbered list body
-    string body = "Select object to sit on:\n\n";
-    integer i = start_idx;
-    integer display_num = 1;
-    while (i < end_idx) {
+    // OL picker: object names go in the numbered body (names can exceed the
+    // 24-char button cap); the click returns pick:<global-index> into the
+    // SitCandidates stride list. The service pages off SitPage.
+    list items = [];
+    integer i = 0;
+    while (i < total_items) {
         string obj_name = llList2String(SitCandidates, i * 2);
-        // Truncate long names for display
-        if (llStringLength(obj_name) > 20) {
-            obj_name = llGetSubString(obj_name, 0, 17) + "...";
-        }
-        body += (string)display_num + ". " + obj_name + "\n";
-        display_num = display_num + 1;
+        if (llStringLength(obj_name) > 28) obj_name = llGetSubString(obj_name, 0, 25) + "...";
+        items += [obj_name];
         i = i + 1;
     }
 
-    if (total_pages > 1) {
-        body += "\nPage " + (string)(SitPage + 1) + "/" + (string)total_pages;
-    }
-
-    list nav_buttons  = [btn("<<", "prev_page"), btn(">>", "next_page"), btn("Back", "back")];
-    list item_buttons = [];
-    i = 1;
-    while (i <= (end_idx - start_idx)) {
-        item_buttons += [btn((string)i, "sit_" + (string)i)];
-        i = i + 1;
-    }
-    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "ordered",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Force Sit",
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Force Sit",
+        "body",       "Select an object to sit on:",
+        "items",      llList2Json(JSON_ARRAY, items),
+        "page",       SitPage
     ]), NULL_KEY);
 }
 
@@ -477,7 +424,6 @@ show_main() {
     // Load policy-allowed buttons for this user's ACL level
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
-    list nav_buttons  = [btn("Back", "back")];
     list item_buttons = [];
 
     // Alphabetical by displayed label.
@@ -497,15 +443,20 @@ show_main() {
         body = "RLV Actions\n\nForce sit or unsit the wearer.";
     }
 
-    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Pager (has_nav=1: full << >> Back nav row — the project convention; the
+    // inert << >> redraw via the handler's catch-all). Content = the actions
+    // + category buttons.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", PLUGIN_LABEL,
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, item_buttons),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -525,17 +476,12 @@ show_category_menu(string cat_name, integer page_num) {
         return;
     }
 
-    // Calculate page bounds
-    integer start_idx = page_num * DIALOG_PAGE_SIZE;
-    integer end_idx = start_idx + DIALOG_PAGE_SIZE - 1;
-    if (end_idx >= total_items) {
-        end_idx = total_items - 1;
-    }
-
-    // Build item buttons with [X]/[ ] checkbox prefix per current state.
+    // ALL toggle buttons ([X]/[ ] checkbox prefix per current state); the menu
+    // service (pager, has_nav=1) slices the page, adds << >> Back, and suffixes
+    // the page count onto the title. The click returns the bare @cmd context.
     list item_buttons = [];
-    integer i = start_idx;
-    while (i <= end_idx) {
+    integer i = 0;
+    while (i < total_items) {
         string cmd   = llList2String(cat_cmds, i);
         string label = llList2String(cat_labels, i);
         if (restriction_idx(cmd) != -1) label = "[X] " + label;
@@ -544,21 +490,19 @@ show_category_menu(string cat_name, integer page_num) {
         i = i + 1;
     }
 
-    integer max_page = (total_items - 1) / DIALOG_PAGE_SIZE;
+    string body = "Active: " + (string)llGetListLength(Restrictions);
 
-    list nav_buttons = [btn("<<", "prev_page"), btn(">>", "next_page"), btn("Back", "back")];
-    list button_data = reorder_item_buttons(nav_buttons, item_buttons);
-
-    string body = cat_name + " (" + (string)(page_num + 1) + "/" + (string)(max_page + 1) + ")\n\nActive: " + (string)llGetListLength(Restrictions);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", cat_name,
-        "body", body,
-        "button_data", llList2Json(JSON_ARRAY, button_data),
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      cat_name,
+        "body",       body,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, item_buttons),
+        "page",       page_num
     ]), NULL_KEY);
 }
 
@@ -574,10 +518,14 @@ handle_dialog_response(string msg) {
     if (user != CurrentUser) return;
 
     string ctx = llJsonGetValue(msg, ["context"]);
+    // Nav (<< >> Back) renders as plain buttons → empty context; route nav by
+    // the button LABEL. Categories, toggles, and pick:<idx> carry their context.
+    string button = llJsonGetValue(msg, ["button"]);
+    if (button == JSON_INVALID) button = "";
 
     // Main menu
     if (MenuContext == "main") {
-        if (ctx == "back") {
+        if (button == "Back" || ctx == "back") {
             return_to_root();
         }
         else if (ctx == "cat_inventory") {
@@ -629,84 +577,52 @@ handle_dialog_response(string msg) {
             force_unsit();
             show_main();
         }
+        else {
+            // Inert << >> on this single-page menu — redraw.
+            show_main();
+        }
     }
     // Sit selection menu
     else if (MenuContext == "sit_select") {
-        if (ctx == "back") {
+        if (button == "Back" || ctx == "back") {
             show_main();
         }
-        else if (ctx == "prev_page") {
-            integer total_items = llGetListLength(SitCandidates) / 2;
-            integer items_per_page = 9;
-            integer max_page = (total_items - 1) / items_per_page;
-
-            if (SitPage == 0) {
-                SitPage = max_page;
-            }
-            else {
-                SitPage = SitPage - 1;
-            }
+        else if (button == "<<") {
+            integer max_page = (llGetListLength(SitCandidates) / 2 - 1) / 9;
+            if (SitPage == 0) SitPage = max_page;
+            else              SitPage = SitPage - 1;
             display_sit_targets();
         }
-        else if (ctx == "next_page") {
-            integer total_items = llGetListLength(SitCandidates) / 2;
-            integer items_per_page = 9;
-            integer max_page = (total_items - 1) / items_per_page;
-
-            if (SitPage >= max_page) {
-                SitPage = 0;
-            }
-            else {
-                SitPage = SitPage + 1;
-            }
+        else if (button == ">>") {
+            integer max_page = (llGetListLength(SitCandidates) / 2 - 1) / 9;
+            if (SitPage >= max_page) SitPage = 0;
+            else                     SitPage = SitPage + 1;
             display_sit_targets();
         }
-        else {
-            // Numbered button selection: context is "sit_N"
-            if (llGetSubString(ctx, 0, 3) == "sit_") {
-                integer button_num = (integer)llGetSubString(ctx, 4, -1);
-                if (button_num >= 1 && button_num <= 9) {
-                    integer items_per_page = 9;
-                    integer actual_idx = (SitPage * items_per_page) + (button_num - 1);
-                    integer list_idx = actual_idx * 2;  // Stride list: [name, key, ...]
-
-                    if (list_idx + 1 < llGetListLength(SitCandidates)) {
-                        key target = (key)llList2String(SitCandidates, list_idx + 1);
-                        force_sit_on(target);
-                        show_main();
-                    }
-                }
+        else if (llGetSubString(ctx, 0, 4) == "pick:") {
+            // OL pick: pick:<global-index> into the SitCandidates stride list.
+            integer list_idx = (integer)llGetSubString(ctx, 5, -1) * 2;
+            if (list_idx + 1 < llGetListLength(SitCandidates)) {
+                key target = (key)llList2String(SitCandidates, list_idx + 1);
+                force_sit_on(target);
+                show_main();
             }
         }
     }
     // Category menu
     else if (MenuContext == "category") {
-        if (ctx == "back") {
+        if (button == "Back" || ctx == "back") {
             show_main();
         }
-        else if (ctx == "prev_page") {
-            list cat_cmds = get_category_list(CurrentCategory);
-            integer total_items = llGetListLength(cat_cmds);
-            integer max_page = (total_items - 1) / DIALOG_PAGE_SIZE;
-
-            if (CurrentPage == 0) {
-                show_category_menu(CurrentCategory, max_page);
-            }
-            else {
-                show_category_menu(CurrentCategory, CurrentPage - 1);
-            }
+        else if (button == "<<") {
+            integer max_page = (llGetListLength(get_category_list(CurrentCategory)) - 1) / DIALOG_PAGE_SIZE;
+            if (CurrentPage == 0) show_category_menu(CurrentCategory, max_page);
+            else                  show_category_menu(CurrentCategory, CurrentPage - 1);
         }
-        else if (ctx == "next_page") {
-            list cat_cmds = get_category_list(CurrentCategory);
-            integer total_items = llGetListLength(cat_cmds);
-            integer max_page = (total_items - 1) / DIALOG_PAGE_SIZE;
-
-            if (CurrentPage >= max_page) {
-                show_category_menu(CurrentCategory, 0);
-            }
-            else {
-                show_category_menu(CurrentCategory, CurrentPage + 1);
-            }
+        else if (button == ">>") {
+            integer max_page = (llGetListLength(get_category_list(CurrentCategory)) - 1) / DIALOG_PAGE_SIZE;
+            if (CurrentPage >= max_page) show_category_menu(CurrentCategory, 0);
+            else                         show_category_menu(CurrentCategory, CurrentPage + 1);
         }
         else {
             // Context is the RLV command directly (e.g., "@detachall")

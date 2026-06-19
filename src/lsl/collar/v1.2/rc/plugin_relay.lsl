@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 9
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -10,6 +10,9 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
 CHANGES:
+- v1.2 rev 9: nav-row consistency — has_nav 0→1 on all three menus so the << >> Back row matches the rest of the UI (was a lone Back); the handler's existing catch-all redraws the inert << >>.
+- v1.2 rev 8: menu-service migration. show_main_menu / show_mode_menu / render_object_list now render via the pager (ui.menu.render, has_nav=0; the "Bound by" source list is an info pager — body + Back, no content buttons). message→body, the local "Back" dropped from each list (the service supplies it), sends moved DIALOG_BUS→UI_BUS. Buttons stay plain label strings — render_menu treats the list opaquely and the handler already routes by button label — so handle_button_click is unchanged. Mode/hardcore/safeword/source logic untouched. (Back still exits to root from every relay screen, as before.)
+- v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (60→124) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
 
@@ -111,7 +114,7 @@ refresh_mode() {
 // v1.2 categorized UI: menu category + per-ACL visibility mask (bit L =
 // visible at ACL level L). Consumed by kmod_ui's view rebuild.
 string PLUGIN_CATEGORY = "RLV";
-integer PLUGIN_ACL_MASK = 60;
+integer PLUGIN_ACL_MASK = 124;  // 60 (ACL 2-5) | 0x40 RLV-required: kmod_ui hides when rlv.active=0
 
 register_self() {
     string policy = llList2Json(JSON_OBJECT, [
@@ -174,21 +177,24 @@ show_main_menu() {
 
     string message = "RLV Relay Menu\nMode: " + mode_str();
 
-    list buttons = ["Back"];
+    // Pager (has_nav=1): full << >> Back nav row; content = the actions.
+    list buttons = [];
     if (btn_allowed("Mode"))                       buttons += ["Mode"];
     if (btn_allowed("Bound by..."))                buttons += ["Bound by..."];
     if (btn_allowed("Safeword") && !Hardcore)      buttons += ["Safeword"];
     if (btn_allowed("Unbind"))                     buttons += ["Unbind"];
 
-    string buttons_json = llList2Json(JSON_ARRAY, buttons);
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", PLUGIN_LABEL + " Menu",
-        "message", message,
-        "buttons", buttons_json,
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      PLUGIN_LABEL + " Menu",
+        "body",       message,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, buttons),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -198,7 +204,7 @@ show_mode_menu() {
 
     string message = "RLV Relay Mode: " + mode_str();
 
-    list buttons = ["Back", "OFF", "ASK", "ON"];
+    list buttons = ["OFF", "ASK", "ON"];
     if (Mode == MODE_ON) {
         if (Hardcore) {
             if (btn_allowed("HC OFF")) buttons += ["HC OFF"];
@@ -207,15 +213,19 @@ show_mode_menu() {
         }
     }
 
-    string buttons_json = llList2Json(JSON_ARRAY, buttons);
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Pager (has_nav=1: full << >> Back nav row; inert << >> redraw via the
+    // handler's catch-all). Content = the modes.
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Relay Mode",
-        "message", message,
-        "buttons", buttons_json,
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Relay Mode",
+        "body",       message,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, buttons),
+        "page",       0
     ]), NULL_KEY);
 }
 
@@ -256,16 +266,18 @@ render_object_list(string sources_json) {
         }
     }
 
-    list buttons = ["Back"];
-    string buttons_json = llList2Json(JSON_ARRAY, buttons);
-    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
+    // Info pager (has_nav=1 for nav-row consistency; the source list is the body).
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
         "session_id", SessionId,
-        "user", (string)CurrentUser,
-        "title", "Bound by",
-        "message", message,
-        "buttons", buttons_json,
-        "timeout", 60
+        "user",       (string)CurrentUser,
+        "menu_type",  PLUGIN_CONTEXT,
+        "title",      "Bound by",
+        "body",       message,
+        "category",   PLUGIN_CATEGORY,
+        "has_nav",    1,
+        "buttons",    llList2Json(JSON_ARRAY, []),
+        "page",       0
     ]), NULL_KEY);
 }
 
