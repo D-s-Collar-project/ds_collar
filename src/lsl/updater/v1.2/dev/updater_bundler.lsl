@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl  (v1.2)
 VERSION: 1.2
-REVISION: 2
+REVISION: 3
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,6 +25,7 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+  r3 — Dropped plugin_leash_target from leash_members(): it merged into plugin_leash (v1.2) and no longer ships. Harmless either way — its "leash" anchor keeps subsystem_id classifying any lingering collar copy as leash, so the update SWEEP still removes a stray; this just stops the explicit member list naming a retired script. kmod_leash_engine / kmod_particles / plugin_leash / leash_holder still grouped explicitly.
   r2 — Debounce the CHANGED_INVENTORY park. r1's "drop-in is race-free" held
        for DROPPING a fresh script, but not for EDITING one: a recompile fires
        CHANGED_INVENTORY while the script is momentarily not-found, so the
@@ -331,10 +332,12 @@ list apply_diff_predicate(list cands, list collar_inv) {
 // Verified set as of v1.1 rev 5: plugin_outfits, plugin_folders,
 // plugin_relay, plugin_restrict, plugin_rlvex, plugin_strip.
 //
-// Leash subsystem: anchor heuristic would group plugin_leash with the
-// kmod_leash_* pair correctly, but leash_holder doesn't share the
+// Leash subsystem: anchor heuristic would group plugin_leash with
+// kmod_leash_engine correctly, but leash_holder doesn't share the
 // "leash" token in the right shape (no plugin_holder), and kmod_particles
-// is only used by leash. Group all seven explicitly.
+// is only used by leash. Group them all explicitly. (plugin_leash_target
+// retired in v1.2 — merged into plugin_leash; its "leash" anchor still
+// classifies any lingering collar copy as leash, so it's swept on update.)
 
 list rlv_members() {
     return [
@@ -353,7 +356,6 @@ list leash_members() {
         "kmod_leash_engine",
         "kmod_particles",
         "plugin_leash",
-        "plugin_leash_target",
         "leash_holder"
     ];
 }
