@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 10
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -10,6 +10,7 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
 CHANGES:
+- v1.2 rev 10: retired the "safeword" chat alias + its now-dead handle_subpath branch — the chat safeword family (the bare word, "<prefix> safeword", "<prefix> safeword <word>") is special-cased in kmod_chat so it bypasses the ACL-gated dispatch and works in TPE / lockdown. The relay menu Safeword/Unbind buttons are UNCHANGED: they still fire relay.safeword, which kmod_rlv routes to do_safeword_clear(FALSE) = relay-only — the bit-flip (relay source → relay-only; the safeword word → system-wide). The relay-clear chat verb is gone (that verb is the safeword now); relay-only clear stays on the menu button.
 - v1.2 rev 9: nav-row consistency — has_nav 0→1 on all three menus so the << >> Back row matches the rest of the UI (was a lone Back); the handler's existing catch-all redraws the inert << >>.
 - v1.2 rev 8: menu-service migration. show_main_menu / show_mode_menu / render_object_list now render via the pager (ui.menu.render, has_nav=0; the "Bound by" source list is an info pager — body + Back, no content buttons). message→body, the local "Back" dropped from each list (the service supplies it), sends moved DIALOG_BUS→UI_BUS. Buttons stay plain label strings — render_menu treats the list opaquely and the handler already routes by button label — so handle_button_click is unchanged. Mode/hardcore/safeword/source logic untouched. (Back still exits to root from every relay screen, as before.)
 - v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (60→124) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
@@ -139,11 +140,10 @@ register_self() {
         "alias",   "relay",
         "context", PLUGIN_CONTEXT
     ]), NULL_KEY);
-    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
-        "type",    "chat.alias.declare",
-        "alias",   "safeword",
-        "context", PLUGIN_CONTEXT + ".safeword"
-    ]), NULL_KEY);
+    // The "safeword" alias was retired in favour of the wearer's personal
+    // safeword: <prefix>safeword is now handled by kmod_chat (manage the word),
+    // and the bare word triggers the full release. Relay-clear stays on the
+    // relay menu (Safeword / Unbind).
 }
 
 send_pong() {
@@ -432,20 +432,6 @@ handle_subpath(key user, integer acl_level, string subpath) {
         else if (subpath == "ask") set_mode(MODE_ASK, TRUE);
         else                       set_mode(MODE_ON,  FALSE);
         llRegionSayTo(user, 0, "Mode set to " + llToUpper(subpath) + ".");
-        gPolicyButtons = [];
-        return;
-    }
-
-    if (subpath == "safeword") {
-        if (!btn_allowed("Safeword") && !btn_allowed("Unbind")) {
-            llRegionSayTo(user, 0, "Access denied.");
-            gPolicyButtons = [];
-            return;
-        }
-        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-            "type", "relay.safeword"
-        ]), NULL_KEY);
-        llRegionSayTo(user, 0, "Safeword used - all restrictions cleared.");
         gPolicyButtons = [];
         return;
     }

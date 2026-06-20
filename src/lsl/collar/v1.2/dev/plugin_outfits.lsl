@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.2
-REVISION: 11
+REVISION: 12
 PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -50,6 +50,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              click and hides those items for the rest of the session.
              No shared shadow lock vector between plugins.
 CHANGES:
+- v1.2 rev 12: on safeword.fired, clear the persisted per-outfit lock list (LockedOutfits=[] + delete outfits.locked) so the locks don't re-apply on the next sync — kmod_rlv already released the detachallthis claims. A bad-actor-imposed locked outfit can't survive the wearer's safeword (unlock ≠ strip; the wearer just regains the ability to remove it).
 - v1.2 rev 11: nav-row consistency — has_nav 0→1 on the empty + action menus so the << >> Back row matches the rest of the UI; catch-all redraws for the inert << >> (the OL outfit picker already pages).
 - v1.2 rev 10: replaced the persistent .base lock + the whole Disable/Enable subsystem with a TRANSIENT base lock. apply_wear now locks .base (refcounted via kmod_rlv so a relay's claim isn't clobbered) ONLY across its strip, releasing immediately after — base survives our own re-dress, stays freely editable otherwise, and external strip is the relay's job, not ours. Deleted: toggle_active, OutfitsActive/LastActive, KEY_ACTIVE, show_disabled_menu, the "disabled" context + Disable/Enable buttons + handler branches, the active-gate in ui.menu.start (always scans now). Per-outfit Lock/Unlock unchanged. The scan-time cleanup now also always-releases any standing .base lock left by a pre-transient-lock rev (migration). No persistent base lock means no on/off toggle.
 - v1.2 rev 9: renamed the RLV shared folder outfits → .outfits (OUTFITS_ROOT + BASE_FOLDER). Dotting hides it from the #RLV-root @getinvworn listing (so plugin_folders stops showing it) while @getinv:.outfits still enumerates its children directly. The conditional .base release now uses BASE_FOLDER (.outfits/.base) so it stays matched with the apply; the old UNDOTTED outfits/.base was added to the always-release cleanup to migrate existing collars off the undotted root. RLV_CONSUMER + KEY_LOCKED unchanged (IDs, not paths).
@@ -642,6 +643,13 @@ default {
                 CurrentUser = id;
                 UserAcl     = start_acl;
                 scan_outfits();
+            }
+            else if (msg_type == "safeword.fired") {
+                // Wearer safeword: kmod_rlv's system-wide clear already released
+                // our detachallthis claims; clear the persisted lock list so they
+                // don't re-apply on the next sync.
+                LockedOutfits = [];
+                persist_locked();
             }
         }
         else if (num == DIALOG_BUS) {

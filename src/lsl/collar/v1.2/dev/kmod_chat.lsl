@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_chat.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 CHANGES:
+- v1.2 rev 7: personal safeword. The wearer's configured safeword.word (prefix-free, whole-utterance, (( ))-stripped so ((red)) survives @sendchat=n, case-insensitive) on any heard channel → emits safeword.fired (the full release — kmod_rlv + leash engine + restrict/outfit/folder + plugin_maint each handle their own slice; no central orchestrator). "<prefix> safeword" (no arg) is a symbolic link to the bare word (also safeword.fired); "<prefix> safeword <word>" → safeword.set (plugin_maint writes the new word). All three are intercepted BEFORE the ACL-gated dispatch so they work at any ACL incl TPE. Channel 0 is now ALWAYS listened — scoped to the wearer when public chat is off — so the open/((ooc)) safeword can't be disabled by turning public commands off.
 - v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 - v1.2 rev 1: speaker_authorised computes live from the user-record roster (user.<uuid> leading acl field; strangers pass only with public.mode on) — replaces the acl.<uuid>.cache + acl.timestamp freshness check, which no longer exists.
 PURPOSE: Local chat command receiver. Listens on channel 1 (always) and
@@ -22,11 +23,13 @@ integer UI_BUS           = 900;
 string KEY_PREFIX       = "chat.prefix";
 string KEY_PUBLIC_CHAT  = "chat.public";  // "1" = enabled, "0" = disabled
 string KEY_CHAT_CHAN    = "chat.channel"; // secondary channel number (default 1)
+string KEY_SAFEWORD     = "safeword.word"; // wearer's personal safeword (default "safeword")
 
 /* -------------------- STATE -------------------- */
 string ChatPrefix    = "";   // Set from settings or derived on first run
 integer PublicChat   = FALSE; // Channel 0 listening enabled
 integer ChatChan     = 1;    // Secondary channel (default 1)
+string SafewordWord  = "safeword"; // matched prefix-free from the wearer; absent key -> this default
 
 integer ListenChan0  = 0;    // Handle for channel 0 listener (0 = inactive)
 integer ListenChan1  = 0;    // Handle for secondary channel listener (0 = inactive)
@@ -67,9 +70,15 @@ reset_listeners() {
     // Secondary channel is always active when a prefix is set
     ListenChan1 = llListen(ChatChan, "", NULL_KEY, "");
 
-    // Channel 0 only if explicitly enabled
+    // Channel 0 is ALWAYS listened so the prefix-free safeword can be heard
+    // openly / in ((ooc)) even when public commands are off. Public on -> carry
+    // everyone (for prefixed commands); public off -> scope to the wearer, so the
+    // only thing channel 0 conveys is the wearer's own safeword.
     if (PublicChat) {
         ListenChan0 = llListen(0, "", NULL_KEY, "");
+    }
+    else {
+        ListenChan0 = llListen(0, "", llGetOwner(), "");
     }
 }
 
@@ -108,6 +117,12 @@ apply_settings_sync() {
     }
     // else: ChatChan keeps its in-script default (1).
 
+    // Safeword: wearer-owned (plugin_maint writes it). An absent key falls back
+    // to the default word, so the safeword works even before it's ever changed.
+    string stored_sw = llLinksetDataRead(KEY_SAFEWORD);
+    if (stored_sw != "") SafewordWord = stored_sw;
+    else                 SafewordWord = "safeword";
+
     reset_listeners();
 }
 
@@ -123,6 +138,18 @@ string strip_prefix(string message) {
     string head = llToLower(llGetSubString(message, 0, prefix_len - 1));
     if (head != llToLower(ChatPrefix)) return "";
     return llStringTrim(llGetSubString(message, prefix_len, -1), STRING_TRIM);
+}
+
+// TRUE if `message` IS the wearer's safeword: whole-utterance match, a
+// surrounding (( )) OOC wrapper stripped, case-insensitive. Deliberately NOT a
+// substring match — the whole line must be the word, so conversational use
+// ("I might red out") never fires it.
+integer is_safeword(string message) {
+    string s = llStringTrim(message, STRING_TRIM);
+    if (llStringLength(s) >= 4 && llGetSubString(s, 0, 1) == "((" && llGetSubString(s, -2, -1) == "))") {
+        s = llStringTrim(llGetSubString(s, 2, -3), STRING_TRIM);
+    }
+    return (llToLower(s) == llToLower(SafewordWord));
 }
 
 // Register a label→context alias. First registrant wins; a collision
@@ -239,10 +266,48 @@ default
     listen(integer channel, string name, key id, string message) {
         // Ignore own messages
         if (id == llGetKey()) return;
-
-        // Validate channel scope
-        if (channel == 0 && !PublicChat) return;
         if (channel != 0 && channel != ChatChan) return;
+
+        // -------- Safeword (wearer only, prefix-free, ACL-bypassing) --------
+        // Heard before any prefix/dispatch logic, so it works at ANY ACL — TPE
+        // included — on every channel we hear (public 0 + private).
+        if (id == llGetOwner()) {
+            // The bare safeword word (OOC-tolerant: ((red)) survives @sendchat=n)
+            // is a symbolic link to "<prefix> safeword" — both invoke the FULL
+            // safeword. The RLV/leash engines + plugin_maint listen for it.
+            if (is_safeword(message)) {
+                llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+                    "type", "safeword.fired"
+                ]), llGetOwner());
+                return;
+            }
+            // "<prefix> safeword"        -> invoke the full safeword.
+            // "<prefix> safeword <word>" -> change the safeword word (plugin_maint
+            // writes). Both bypass the ACL-gated dispatch on purpose (TPE-proof).
+            string sw_rem = strip_prefix(message);
+            if (sw_rem != "") {
+                list sw_tok = llParseString2List(sw_rem, [" ", "\t"], []);
+                if (llToLower(llList2String(sw_tok, 0)) == "safeword") {
+                    if (llGetListLength(sw_tok) >= 2) {
+                        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+                            "type", "safeword.set",
+                            "word", llList2String(sw_tok, 1)
+                        ]), llGetOwner());
+                    }
+                    else {
+                        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+                            "type", "safeword.fired"
+                        ]), llGetOwner());
+                    }
+                    return;
+                }
+            }
+        }
+
+        // -------- Normal prefixed command dispatch (ACL-gated) --------
+        // Channel 0 carries commands only when public chat is on; when off it
+        // conveyed only the safeword above.
+        if (channel == 0 && !PublicChat) return;
 
         // Strip prefix
         string remainder = strip_prefix(message);

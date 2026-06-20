@@ -555,7 +555,6 @@ Commands are case-insensitive. If you can use the feature in the menu, you can u
 | --- | --- |
 | `relay` | Open the Relay menu |
 | `relay on` / `relay off` / `relay ask` | Set mode |
-| `safeword` | Emergency relay clear (bypasses Hardcore). Standalone — no prefix needed on the verb. |
 
 **RLV Restrictions**
 | Command | Action |
@@ -584,13 +583,22 @@ Folder names that contain a dot must be used from the menu — the dot collides 
 | `blacklist` | Open the menu |
 | `blacklist add` / `blacklist rem` | Start the sensor or removal flow |
 
+**Safeword (wearer-only — your personal safe-out)**
+| Command | Action |
+| --- | --- |
+| *(your safeword word)* | Say it alone — openly or in `((ooc))` — to release ALL restraints (leash, RLV restrictions, relay holds, outfit/folder locks) and notify your owner(s). No prefix; works at any access level, even TPE, and the `((ooc))` form gets through even a chat gag. The collar stays locked and ownership is unchanged. |
+| `<prefix> safeword` | Invoke your safeword — same effect as saying the word. |
+| `<prefix> safeword <new word>` | Change your safeword — only you can, at any time. |
+
+Your current safeword is shown in **Maintenance → Safeword** (visible only to you — never to your owner).
+
 **SOS (wearer-only panic verbs)**
 | Command | Action |
 | --- | --- |
 | `sos` | Open SOS |
 | `sosunleash` | Emergency unleash |
 | `sosrestrict` | Emergency clear RLV |
-| `sosrelay` | Emergency relay safeword |
+| `sosrelay` | Emergency relay clear |
 
 ### Menu-only
 

@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 10
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.2 rev 10: on safeword.fired (the wearer's safeword), clear the persisted restriction config (Restrictions=[] + delete restrict.list) so it doesn't re-apply on the next sync — kmod_rlv's system-wide clear already dropped the claims.
 - v1.2 rev 9: nav-row consistency — show_main has_nav 0→1 so the << >> Back row matches the rest of the UI (the category menu already paged); catch-all redraw for the inert << >>.
 - v1.2 rev 8: menu-service migration. show_main → pager (has_nav=0; actions + category buttons, service supplies Back). show_category_menu → pager (has_nav=1): hands the FULL [X]/[ ] toggle list and lets the service slice/page + title-suffix the page; click returns the bare @cmd. display_sit_targets → OL mode (object names in the numbered body, pick:<global-index> into SitCandidates). Nav realigned from context (prev_page/next_page/back) to button-label (<< >> Back); category toggles + sit picks route by context. Dropped reorder_item_buttons (the service's layout_buttons now does it). Restriction/sit/sittp logic unchanged.
 - v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (62→126) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
@@ -729,6 +730,13 @@ default
                 // Emergency clear from plugin_sos (wearer-only gate enforced
                 // upstream). Drop every active RLV restriction.
                 remove_all_restrictions();
+            }
+            else if (type == "safeword.fired") {
+                // Wearer safeword: kmod_rlv's system-wide clear already dropped
+                // our claims, so we only clear the persisted config + local list
+                // so the restrictions don't re-apply on the next sync.
+                Restrictions = [];
+                persist_restrictions();
             }
         }
         // Dialogs

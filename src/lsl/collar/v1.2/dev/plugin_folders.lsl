@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 9
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -13,6 +13,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              @getpath at picker render; this plugin does NOT maintain any
              shadow lock vector.
 CHANGES:
+- v1.2 rev 9: on safeword.fired, clear the persisted folder-lock list (LockedNames=[] + delete folders.locked) so the locks don't re-apply on the next sync — kmod_rlv already released the detachallthis claims.
 - v1.2 rev 8: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (60→124) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 7: menu-service migration. show_folder_pick now renders via kmod_menu OL mode (ui.menu.render mode="ordered") + the `fixed` param for the Attach/Detach/Lock|Unlock action buttons — the first consumer of fixed-button OL, which resolves kmod_menu's deferred "flanking fixed-button" note (layout_buttons handles nav+fixed at the low slots, content above, NO padding). Shed the hand-rolled target_slots/padding block (~50 lines): worn/lock indicators now ride in each item's label, breadcrumb+legend stay as the body, the page counter moves to the title. Nav realigned from context (prev/next/back) to button-label (<< >> Back) since the service renders nav as plain buttons (empty context); actions + pick:<idx> still route by context. Browse/drill/lock logic unchanged.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
@@ -736,6 +737,13 @@ default
                 CurrentUser = id;
                 UserAcl = start_acl;
                 show_main();
+            }
+            else if (msg_type == "safeword.fired") {
+                // Wearer safeword: kmod_rlv's system-wide clear already released
+                // our detachallthis claims; clear the persisted lock list so they
+                // don't re-apply on the next sync.
+                LockedNames = [];
+                persist_locked();
             }
         }
         else if (num == DIALOG_BUS) {
