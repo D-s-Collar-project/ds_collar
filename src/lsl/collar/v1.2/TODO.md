@@ -1,0 +1,3 @@
+* Analyse the code deeply to investigate the possibility of reducing the collar's scripts memory use in its core components (kernel and kmods). to consider: bit flips, use of param series, other unix-like structs that might be more efficient than what we have.
+* UTF-8 characters in UI: left arrow for previous page, right arrow for next page; Applied restrictions marked with solid checkbox, unapplied restrictions with empty checkbox, locked items with a closed padlock.
+* Remove mentions of lock and ownership preserved in plugin_maint safeword info dialog.
