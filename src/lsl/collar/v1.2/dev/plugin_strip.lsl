@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 10
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Categories + pick:<idx> already routed by context.
 - v1.2 rev 9: nav-row consistency — show_category_menu has_nav 0→1 so the << >> Back row matches the rest of the UI; catch-all redraw for the inert << >> (the strip picker already pages).
 - v1.2 rev 8: menu-service migration. show_category_menu → pager (has_nav=0, service supplies Back); show_picker → kmod_menu OL mode — per-item display (ellipsized name [+@slot]) + lock mark ride the item label, page counter moves to title, the hand-rolled target_slots/padding block shed (no fixed buttons, page_size 9). Nav realigned from context (prev/next/back) to button-label (<< >> Back); categories + pick:<idx> still route by context. Strip logic + live @getstatusall lock detection unchanged.
 - v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (62→126) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
@@ -563,26 +564,23 @@ handle_dialog_response(string msg) {
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
-    // Nav (<< >> Back) renders as plain buttons → empty context; route nav by
-    // the button LABEL. Categories + pick:<idx> carry their own context.
-    string button = llJsonGetValue(msg, ["button"]);
-    if (button == JSON_INVALID) button = "";
+    // Every button routes by context: nav (nav:*), categories, and pick:<idx>.
 
     if (CurrentCategory == "") {
         if (ctx == "layers") { show_picker("L", 0); return; }
         if (ctx == "attach") { show_picker("A", 0); return; }
-        if (button == "Back" || ctx == "back") { return_to_root(); return; }
+        if (ctx == "nav:back") { return_to_root(); return; }
         show_category_menu();   // inert << >> — redraw
         return;
     }
 
-    if (button == "Back" || ctx == "back") { show_category_menu(); return; }
-    if (button == "<<") {
+    if (ctx == "nav:back") { show_category_menu(); return; }
+    if (ctx == "nav:prev") {
         if (PickPage == 0) show_current_picker(LastMaxPage);
         else               show_current_picker(PickPage - 1);
         return;
     }
-    if (button == ">>") {
+    if (ctx == "nav:next") {
         if (PickPage >= LastMaxPage) show_current_picker(0);
         else                         show_current_picker(PickPage + 1);
         return;

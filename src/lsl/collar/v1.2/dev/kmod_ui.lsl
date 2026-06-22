@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 10
 CHANGES:
+- v1.2 rev 10: handle_button_click routes nav by context (nav:prev/nav:next/nav:back/nav:close), not the button label; dropped the now-unused `button` param + its read in the response handler. Removes the last label-routing in the menu system (kmod_menu rev 14 now stamps nav contexts).
 - v1.2 rev 9: RLV-gated visibility. rebuild_views drops any plugin whose mask carries bit 0x40 (RLV-required) while rlv.active=="0" (published by kmod_bootstrap); linkset_data arms a rebuild when rlv.active changes. The ACL test (mask & 1<<lvl, lvl<=5) never touches bit 6, so per-level visibility is unchanged. Fail-open: absent/"1" shows everything.
 - v1.2 rev 8: render_session hands kmod_menu the FULL button list (not a pre-sliced page) — the menu service owns page slicing now (kmod_menu rev 7). kmod_ui still tracks current_page + total_pages for the <</>> wrap in handle_button_click; it just no longer slices. Step 1 of the shape-service split (menu service owns layout+paging).
 - v1.2 rev 7: ACL is now read DIRECTLY off the user-record table
@@ -599,7 +600,7 @@ dispatch_to_plugin(key user, string context, string subpath) {
     ]), user);
 }
 
-handle_button_click(key user, string button, string context) {
+handle_button_click(key user, string context) {
     integer session_idx = find_session_idx(user);
     if (session_idx == -1) return;
 
@@ -613,8 +614,9 @@ handle_button_click(key user, string button, string context) {
     integer current_page = llList2Integer(SessionPages, session_idx);
     integer total_pages = llList2Integer(SessionTotalPages, session_idx);
 
-    // Navigation buttons (no context)
-    if (button == "<<") {
+    // Navigation buttons route by context (nav:*) like every other button —
+    // the menu service stamps these contexts; the visible label is free.
+    if (context == "nav:prev") {
         current_page -= 1;
         if (current_page < 0) current_page = total_pages - 1;
         SessionPages = llListReplaceList(SessionPages, [current_page], session_idx, session_idx);
@@ -622,7 +624,7 @@ handle_button_click(key user, string button, string context) {
         return;
     }
 
-    if (button == ">>") {
+    if (context == "nav:next") {
         current_page += 1;
         if (current_page >= total_pages) current_page = 0;
         SessionPages = llListReplaceList(SessionPages, [current_page], session_idx, session_idx);
@@ -630,13 +632,13 @@ handle_button_click(key user, string button, string context) {
         return;
     }
 
-    if (button == "Close") {
+    if (context == "nav:close") {
         cleanup_session(user);
         return;
     }
 
     // Back on a category page returns to the root tier.
-    if (button == "Back" && context == "") {
+    if (context == "nav:back") {
         SessionCategories = llListReplaceList(SessionCategories, [""], session_idx, session_idx);
         SessionPages = llListReplaceList(SessionPages, [0], session_idx, session_idx);
         render_session(user);
@@ -741,7 +743,6 @@ handle_dialog_response(string msg) {
     if (!validate_required_fields(msg, ["session_id", "button", "user"])) return;
 
     string session_id = llJsonGetValue(msg, ["session_id"]);
-    string button = llJsonGetValue(msg, ["button"]);
     key user = (key)llJsonGetValue(msg, ["user"]);
 
     string context = "";
@@ -752,7 +753,7 @@ handle_dialog_response(string msg) {
 
     integer idx = llListFindList(SessionIDs, [session_id]);
     if (idx != -1) {
-        handle_button_click(user, button, context);
+        handle_button_click(user, context);
         return;
     }
 }

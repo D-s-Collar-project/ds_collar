@@ -1,8 +1,10 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 13
+REVISION: 15
 CHANGES:
+- v1.2 rev 15: the pager (render_menu) now accepts the optional `fixed` action-button list, like render_list — fixed buttons reserve the low slots right after nav and page_size shrinks by the fixed count. A blank spacer ({label:" ",context:""}) among the fixed buttons positions them (plugin_leash's length menu uses [-1m," ",+1m] to flank -1m/+1m at slots 3 and 5). Menus that send no `fixed` are unchanged (page_size stays PAGE_SIZE).
+- v1.2 rev 14: nav buttons now carry contexts (nav:prev/nav:next/nav:back/nav:close) via the new nav_obj() helper — in render_menu + render_list — instead of bare label strings. The dialog layer already context-routes {label,context} objects, so consumers route nav by context like every other button (no more label-routing exception); the visible label is now free to restyle (e.g. UTF-8 arrows) with zero routing impact.
 - v1.2 rev 13: added the INFO mode (render_info) — a terminal informational dialog: title + body + a single OK button (context "ok"), NO nav row (info dialogs are not navigable menus, so they deliberately skip the << >> Back row). ok_label optional (default "OK"). First consumer: plugin_status. Other view-only displays (e.g. blacklist's list) can adopt it.
 - v1.2 rev 12: merged render_unordered + render_ordered into one render_list(msg, isOrdered) — they shared ~70% boilerplate (validate, reserve nav+fixed, page-math, layout_buttons, forward). isOrdered drives the only differences: UL(0) A-Z-sorts + names the buttons + returns context; OL(1) preserves order + numbers the buttons + appends a numbered body + returns pick:<index>. Wire stays descriptive: mode "unordered"/"ordered" dispatch to render_list(msg, FALSE/TRUE). OL's fix0/fix1 fields fold into the shared `fixed` list (no OL consumer used them). No behavior change for animate (UL) or blacklist (OL).
 - v1.2 rev 11: (1) UNORDERED mode now accepts {label,context} items (not just flat names) — sorts by label, returns the context, so a people-picker can show the name but return the UUID (no name-collision / truncation risk); flat-name items (animate) still work (label==context). (2) Added the MODAL mode (render_modal): forced Yes/No, NO nav row, No/cancel always at slot 0 (enforced in the service), rendered to an arbitrary target; returns context confirm/cancel. For plugin_owners (UL scans + modal confirms).
@@ -96,6 +98,15 @@ list layout_buttons(list nav_buttons, list content_buttons) {
     return final_buttons;
 }
 
+// Build a routable nav button. Nav buttons carry a context (nav:prev /
+// nav:next / nav:back / nav:close) exactly like content buttons, so the
+// dialog layer maps the click to a context and consumers route by context,
+// never by the visible label. This keeps the label free to restyle (e.g.
+// UTF-8 arrows) without touching any routing.
+string nav_obj(string label, string ctx) {
+    return llList2Json(JSON_OBJECT, ["label", label, "context", ctx]);
+}
+
 /* -------------------- RENDERING -------------------- */
 
 render_menu(string msg) {
@@ -118,32 +129,45 @@ render_menu(string msg) {
     string cat_tmp = llJsonGetValue(msg, ["category"]);
     if (cat_tmp != JSON_INVALID) category = cat_tmp;
 
-    // The caller hands the FULL button list; the menu service owns paging.
-    // Compute total pages, clamp/wrap the requested page, and slice it. The
-    // page cursor lives in the caller's session; this slice is deterministic
-    // off the same list + page, so the two never disagree.
+    // The caller hands the FULL content button list; the menu service owns
+    // paging. Nav + optional fixed action buttons reserve the low slots; the
+    // page size is the remaining content capacity.
     list full_buttons = llJson2List(buttons_json);
     integer btn_count = llGetListLength(full_buttons);
-    integer total_pages = (btn_count + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    // Nav takes the low slots; content fills the rest in reading order.
+    // Paginated menus lead with the full << >> <exit> row; others a lone exit.
+    // The exit button is Close at the root tier (ends the session) and Back
+    // inside a category (pops to root) — distinct contexts, chosen here.
+    string exit_obj = nav_obj("Close", "nav:close");
+    if (category != "") exit_obj = nav_obj("Back", "nav:back");
+
+    list nav = [exit_obj];
+    if (has_nav) nav = [nav_obj("<<", "nav:prev"), nav_obj(">>", "nav:next"), exit_obj];
+
+    // Optional fixed action buttons ({label,context}) — placed right after nav
+    // in the low slots, like render_list. Content packs above; page size shrinks
+    // by the fixed count so the reserved row never overflows. A blank spacer
+    // ({label:" ",context:""}) can sit between fixed buttons to position them.
+    list fixed = [];
+    string fixed_json = llJsonGetValue(msg, ["fixed"]);
+    if (fixed_json != JSON_INVALID) fixed = llJson2List(fixed_json);
+
+    integer page_size = PAGE_SIZE - llGetListLength(fixed);
+    if (page_size < 1) page_size = 1;
+
+    integer total_pages = (btn_count + page_size - 1) / page_size;
     if (total_pages < 1) total_pages = 1;
     if (current_page >= total_pages) current_page = 0;
     if (current_page < 0) current_page = total_pages - 1;
 
-    integer pstart = current_page * PAGE_SIZE;
-    integer pend = pstart + PAGE_SIZE;
+    integer pstart = current_page * page_size;
+    integer pend = pstart + page_size;
     if (pend > btn_count) pend = btn_count;
     list page_buttons = [];
     if (btn_count > 0) page_buttons = llList2List(full_buttons, pstart, pend - 1);
 
-    // Nav takes the low slots; content fills the rest in reading order.
-    // Paginated menus lead with the full << >> <exit> row; others a lone exit.
-    string nav_exit = "Close";
-    if (category != "") nav_exit = "Back";
-
-    list nav = [nav_exit];
-    if (has_nav) nav = ["<<", ">>", nav_exit];
-
-    list final_button_data = layout_buttons(nav, page_buttons);
+    list final_button_data = layout_buttons(nav + fixed, page_buttons);
 
     // Plugins may supply their own title (e.g. bell's "Bell"); else derive one
     // from the category / menu_type for the root + category tiers.
@@ -218,7 +242,7 @@ render_list(string msg, integer isOrdered) {
     list fixed = [];
     string fixed_json = llJsonGetValue(msg, ["fixed"]);
     if (fixed_json != JSON_INVALID) fixed = llJson2List(fixed_json);
-    list reserved = ["<<", ">>", "Back"] + fixed;
+    list reserved = [nav_obj("<<", "nav:prev"), nav_obj(">>", "nav:next"), nav_obj("Back", "nav:back")] + fixed;
     integer page_size = 12 - llGetListLength(reserved);
     if (page_size < 1) page_size = 1;
 

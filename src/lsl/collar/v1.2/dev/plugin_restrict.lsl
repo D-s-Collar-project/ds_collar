@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.2
-REVISION: 10
+REVISION: 11
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.2 rev 11: nav routes by context (nav:back/nav:prev/nav:next) across all three menu blocks (main/sit_select/category), not the button label; dropped the now-unused `button` local. Categories, toggles, and pick:<idx> already routed by context.
 - v1.2 rev 10: on safeword.fired (the wearer's safeword), clear the persisted restriction config (Restrictions=[] + delete restrict.list) so it doesn't re-apply on the next sync — kmod_rlv's system-wide clear already dropped the claims.
 - v1.2 rev 9: nav-row consistency — show_main has_nav 0→1 so the << >> Back row matches the rest of the UI (the category menu already paged); catch-all redraw for the inert << >>.
 - v1.2 rev 8: menu-service migration. show_main → pager (has_nav=0; actions + category buttons, service supplies Back). show_category_menu → pager (has_nav=1): hands the FULL [X]/[ ] toggle list and lets the service slice/page + title-suffix the page; click returns the bare @cmd. display_sit_targets → OL mode (object names in the numbered body, pick:<global-index> into SitCandidates). Nav realigned from context (prev_page/next_page/back) to button-label (<< >> Back); category toggles + sit picks route by context. Dropped reorder_item_buttons (the service's layout_buttons now does it). Restriction/sit/sittp logic unchanged.
@@ -519,14 +520,12 @@ handle_dialog_response(string msg) {
     if (user != CurrentUser) return;
 
     string ctx = llJsonGetValue(msg, ["context"]);
-    // Nav (<< >> Back) renders as plain buttons → empty context; route nav by
-    // the button LABEL. Categories, toggles, and pick:<idx> carry their context.
-    string button = llJsonGetValue(msg, ["button"]);
-    if (button == JSON_INVALID) button = "";
+    if (ctx == JSON_INVALID) ctx = "";
+    // Every button routes by context: nav (nav:*), categories, toggles, picks.
 
     // Main menu
     if (MenuContext == "main") {
-        if (button == "Back" || ctx == "back") {
+        if (ctx == "nav:back") {
             return_to_root();
         }
         else if (ctx == "cat_inventory") {
@@ -585,16 +584,16 @@ handle_dialog_response(string msg) {
     }
     // Sit selection menu
     else if (MenuContext == "sit_select") {
-        if (button == "Back" || ctx == "back") {
+        if (ctx == "nav:back") {
             show_main();
         }
-        else if (button == "<<") {
+        else if (ctx == "nav:prev") {
             integer max_page = (llGetListLength(SitCandidates) / 2 - 1) / 9;
             if (SitPage == 0) SitPage = max_page;
             else              SitPage = SitPage - 1;
             display_sit_targets();
         }
-        else if (button == ">>") {
+        else if (ctx == "nav:next") {
             integer max_page = (llGetListLength(SitCandidates) / 2 - 1) / 9;
             if (SitPage >= max_page) SitPage = 0;
             else                     SitPage = SitPage + 1;
@@ -612,15 +611,15 @@ handle_dialog_response(string msg) {
     }
     // Category menu
     else if (MenuContext == "category") {
-        if (button == "Back" || ctx == "back") {
+        if (ctx == "nav:back") {
             show_main();
         }
-        else if (button == "<<") {
+        else if (ctx == "nav:prev") {
             integer max_page = (llGetListLength(get_category_list(CurrentCategory)) - 1) / DIALOG_PAGE_SIZE;
             if (CurrentPage == 0) show_category_menu(CurrentCategory, max_page);
             else                  show_category_menu(CurrentCategory, CurrentPage - 1);
         }
-        else if (button == ">>") {
+        else if (ctx == "nav:next") {
             integer max_page = (llGetListLength(get_category_list(CurrentCategory)) - 1) / DIALOG_PAGE_SIZE;
             if (CurrentPage >= max_page) show_category_menu(CurrentCategory, 0);
             else                         show_category_menu(CurrentCategory, CurrentPage + 1);

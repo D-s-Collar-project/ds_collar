@@ -1,12 +1,13 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 8
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy filtering (animation buttons are dynamic content).
 CHANGES:
+- v1.2 rev 8: response handler routes every button by context — nav (nav:*), [Stop] (context "stop"), anim items (UL flat item: context == anim name) — was button-label-routed. handle_button_click takes context, not the raw label.
 - v1.2 rev 7: render via the menu service's UNORDERED picker mode (ui.menu.render mode="unordered") instead of building the slot-mapped dialog locally. Hands kmod_menu the full anim list + [Stop] as a fixed button; kmod_menu A-Z-sorts, pages, and lays out. Deleted ~90 lines of hand-rolled slot mapping + the empty-case dialog. Anims are now alphabetized (was inventory order); page indicator moved to the title. Handler/events unchanged (still name-based). PAGE_SIZE 8 must match kmod_menu's 12-3-1.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 --------------------*/
@@ -248,23 +249,25 @@ handle_subpath(string subpath) {
 
 /* -------------------- BUTTON HANDLING -------------------- */
 
-handle_button_click(string button) {
-    // Back button - return to root menu
-    if (button == "Back") {
+// Every button routes by context: nav (nav:*), [Stop] (context "stop"), and
+// the anim items (UL flat items, so context == the anim name).
+handle_button_click(string context) {
+    // Back - return to root menu
+    if (context == "nav:back") {
         ui_return_root();
         cleanup_session();
         return;
     }
 
     // Stop button
-    if (button == "[Stop]") {
+    if (context == "stop") {
         stop_all_animations();
         show_animation_menu(CurrentPage);
         return;
     }
 
     // Pagination - left (with wrap)
-    if (button == "<<") {
+    if (context == "nav:prev") {
         integer total_anims = get_animation_count();
         integer max_page = (total_anims - 1) / PAGE_SIZE;
 
@@ -279,7 +282,7 @@ handle_button_click(string button) {
     }
 
     // Pagination - right (with wrap)
-    if (button == ">>") {
+    if (context == "nav:next") {
         integer total_anims = get_animation_count();
         integer max_page = (total_anims - 1) / PAGE_SIZE;
 
@@ -293,14 +296,14 @@ handle_button_click(string button) {
         return;
     }
 
-    // Check if button is an animation name
-    if (llGetInventoryType(button) == INVENTORY_ANIMATION) {
-        start_animation(button);
+    // Animation item: context is the anim name (UL flat item).
+    if (llGetInventoryType(context) == INVENTORY_ANIMATION) {
+        start_animation(context);
         show_animation_menu(CurrentPage);
         return;
     }
 
-    // Unknown button - redraw menu
+    // Unknown - redraw menu
     show_animation_menu(CurrentPage);
 }
 
@@ -437,8 +440,8 @@ default {
                 if (llJsonGetValue(msg, ["session_id"]) == JSON_INVALID) return;
                 if (llJsonGetValue(msg, ["session_id"]) != SessionId) return;
 
-                string button = llJsonGetValue(msg, ["button"]);
-                if (button == JSON_INVALID) return;
+                string context = llJsonGetValue(msg, ["context"]);
+                if (context == JSON_INVALID) context = "";
 
                 string user_str = llJsonGetValue(msg, ["user"]);
                 if (user_str == JSON_INVALID) return;
@@ -446,7 +449,7 @@ default {
 
                 if (user != CurrentUser) return;
 
-                handle_button_click(button);
+                handle_button_click(context);
                 return;
             }
 
