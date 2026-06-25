@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.2
-REVISION: 10
+REVISION: 11
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.2 rev 11: category chooser to menu.fixed, layer/attachment picker to menu.ordered; cleans up on the new ui.dialog.close.
 - v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Categories + pick:<idx> already routed by context.
 - v1.2 rev 9: nav-row consistency — show_category_menu has_nav 0→1 so the << >> Back row matches the rest of the UI; catch-all redraw for the inert << >> (the strip picker already pages).
 - v1.2 rev 8: menu-service migration. show_category_menu → pager (has_nav=0, service supplies Back); show_picker → kmod_menu OL mode — per-item display (ellipsized name [+@slot]) + lock mark ride the item label, page counter moves to title, the hand-rolled target_slots/padding block shed (no fixed buttons, page_size 9). Nav realigned from context (prev/next/back) to button-label (<< >> Back); categories + pick:<idx> still route by context. Strip logic + live @getstatusall lock detection unchanged.
@@ -448,23 +449,22 @@ show_category_menu() {
     body += "Attachments: " + (string)(llGetListLength(WornAttach) / 2) + " strippable\n\n";
     body += "Choose category.";
 
-    // Pager (has_nav=1: full << >> Back nav row; inert << >> redraw). Content = categories.
+    // Pager (has_nav=1: full << >> Back nav row). Content = the two fixed
+    // categories — a structurally single page, so << >> just redraw (handler).
     list button_data = [
         btn("Layers",      "layers"),
         btn("Attachments", "attach")
     ];
 
+    // menu.fixed — the two fixed categories; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -520,7 +520,7 @@ show_picker(string category, integer page) {
     // items pack above. No fixed buttons here (page_size 9).
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "ordered",
+        "mode",       "menu.ordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -721,6 +721,9 @@ default {
         else if (num == DIALOG_BUS) {
             if (msg_type == "ui.dialog.response") handle_dialog_response(msg);
             else if (msg_type == "ui.dialog.timeout") handle_dialog_timeout(msg);
+            else if (msg_type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup_session();
+            }
         }
     }
 }

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.2
-REVISION: 13
+REVISION: 14
 PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -50,6 +50,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              click and hides those items for the rest of the session.
              No shared shadow lock vector between plugins.
 CHANGES:
+- v1.2 rev 14: outfit picker to menu.ordered, per-outfit action + empty menus to menu.fixed; cleans up on the new ui.dialog.close.
 - v1.2 rev 13: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Actions + pick:<idx> already routed by context.
 - v1.2 rev 12: on safeword.fired, clearthe persisted per-outfit lock list (LockedOutfits=[] + delete outfits.locked) so the locks don't re-apply on the next sync — kmod_rlv already released the detachallthis claims. A bad-actor-imposed locked outfit can't survive the wearer's safeword (unlock ≠ strip; the wearer just regains the ability to remove it).
 - v1.2 rev 11: nav-row consistency — has_nav 0→1 on the empty + action menus so the << >> Back row matches the rest of the UI; catch-all redraws for the inert << >> (the OL outfit picker already pages).
@@ -320,7 +321,7 @@ show_picker(integer page) {
     // the low slots; numbered outfits pack above (no padding).
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "ordered",
+        "mode",       "menu.ordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -343,17 +344,15 @@ show_empty_menu() {
     // Pager (has_nav=1: full << >> Back nav row; inert << >> redraw). Content = Help.
     list button_data = [btn("Help", "help")];
 
+    // menu.fixed — the no-outfits state (just Help); never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -374,7 +373,7 @@ show_action(string outfit_name) {
         body += "Lock   - toggle protection against removal";
     }
 
-    // Pager (has_nav=1: full << >> Back nav row; inert << >> redraw). Content = the actions.
+    // menu.fixed — the per-outfit action set; never paginates.
     list button_data = [];
     if (btn_allowed("Add"))    button_data += [btn("Add",    "add")];
     if (btn_allowed("Wear"))   button_data += [btn("Wear",   "wear")];
@@ -386,15 +385,12 @@ show_action(string outfit_name) {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -653,6 +649,9 @@ default {
         else if (num == DIALOG_BUS) {
             if (msg_type == "ui.dialog.response") handle_dialog_response(msg);
             else if (msg_type == "ui.dialog.timeout") handle_dialog_timeout(msg);
+            else if (msg_type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup_session();
+            }
         }
     }
 }

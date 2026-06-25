@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.2
-REVISION: 10
+REVISION: 12
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 12: main to menu.fixed (dropped MainPage cursor + main prev/next), add/remove pickers to menu.ordered, list view to dialog.info; cleans up on the new ui.dialog.close.
+- v1.2 rev 11: main menu now paginates — separate MainPage cursor (distinct from CurrentPage, the OL pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused BTN_BACK constant.
 - v1.2 rev 9: the read-only Show-Blklst listing now renders via the menu service's INFO mode (ui.menu.render mode="info"; kmod_menu rev 13) instead of the last raw ui.dialog.open — a single OK, no nav row (a display isn't navigated). The info "ok" routes like Back here (returns to the blacklist menu, since it's a sub-view). All blacklist dialogs now flow through kmod_menu.
 - v1.2 rev 8: main menu now renders via the menu service (pager mode, has_nav=1) instead of a raw ui.dialog.open — the nav row (<< >> Back) takes row0 so the +/-/Show action buttons sit in row1, not the nav row. Sheds the local Back button + layout. Handler unchanged (Back via top check, actions via main branch, inert <</>> redraw via fallback).
@@ -215,17 +217,15 @@ show_main_menu() {
     SessionId = generate_session_id();
     MenuContext = "main";
 
+    // menu.fixed — +/-/Show, a structural set; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      "Blacklist",
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -300,7 +300,7 @@ show_list_menu() {
     // blacklist main menu (it's a sub-view), handled in handle_dialog_response.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "info",
+        "mode",       "dialog.info",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "title",      "Blacklist",
@@ -323,7 +323,7 @@ show_remove_menu() {
     // parallel to Blacklist, so pick:<idx> maps straight back to the UUID.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "ordered",
+        "mode",       "menu.ordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -359,7 +359,7 @@ show_add_candidates() {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "ordered",
+        "mode",       "menu.ordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -596,6 +596,11 @@ default {
 
             if (msg_type == "ui.dialog.timeout") {
                 handle_dialog_timeout(msg);
+                return;
+            }
+
+            if (msg_type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup_session();
                 return;
             }
 

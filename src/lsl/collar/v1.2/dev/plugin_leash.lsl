@@ -1,13 +1,15 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.2
-REVISION: 10
+REVISION: 12
 PURPOSE: Self-contained leash UI — main menu, Settings (length/turn/texture/
          enhanced), Get Holder, direct actions (Clip/Unclip/Yank/Take), AND
          the target picker (avatar picker for Pass/Offer/Coffle, object scan
          for Post, offer-reception modal). Absorbed plugin_leash_target.
 CHANGES:
-- v1.2 rev 10: length menu reworked — -1m / +1m are now dedicated fixed buttons (contexts len_dec/len_inc) flanking a blank spacer, landing at slots 3 and 5 in the row above nav (needs kmod_menu rev 15 pager `fixed` support). << >> revert to plain inert nav (no longer repurposed as ±1m). showMenu() gained a `fixed` param; the other three menus pass [].
+- v1.2 rev 12: main to menu.fixed (dropped showMenu page param + LeashPage cursor + main prev/next), picker to menu.ordered, offer to dialog.modal; cleans up on the new ui.dialog.close.
+- v1.2 rev 11: main menu now paginates — showMenu gained a `page` arg; showMainMenu clamps/wraps a LeashPage cursor to its button count and pages on prev/next (the normalized nav contexts), settings/texture/length pass page 0 (their << >> redraw). Defensive; part of the all-pagers-operational pass.
+- v1.2 rev 10: length menu reworked — -1m/ +1m are now dedicated fixed buttons (contexts len_dec/len_inc) flanking a blank spacer, landing at slots 3 and 5 in the row above nav (needs kmod_menu rev 15 pager `fixed` support). << >> revert to plain inert nav (no longer repurposed as ±1m). showMenu() gained a `fixed` param; the other three menus pass [].
 - v1.2 rev 9: service nav normalized from the new nav:* contexts (was synthesized from the button labels << >> Back); the internal back/prev/next vocabulary + the length-menu << >> -1m/+1m repurposing are unchanged. No longer reads the button label.
 - v1.2 rev 8: ABSORBED plugin_leash_target — the former hidden picker sub-plugin is now in-line. The main menu / chat verbs call startPicker() directly instead of delegating over ui.menu.start, so the whole delegation seam is gone (delegateTo + returnToParent + the ui.menu.start re-entry/subpath redispatch). Picker renders via OL mode, offer-reception via modal mode. The two scripts' action senders collapse onto one sendAction(action, extra, recipient). One MenuContext spans the menu (main/settings/texture/length) + picker (pass/offer/coffle/post) states; the dialog-response router dispatches picker-vs-menu by MenuContext and the offer by its own session. sensor()/no_sensor() (Post object scan) move here. Merged footprint ~56.4 KB / 86% of the Mono ceiling; retires plugin_leash_target (was leash 42.3 KB + target 25.2 KB across two scripts). Nav-row consistency: has_nav 0→1 on showMenu (full << >> Back row on every menu, per the project convention), length's << >> repurposed as -1m/+1m, catch-all redraws for the inert << >> on the other menus.
 - v1.2 rev 7: menu-service migration + bytecode dedup. All four menus (main/settings/texture/length) now render via the pager (showMenu → ui.menu.render, DIALOG_BUS→UI_BUS); callers pass CONTENT buttons only and the service supplies Back + layout, so reorder_item_buttons is deleted outright. Length's << / >> (-1m/+1m fine-tune) ride as content buttons, not pager nav. Response handler maps the service's plain Back → "back" so the per-menu back branches are unchanged. The four near-identical senders (sendLeashAction / *WithTarget / sendSetLength / inline set_texture) collapse onto one sendAction(action, extra) builder — removes 3x the llMessageLinked/JSON boilerplate. PLUGIN_CATEGORY/MASK hoisted to the identity block (render_menu reads category). No behavior change beyond Back/layout now owned by the service.
@@ -104,23 +106,18 @@ showMenu(string context, string title, string body, list buttons, list fixed) {
     SessionId = generate_session_id();
     MenuContext = context;
 
-    // Pager render: the menu service reserves the full << >> Back nav row (the
-    // project convention — every menu shows nav so the bottom row never shifts)
-    // and lays out CONTENT above it. None of these menus paginate, so << >> are
-    // inert (a redraw). `fixed` rides between nav and content (the length menu
-    // uses it for the -1m / +1m buttons); [] for the menus that don't need it.
+    // menu.fixed: all four leash menus are small structural sets; never
+    // paginate. `fixed` rides between nav and content (the length menu uses it
+    // for the -1m / +1m buttons flanking a spacer); [] for the others.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      title,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
         "buttons",    llList2Json(JSON_ARRAY, buttons),
-        "fixed",      llList2Json(JSON_ARRAY, fixed),
-        "page",       0
+        "fixed",      llList2Json(JSON_ARRAY, fixed)
     ]), NULL_KEY);
 }
 
@@ -324,7 +321,7 @@ renderPickerPage(integer page) {
     SessionId = generate_session_id();
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "ordered",
+        "mode",       "menu.ordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -388,7 +385,7 @@ showOfferDialog(key target, key originator) {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",          "ui.menu.render",
-        "mode",          "modal",
+        "mode",          "dialog.modal",
         "session_id",    OfferDialogSession,
         "user",          (string)target,
         "title",         "Leash Offer",
@@ -662,7 +659,7 @@ handleButtonClick(string ctx) {
             cleanupSession();
         }
         else {
-            // Inert << >> on this single-page menu — just redraw.
+            // Unknown (e.g. the inert spacer) — redraw.
             showMainMenu();
         }
     }
@@ -960,6 +957,12 @@ default
                 }
                 if (timeout_session != SessionId) return;
                 cleanupSession();
+                return;
+            }
+
+            // Close (from a menu.fixed Close button, via kmod_dialogs).
+            if (msg_type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanupSession();
                 return;
             }
             return;

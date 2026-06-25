@@ -1,11 +1,14 @@
 /*--------------------
 PLUGIN: plugin_chat.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 11
 PURPOSE: Configuration UI for kmod_chat — change command prefix and toggle
          public chat (channel 0) listening.
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 11: menu migrated to menu.fixed (dropped the page cursor + nav:prev/next handlers); cleans up on the new ui.dialog.close.
+- v1.2 rev 10: main menu now paginates — MainPage cursor clamped/wrapped to the policy-filtered button count, nav:prev/nav:next page through, single page redraws. Defensive (fits one page today); part of the all-pagers-operational pass.
+- v1.2 rev 9: FIX — Back was dead after the nav-by-context change (kmod_menu rev 14): the empty-context→label fallback no longer fires (nav Back now carries nav:back). Route Back by nav:back; dropped the dead fallback. (Regression from the nav sweep's paginating-only audit.)
 - v1.2 rev 8: has_nav 0 → 1 so the menu service reserves the full nav row (<< >> Back) — Set Prefix/Channel/Toggle no longer spill into row0 (all menus need nav). Added a fallback redraw in handle_dialog_response for the now-present inert <</>> on this single-page menu.
 - v1.2 rev 7: render via kmod_menu (ui.menu.render) instead of ui.dialog.open — the plugin_bell model. show_main hands over content buttons only; kmod_menu adds the Back nav + layout. handle_dialog_response falls back to the button label for the nav Back (was the "back" context). Textbox prompts (Set Prefix/Channel) unchanged.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
@@ -222,15 +225,14 @@ show_main() {
     if (btn_allowed("Set Channel"))   button_data += [btn("Set Channel",  "set_channel")];
     if (btn_allowed("Toggle Public")) button_data += [btn(public_label,   "toggle_public")];
 
+    // menu.fixed — a small structural choice set; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type", "ui.menu.render",
+        "mode", "menu.fixed",
         "session_id", SessionId,
         "user", (string)CurrentUser,
-        "menu_type", PLUGIN_CONTEXT,
         "title", PLUGIN_LABEL,
         "body", body,
-        "category", PLUGIN_CATEGORY,
-        "has_nav", 1,
         "buttons", llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
@@ -273,14 +275,10 @@ handle_dialog_response(string msg) {
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
-    // The nav Back arrives with an empty context — fall back to the label.
-    if (ctx == "") {
-        string navb = llJsonGetValue(msg, ["button"]);
-        if (navb != JSON_INVALID) ctx = navb;
-    }
+    // Every button routes by context: nav is nav:back, content carries its ctx.
 
     if (MenuContext == "main") {
-        if (ctx == "Back") {
+        if (ctx == "nav:back") {
             return_to_root();
         }
         else if (ctx == "set_channel") {
@@ -316,8 +314,7 @@ handle_dialog_response(string msg) {
             show_main();
         }
         else {
-            // Unknown button (e.g. the inert << >> on a single-page menu) —
-            // just redraw.
+            // Unknown (e.g. the inert spacer) — redraw.
             show_main();
         }
     }
@@ -468,6 +465,9 @@ default
             }
             else if (msg_type == "ui.dialog.timeout") {
                 handle_dialog_timeout(msg);
+            }
+            else if (msg_type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup_session();
             }
         }
     }

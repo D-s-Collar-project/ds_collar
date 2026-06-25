@@ -1,10 +1,12 @@
 /*--------------------
 PLUGIN: plugin_owners.lsl
 VERSION: 1.2
-REVISION: 15
+REVISION: 17
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 17: main to menu.fixed, owner/trustee pickers to menu.unordered/menu.ordered, confirm to dialog.modal; cleans up on the new ui.dialog.close.
+- v1.2 rev 16: main menu now paginates — separate MainPage cursor (distinct from CurrentPage, which is the LIST pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 15: handle_button is now fully context-routed — dropped the vestigial `(cmd == "" && label == "Back")` fallback + the unused `label` param + the button read at the call site. (Corrects rev 14's note: there is NO numbered_list path — it was fully retired in rev 8 (pickers→UL/OL) + rev 13 (confirms→modal); the label fallback was dead code, not a live legacy path.)
 - v1.2 rev 14: service-menu nav routes by context (nav:back/nav:prev/nav:next). Pickers + confirms already flow through the menu service.
 - v1.2 rev 13: unified the release + runaway EXIT flows into one spine keyed on OwnerConsents (1=release/owner-authorized, 0=runaway/owner-bypassed). release_owner+release_wearer+runaway (3 branches) → exit_owner_auth + exit_wearer (2): the bit gates the owner-auth step (release only) and the terminal action — release → clear_owner (→ kmod_settings soft reboot, rev 8); runaway → trigger_runaway (factory reset). All wording, notices, targets, and cancel behavior preserved; chat /access rem owner enters the same spine.
@@ -391,17 +393,15 @@ show_main() {
     if (btn_allowed("Add Trustee")) button_data += [btn("Add Trustee", "add_trustee")];
     if (btn_allowed("Rem Trustee")) button_data += [btn("Rem Trustee", "rem_trustee")];
 
+    // menu.fixed — a structural owner/trustee action set; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -437,7 +437,7 @@ show_confirm(key target, string ctx, string title, string body) {
     MenuContext = ctx;
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "modal",
+        "mode",       "dialog.modal",
         "session_id", SessionId,
         "user",       (string)target,
         "title",      title,
@@ -465,7 +465,7 @@ show_candidates(string context, string title, string prompt) {
         i++;
     }
 
-    render_list_picker(CurrentUser, context, "unordered", title, prompt, items);
+    render_list_picker(CurrentUser, context, "menu.unordered", title, prompt, items);
 }
 
 show_honorific(key target, string context) {
@@ -477,7 +477,7 @@ show_honorific(key target, string context) {
     // UL picker, flat items (label == context == the honorific). Honorific
     // lists are short (<=6) and single-page, so pin the page cursor at 0.
     CurrentPage = 0;
-    render_list_picker(target, context, "unordered", "Honorific",
+    render_list_picker(target, context, "menu.unordered", "Honorific",
         "What would you like to be called?", choices);
 }
 
@@ -588,7 +588,7 @@ show_remove_trustee() {
         i++;
     }
 
-    render_list_picker(CurrentUser, "remove_trustee", "ordered", "Remove Trustee",
+    render_list_picker(CurrentUser, "remove_trustee", "menu.ordered", "Remove Trustee",
         "Select to remove:", names);
 }
 
@@ -698,7 +698,7 @@ handle_button(string cmd) {
             show_remove_trustee();
         }
         else {
-            // Inert << >> on this single-page pager — just redraw the menu.
+            // Unknown (e.g. the inert spacer) — redraw.
             show_main();
         }
         return;
@@ -975,6 +975,9 @@ default {
                 if ((llJsonGetValue(msg, ["session_id"]) != JSON_INVALID)) {
                     if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup();
                 }
+            }
+            else if (type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup();
             }
         }
     }

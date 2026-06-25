@@ -1,12 +1,13 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 9
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy filtering (animation buttons are dynamic content).
 CHANGES:
+- v1.2 rev 9: animation picker mode renamed unordered to menu.unordered (menu-mode taxonomy; no behavior change).
 - v1.2 rev 8: response handler routes every button by context — nav (nav:*), [Stop] (context "stop"), anim items (UL flat item: context == anim name) — was button-label-routed. handle_button_click takes context, not the raw label.
 - v1.2 rev 7: render via the menu service's UNORDERED picker mode (ui.menu.render mode="unordered") instead of building the slot-mapped dialog locally. Hands kmod_menu the full anim list + [Stop] as a fixed button; kmod_menu A-Z-sorts, pages, and lays out. Deleted ~90 lines of hand-rolled slot mapping + the empty-case dialog. Anims are now alphabetized (was inventory order); page indicator moved to the title. Handler/events unchanged (still name-based). PAGE_SIZE 8 must match kmod_menu's 12-3-1.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
@@ -199,7 +200,7 @@ show_animation_menu(integer page) {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "unordered",
+        "mode",       "menu.unordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,

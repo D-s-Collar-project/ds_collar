@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 15
+REVISION: 16
 CHANGES:
+- v1.2 rev 16: render unified — render_menu + render_list collapse into one render_paged(shape) covering the four menu.x shapes (fixed/pager/unordered/ordered); dialog.modal flanked to [No, spacer, Yes]; dispatch switches the six explicit menu.x / dialog.x modes (bare-name transition aliases dropped).
 - v1.2 rev 15: the pager (render_menu) now accepts the optional `fixed` action-button list, like render_list — fixed buttons reserve the low slots right after nav and page_size shrinks by the fixed count. A blank spacer ({label:" ",context:""}) among the fixed buttons positions them (plugin_leash's length menu uses [-1m," ",+1m] to flank -1m/+1m at slots 3 and 5). Menus that send no `fixed` are unchanged (page_size stays PAGE_SIZE).
 - v1.2 rev 14: nav buttons now carry contexts (nav:prev/nav:next/nav:back/nav:close) via the new nav_obj() helper — in render_menu + render_list — instead of bare label strings. The dialog layer already context-routes {label,context} objects, so consumers route nav by context like every other button (no more label-routing exception); the visible label is now free to restyle (e.g. UTF-8 arrows) with zero routing impact.
 - v1.2 rev 13: added the INFO mode (render_info) — a terminal informational dialog: title + body + a single OK button (context "ok"), NO nav row (info dialogs are not navigable menus, so they deliberately skip the << >> Back row). ok_label optional (default "OK"). First consumer: plugin_status. Other view-only displays (e.g. blacklist's list) can adopt it.
@@ -29,10 +30,17 @@ integer DIALOG_BUS = 950;
 string ROOT_CONTEXT = "ui.core.root";
 string SOS_CONTEXT  = "ui.sos.root";
 
-// Content buttons per page. The menu service owns paging now: callers hand
-// over the FULL button list and a page index; we slice it. MUST match
-// kmod_ui's MAX_FUNC_BTNS (cross-module contract).
-integer PAGE_SIZE = 9;
+// llDialog is a 3x4 grid — MENU_SLOTS button slots total. Content capacity is
+// MENU_SLOTS minus the reserved low slots (nav + any fixed action buttons), so a
+// standard 3-nav menu holds 9 content buttons — which kmod_ui's MAX_FUNC_BTNS
+// must match (cross-module contract).
+integer MENU_SLOTS = 12;
+
+// menu.* render shapes — all flow through the one render_paged():
+integer SHAPE_FIXED = 0;  // [Close . - . Back], single page (never paginates)
+integer SHAPE_PAGER = 1;  // [<< . >> . exit], paginates
+integer SHAPE_UL    = 2;  // unordered picker: A-Z sort, name on the button
+integer SHAPE_OL    = 3;  // ordered picker: number on the button + numbered body
 
 /* -------------------- HELPERS -------------------- */
 
@@ -109,206 +117,157 @@ string nav_obj(string label, string ctx) {
 
 /* -------------------- RENDERING -------------------- */
 
-render_menu(string msg) {
-    if (!validate_required_fields(msg, ["user", "session_id", "menu_type", "buttons"])) {
-        return;
-    }
+// ====================== UNIFIED NAVIGABLE RENDERER (menu.*) ======================
+// The four menu.* shapes share ONE process: reserve the bottom slots (nav +
+// optional fixed action buttons), lay content above them via the canonical
+// layout_buttons reverse-map, page if the shape paginates, forward to DIALOG_BUS.
+// Only two things vary by shape — the NAV ROW and how the CONTENT BUTTONS are
+// produced from the input:
+//   SHAPE_FIXED — [Close . - . Back], single page (caller guarantees it fits);
+//                 content = the caller's pre-built `buttons`.
+//   SHAPE_PAGER — [<< . >> . exit] (exit = Close at root / Back in a category;
+//                 has_nav=0 → a lone exit). Paginates. content = `buttons`.
+//   SHAPE_UL    — [<< . >> . Back]. Paginates. content from raw `items`, A-Z
+//                 sorted, NAME on the button, click returns the item's context.
+//   SHAPE_OL    — [<< . >> . Back]. Paginates. content from raw `items` in caller
+//                 order, NUMBER on the button + a numbered body line, click
+//                 returns pick:<global-index> (for names that overflow a button).
+render_paged(string msg, integer shape) {
+    if (!validate_required_fields(msg, ["user", "session_id"])) return;
 
     key user = (key)llJsonGetValue(msg, ["user"]);
-
     string session_id = llJsonGetValue(msg, ["session_id"]);
-    string menu_type = llJsonGetValue(msg, ["menu_type"]);
     integer current_page = (integer)llJsonGetValue(msg, ["page"]);
-    string buttons_json = llJsonGetValue(msg, ["buttons"]);
-    integer has_nav = (integer)llJsonGetValue(msg, ["has_nav"]);
 
-    // Category tier (kmod_ui sets "category" when rendering inside one):
-    // nav swaps Close for Back (returns to the root tier) and the title is
-    // the category name.
     string category = "";
     string cat_tmp = llJsonGetValue(msg, ["category"]);
     if (cat_tmp != JSON_INVALID) category = cat_tmp;
 
-    // The caller hands the FULL content button list; the menu service owns
-    // paging. Nav + optional fixed action buttons reserve the low slots; the
-    // page size is the remaining content capacity.
-    list full_buttons = llJson2List(buttons_json);
-    integer btn_count = llGetListLength(full_buttons);
+    // ---- nav row (per-shape difference #1) ----
+    list nav;
+    if (shape == SHAPE_FIXED) {
+        // Two-sided: Close (leave the menu system) + inert spacer + Back (up one
+        // level). A fixed menu frees the << >> slots, which pays for showing both.
+        nav = [nav_obj("Close", "nav:close"), nav_obj("-", ""), nav_obj("Back", "nav:back")];
+    }
+    else if (shape == SHAPE_PAGER) {
+        // Exit is Close at the root tier (ends the session) and Back inside a
+        // category (pops to root). has_nav=0 → a lone exit (no << >>).
+        string exit_obj = nav_obj("Close", "nav:close");
+        if (category != "") exit_obj = nav_obj("Back", "nav:back");
+        nav = [exit_obj];
+        if ((integer)llJsonGetValue(msg, ["has_nav"])) {
+            nav = [nav_obj("<<", "nav:prev"), nav_obj(">>", "nav:next"), exit_obj];
+        }
+    }
+    else {
+        nav = [nav_obj("<<", "nav:prev"), nav_obj(">>", "nav:next"), nav_obj("Back", "nav:back")];
+    }
 
-    // Nav takes the low slots; content fills the rest in reading order.
-    // Paginated menus lead with the full << >> <exit> row; others a lone exit.
-    // The exit button is Close at the root tier (ends the session) and Back
-    // inside a category (pops to root) — distinct contexts, chosen here.
-    string exit_obj = nav_obj("Close", "nav:close");
-    if (category != "") exit_obj = nav_obj("Back", "nav:back");
-
-    list nav = [exit_obj];
-    if (has_nav) nav = [nav_obj("<<", "nav:prev"), nav_obj(">>", "nav:next"), exit_obj];
-
-    // Optional fixed action buttons ({label,context}) — placed right after nav
-    // in the low slots, like render_list. Content packs above; page size shrinks
-    // by the fixed count so the reserved row never overflows. A blank spacer
-    // ({label:" ",context:""}) can sit between fixed buttons to position them.
+    // ---- optional fixed action buttons (any shape; e.g. leash length's ±1m) ----
     list fixed = [];
     string fixed_json = llJsonGetValue(msg, ["fixed"]);
     if (fixed_json != JSON_INVALID) fixed = llJson2List(fixed_json);
-
-    integer page_size = PAGE_SIZE - llGetListLength(fixed);
+    list reserved = nav + fixed;
+    integer page_size = MENU_SLOTS - llGetListLength(reserved);
     if (page_size < 1) page_size = 1;
 
-    integer total_pages = (btn_count + page_size - 1) / page_size;
-    if (total_pages < 1) total_pages = 1;
-    if (current_page >= total_pages) current_page = 0;
-    if (current_page < 0) current_page = total_pages - 1;
-
-    integer pstart = current_page * page_size;
-    integer pend = pstart + page_size;
-    if (pend > btn_count) pend = btn_count;
-    list page_buttons = [];
-    if (btn_count > 0) page_buttons = llList2List(full_buttons, pstart, pend - 1);
-
-    list final_button_data = layout_buttons(nav + fixed, page_buttons);
-
-    // Plugins may supply their own title (e.g. bell's "Bell"); else derive one
-    // from the category / menu_type for the root + category tiers.
-    string title = llJsonGetValue(msg, ["title"]);
-    if (title == JSON_INVALID) {
-        if (category != "") {
-            title = category;
+    // ---- content source + count (per-shape difference #2, part A) ----
+    // Button shapes (fixed/pager) take a pre-built `buttons` array; list shapes
+    // (UL/OL) take raw `items` parsed into a [label,context] stride table.
+    integer is_list = (shape == SHAPE_UL || shape == SHAPE_OL);
+    list full_buttons;
+    list pairs;
+    integer item_count;
+    if (is_list) {
+        list raw = llJson2List(llJsonGetValue(msg, ["items"]));
+        integer ri = 0;
+        integer rn = llGetListLength(raw);
+        while (ri < rn) {
+            string it = llList2String(raw, ri);
+            string lbl = llJsonGetValue(it, ["label"]);
+            string ctx;
+            if (lbl == JSON_INVALID) { lbl = it; ctx = it; }   // flat string: label IS the value
+            else {
+                ctx = llJsonGetValue(it, ["context"]);
+                if (ctx == JSON_INVALID) ctx = lbl;
+            }
+            pairs += [lbl, ctx];
+            ri += 1;
         }
-        else if (menu_type == ROOT_CONTEXT) {
-            title = "Main Menu";
+        // UL sorts A-Z by label; OL preserves the caller's order.
+        if (shape == SHAPE_UL && llGetListLength(pairs) > 2) {
+            pairs = llListSortStrided(pairs, 2, 0, TRUE);
         }
-        else if (menu_type == SOS_CONTEXT) {
-            title = "Emergency Menu";
-        }
-        else {
-            title = "Menu";
-        }
+        item_count = llGetListLength(pairs) / 2;
+    }
+    else {
+        string buttons_json = llJsonGetValue(msg, ["buttons"]);
+        if (buttons_json != JSON_INVALID) full_buttons = llJson2List(buttons_json);
+        item_count = llGetListLength(full_buttons);
     }
 
-    if (total_pages > 1) {
-        title = title + " (" + (string)(current_page + 1) + "/" + (string)total_pages + ")";
+    // ---- page math (fixed never paginates: one page, no slice, no counter) ----
+    integer total_pages = 1;
+    integer pstart = 0;
+    integer pend = item_count;
+    if (shape != SHAPE_FIXED) {
+        total_pages = (item_count + page_size - 1) / page_size;
+        if (total_pages < 1) total_pages = 1;
+        if (current_page >= total_pages) current_page = 0;
+        if (current_page < 0) current_page = total_pages - 1;
+        pstart = current_page * page_size;
+        pend = pstart + page_size;
+        if (pend > item_count) pend = item_count;
     }
 
-    // Plugins may supply their own status body (e.g. bell's volume/visibility
-    // readout); fall back to the generic prompt keyed by menu_type.
+    // ---- body (default up front; OL appends numbered lines below) ----
     string body_text = llJsonGetValue(msg, ["body"]);
     if (body_text == JSON_INVALID) {
-        if (menu_type == SOS_CONTEXT) {
+        if (shape == SHAPE_PAGER && llJsonGetValue(msg, ["menu_type"]) == SOS_CONTEXT) {
             body_text = "Emergency options:";
         }
-        else {
-            body_text = "Select an option:";
-        }
+        else body_text = "Select an option:";
     }
 
-    string final_button_data_json = llList2Json(JSON_ARRAY, final_button_data);
-
-    string dialog_msg = llList2Json(JSON_OBJECT, [
-        "type", "ui.dialog.open",
-        "session_id", session_id,
-        "user", (string)user,
-        "title", title,
-        "body", body_text,
-        "button_data", final_button_data_json,
-        "timeout", 60
-    ]);
-
-    llMessageLinked(LINK_SET, DIALOG_BUS, dialog_msg, NULL_KEY);
-}
-
-// LIST picker mode — a paginated list. The << >> Back nav (+ optional `fixed`
-// action buttons) reserve the low slots; content packs above via layout_buttons
-// (NO padding — short lists just have fewer rows). page_size = 12 - reserved.
-// Page state + wrap stay with the caller. `isOrdered` selects the flavor:
-//   UL (0): no predetermined order → A-Z sort by label; the NAME is the button.
-//           Items may be flat strings (label == context, e.g. animations) or
-//           {label,context} objects (e.g. a person: name shown, UUID returned).
-//           Body is the caller's; the click returns the item's context.
-//   OL (1): caller order preserved; the NUMBER (1..N page-relative) is the
-//           button with a matching numbered body line; the click returns
-//           "pick:<global-index>" — for long names that overflow a button.
-render_list(string msg, integer isOrdered) {
-    if (!validate_required_fields(msg, ["user", "session_id", "items"])) {
-        return;
+    // ---- build the page's content buttons (per-shape difference #2, part B) ----
+    list content;
+    if (is_list) {
+        integer i = pstart;
+        while (i < pend) {
+            string lbl = llList2String(pairs, i * 2);
+            if (shape == SHAPE_OL) {
+                string num = (string)(i - pstart + 1);
+                content += [llList2Json(JSON_OBJECT, ["label", num, "context", "pick:" + (string)i])];
+                body_text += "\n" + num + ". " + lbl;
+            }
+            else {
+                content += [llList2Json(JSON_OBJECT,
+                    ["label", lbl, "context", llList2String(pairs, i * 2 + 1)])];
+            }
+            i += 1;
+        }
     }
-
-    key user = (key)llJsonGetValue(msg, ["user"]);
-    string session_id = llJsonGetValue(msg, ["session_id"]);
-    integer current_page = (integer)llJsonGetValue(msg, ["page"]);
-
-    // Optional fixed action buttons ({label,context}) after the nav.
-    list fixed = [];
-    string fixed_json = llJsonGetValue(msg, ["fixed"]);
-    if (fixed_json != JSON_INVALID) fixed = llJson2List(fixed_json);
-    list reserved = [nav_obj("<<", "nav:prev"), nav_obj(">>", "nav:next"), nav_obj("Back", "nav:back")] + fixed;
-    integer page_size = 12 - llGetListLength(reserved);
-    if (page_size < 1) page_size = 1;
-
-    // Parse items into a strided [label, context] table. Flat strings →
-    // label == context; {label,context} objects keep their own context.
-    list raw = llJson2List(llJsonGetValue(msg, ["items"]));
-    list pairs = [];
-    integer ri = 0;
-    integer rn = llGetListLength(raw);
-    while (ri < rn) {
-        string it = llList2String(raw, ri);
-        string lbl = llJsonGetValue(it, ["label"]);
-        string ctx;
-        if (lbl == JSON_INVALID) {
-            lbl = it;     // flat string: label IS the value
-            ctx = it;
-        }
-        else {
-            ctx = llJsonGetValue(it, ["context"]);
-            if (ctx == JSON_INVALID) ctx = lbl;
-        }
-        pairs += [lbl, ctx];
-        ri += 1;
-    }
-    // UL sorts A-Z by label; OL preserves the caller's order.
-    if (!isOrdered && llGetListLength(pairs) > 2) {
-        pairs = llListSortStrided(pairs, 2, 0, TRUE);
-    }
-
-    integer item_count = llGetListLength(pairs) / 2;
-    integer total_pages = (item_count + page_size - 1) / page_size;
-    if (total_pages < 1) total_pages = 1;
-    if (current_page >= total_pages) current_page = 0;
-    if (current_page < 0) current_page = total_pages - 1;
-
-    integer pstart = current_page * page_size;
-    integer pend = pstart + page_size;
-    if (pend > item_count) pend = item_count;
-
-    // Build the page's content buttons; OL also appends a numbered body line.
-    list content = [];
-    string body_text = llJsonGetValue(msg, ["body"]);
-    if (body_text == JSON_INVALID) body_text = "Select an option:";
-
-    integer i = pstart;
-    while (i < pend) {
-        string lbl = llList2String(pairs, i * 2);
-        if (isOrdered) {
-            string num = (string)(i - pstart + 1);
-            content += [llList2Json(JSON_OBJECT, [
-                "label", num, "context", "pick:" + (string)i
-            ])];
-            body_text += "\n" + num + ". " + lbl;
-        }
-        else {
-            content += [llList2Json(JSON_OBJECT, [
-                "label", lbl, "context", llList2String(pairs, i * 2 + 1)
-            ])];
-        }
-        i += 1;
+    else if (item_count > 0) {
+        content = llList2List(full_buttons, pstart, pend - 1);
     }
 
     list final_button_data = layout_buttons(reserved, content);
 
+    // ---- title (pager derives from category/menu_type; + page counter) ----
     string title = llJsonGetValue(msg, ["title"]);
-    if (title == JSON_INVALID) title = "Menu";
+    if (title == JSON_INVALID) {
+        if (shape == SHAPE_PAGER && category != "") {
+            title = category;
+        }
+        else if (shape == SHAPE_PAGER) {
+            string menu_type = llJsonGetValue(msg, ["menu_type"]);
+            if (menu_type == ROOT_CONTEXT) title = "Main Menu";
+            else if (menu_type == SOS_CONTEXT) title = "Emergency Menu";
+            else title = "Menu";
+        }
+        else title = "Menu";
+    }
     if (total_pages > 1) {
         title = title + " (" + (string)(current_page + 1) + "/" + (string)total_pages + ")";
     }
@@ -324,13 +283,13 @@ render_list(string msg, integer isOrdered) {
     ]), NULL_KEY);
 }
 
-// MODAL mode: a forced Yes/No confirmation. NO nav row — the two choices sit in
-// the bottom row with the SAFE choice (No/cancel) ALWAYS first at slot 0, so a
-// reflexive click hits the non-destructive option (enforced here, not trusted
-// to the caller). Rendered to an arbitrary `user` target — confirm prompts
-// often go to a different avatar than the operator (e.g. the candidate being
-// asked to accept ownership). Labels default to Yes/No; the click always
-// returns context "confirm" (Yes) or "cancel" (No).
+// dialog.modal: a forced Yes/No confirmation (terminal — NOT a navigable menu).
+// Bottom row [No . - . Yes]: No/cancel first (reflexive-safe) + an inert spacer
+// so No and Yes are never adjacent (fat-finger guard on destructive confirms).
+// Rendered to an arbitrary `user` target — confirm prompts often go to a
+// different avatar than the operator (e.g. the candidate being asked to accept
+// ownership). Labels default to Yes/No; the click always returns context
+// "confirm" (Yes) or "cancel" (No).
 render_modal(string msg) {
     if (!validate_required_fields(msg, ["user", "session_id"])) {
         return;
@@ -344,9 +303,13 @@ render_modal(string msg) {
     string cancel_label = llJsonGetValue(msg, ["cancel_label"]);
     if (cancel_label == JSON_INVALID) cancel_label = "No";
 
-    // No (cancel) at slot 0, Yes (confirm) at slot 1 — No always first.
+    // Bottom row [No . - . Yes]: No (cancel) ALWAYS at slot 0 (a reflexive click
+    // hits the non-destructive option), an inert spacer at slot 1 so No and Yes
+    // are NEVER adjacent (fat-finger guard on destructive confirms), Yes (confirm)
+    // at slot 2. Mirrors menu.fixed's [Close . - . Back] bottom row.
     list button_data = [
-        llList2Json(JSON_OBJECT, ["label", cancel_label, "context", "cancel"]),
+        llList2Json(JSON_OBJECT, ["label", cancel_label,  "context", "cancel"]),
+        llList2Json(JSON_OBJECT, ["label", "-",           "context", ""]),
         llList2Json(JSON_OBJECT, ["label", confirm_label, "context", "confirm"])
     ];
 
@@ -429,16 +392,18 @@ default
 
         if (num == UI_BUS) {
             if (msg_type == "ui.menu.render") {
-                // Mode-switch: each mode prepares its slots differently, then
-                // shares the one layout_buttons primitive. Default = pager.
-                // unordered/ordered share one render_list (the bit picks the
-                // flavor); modal, info, and pager are their own renderers.
+                // Two families: navigable menus (menu.*) all flow through the one
+                // render_paged(shape); terminal dialogs (dialog.*) are their own
+                // small renderers. menu.* share render_paged (four shapes);
+                // dialog.* are terminal. A missing/unknown mode defaults to the
+                // safe paginating pager.
                 string mode = llJsonGetValue(msg, ["mode"]);
-                if (mode == "unordered") render_list(msg, FALSE);
-                else if (mode == "ordered") render_list(msg, TRUE);
-                else if (mode == "modal") render_modal(msg);
-                else if (mode == "info") render_info(msg);
-                else render_menu(msg);
+                if      (mode == "menu.fixed")     render_paged(msg, SHAPE_FIXED);
+                else if (mode == "menu.unordered") render_paged(msg, SHAPE_UL);
+                else if (mode == "menu.ordered")   render_paged(msg, SHAPE_OL);
+                else if (mode == "dialog.modal")   render_modal(msg);
+                else if (mode == "dialog.info")    render_info(msg);
+                else                               render_paged(msg, SHAPE_PAGER);
             }
             else if (msg_type == "ui.message.show") {
                 show_message(msg);

@@ -1,13 +1,15 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.2
-REVISION: 11
+REVISION: 13
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.2 rev 13: main to menu.fixed (dropped MainPage cursor + main prev/next), category toggle-list to menu.pager (still paginates), sit-target picker to menu.ordered; cleans up on the new ui.dialog.close.
+- v1.2 rev 12: main menu now paginates — separate MainPage cursor (distinct from CurrentPage/SitPage, the category + sit pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 11: nav routes by context (nav:back/nav:prev/nav:next) across all three menu blocks (main/sit_select/category), not the button label; dropped the now-unused `button` local. Categories, toggles, and pick:<idx> already routed by context.
 - v1.2 rev 10: on safeword.fired (the wearer's safeword), clear the persisted restriction config (Restrictions=[] + delete restrict.list) so it doesn't re-apply on the next sync — kmod_rlv's system-wide clear already dropped the claims.
 - v1.2 rev 9: nav-row consistency — show_main has_nav 0→1 so the << >> Back row matches the rest of the UI (the category menu already paged); catch-all redraw for the inert << >>.
@@ -382,7 +384,7 @@ display_sit_targets() {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "ordered",
+        "mode",       "menu.ordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -445,20 +447,15 @@ show_main() {
         body = "RLV Actions\n\nForce sit or unsit the wearer.";
     }
 
-    // Pager (has_nav=1: full << >> Back nav row — the project convention; the
-    // inert << >> redraw via the handler's catch-all). Content = the actions
-    // + category buttons.
+    // menu.fixed — actions + category buttons, a structural set; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, item_buttons),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, item_buttons)
     ]), NULL_KEY);
 }
 
@@ -494,8 +491,11 @@ show_category_menu(string cat_name, integer page_num) {
 
     string body = "Active: " + (string)llGetListLength(Restrictions);
 
+    // menu.pager — the per-category restriction toggle list genuinely paginates
+    // (a category can hold more than one page of @restrictions). [<< >> Back].
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.pager",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -578,7 +578,7 @@ handle_dialog_response(string msg) {
             show_main();
         }
         else {
-            // Inert << >> on this single-page menu — redraw.
+            // Unknown (e.g. the inert spacer) — redraw.
             show_main();
         }
     }
@@ -745,6 +745,9 @@ default
             }
             else if (type == "ui.dialog.timeout") {
                 handle_dialog_timeout(msg);
+            }
+            else if (type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup_session();
             }
         }
     }

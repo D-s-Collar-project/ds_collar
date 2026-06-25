@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_ui.lsl
 VERSION: 1.2
-REVISION: 10
+REVISION: 11
 CHANGES:
+- v1.2 rev 11: handle ui.dialog.close (Close = same session teardown as timeout); removed the now-dead local nav:close cleanup (kmod_dialogs owns it now).
 - v1.2 rev 10: handle_button_click routes nav by context (nav:prev/nav:next/nav:back/nav:close), not the button label; dropped the now-unused `button` param + its read in the response handler. Removes the last label-routing in the menu system (kmod_menu rev 14 now stamps nav contexts).
 - v1.2 rev 9: RLV-gated visibility. rebuild_views drops any plugin whose mask carries bit 0x40 (RLV-required) while rlv.active=="0" (published by kmod_bootstrap); linkset_data arms a rebuild when rlv.active changes. The ACL test (mask & 1<<lvl, lvl<=5) never touches bit 6, so per-level visibility is unchanged. Fail-open: absent/"1" shows everything.
 - v1.2 rev 8: render_session hands kmod_menu the FULL button list (not a pre-sliced page) — the menu service owns page slicing now (kmod_menu rev 7). kmod_ui still tracks current_page + total_pages for the <</>> wrap in handle_button_click; it just no longer slices. Step 1 of the shape-service split (menu service owns layout+paging).
@@ -632,12 +633,8 @@ handle_button_click(key user, string context) {
         return;
     }
 
-    if (context == "nav:close") {
-        cleanup_session(user);
-        return;
-    }
-
-    // Back on a category page returns to the root tier.
+    // Back on a category page returns to the root tier. (nav:close no longer
+    // arrives here — kmod_dialogs intercepts Close and sends ui.dialog.close.)
     if (context == "nav:back") {
         SessionCategories = llListReplaceList(SessionCategories, [""], session_idx, session_idx);
         SessionPages = llListReplaceList(SessionPages, [0], session_idx, session_idx);
@@ -911,6 +908,7 @@ default
         if (num == DIALOG_BUS) {
             if (msg_type == "ui.dialog.response") handle_dialog_response(msg);
             else if (msg_type == "ui.dialog.timeout") handle_dialog_timeout(msg);
+            else if (msg_type == "ui.dialog.close") handle_dialog_timeout(msg);  // Close = same teardown
             return;
         }
     }
