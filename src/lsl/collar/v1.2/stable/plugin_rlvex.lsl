@@ -1,8 +1,11 @@
 /*--------------------
 PLUGIN: plugin_rlvex.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 12
 CHANGES:
+- v1.2 rev 12: main + owner/trustee/toggle sub-menus migrated to menu.fixed (dropped the MainPage cursor + nav:prev/next); cleans up on the new ui.dialog.close.
+- v1.2 rev 11: main menu now paginates — MainPage cursor clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws (sub-menus keep their catch-all redraws). Defensive; part of the all-pagers-operational pass.
+- v1.2 rev 10: FIX — Back was dead after the nav-by-context change (kmod_menu rev 14): the normalize guard `resp_ctx=="" && button=="Back"` no longer fires (nav Back now carries nav:back). Normalize nav:back→back instead, so handle_button's `ctx=="back"` still fires. (Regression from the nav sweep's paginating-only audit.)
 - v1.2 rev 9: nav-row consistency — has_nav 0→1 on all four menus so the << >> Back row matches the rest of the UI; added catch-all redraws in main/owner/trustee for the now-inert << >> (toggle menus already self-redraw to the parent).
 - v1.2 rev 8: menu-service migration. show_main / show_owner_menu / show_trustee_menu / show_toggle now render via the pager (ui.menu.render, has_nav=0; the service supplies Back), sends moved DIALOG_BUS→UI_BUS, local "Back" button dropped from each list. Content buttons keep their {label,context} so handle_button's ctx-routing is unchanged; the response handler maps the service's plain Back (button="Back", empty ctx) → "back" so the context-aware up-navigation (toggle→role menu→main→exit) is preserved. Exception logic untouched.
 - v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (56→120) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
@@ -272,17 +275,15 @@ show_main() {
     if (btn_allowed("Owner"))   button_data += [btn("Owner", "owner")];
     if (btn_allowed("Trustee")) button_data += [btn("Trustee", "trustee")];
 
+    // menu.fixed — Owner/Trustee picker, structural set; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -303,15 +304,12 @@ show_owner_menu() {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      "Owner Exceptions",
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -332,15 +330,12 @@ show_trustee_menu() {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      "Trustee Exceptions",
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -359,15 +354,12 @@ show_toggle(string role, string exception_type, integer current) {
 
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      role + " " + exception_type,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -395,7 +387,7 @@ handle_button(string ctx) {
     if (MenuContext == "main") {
         if (ctx == "owner") show_owner_menu();
         else if (ctx == "trustee") show_trustee_menu();
-        else show_main();                 // inert << >> — redraw
+        else show_main();                 // unknown (e.g. the inert spacer) — redraw
     }
     else if (MenuContext == "owner") {
         if (ctx == "tp") show_toggle("Owner", "TP", ExOwnerTp);
@@ -564,11 +556,11 @@ default {
             if (type == "ui.dialog.response") {
                 if ((llJsonGetValue(msg, ["session_id"]) != JSON_INVALID) && (llJsonGetValue(msg, ["context"]) != JSON_INVALID)) {
                     if (llJsonGetValue(msg, ["session_id"]) == SessionId) {
-                        // The menu service renders nav (Back) as a plain button →
-                        // empty context; map it to the legacy "back" context so
+                        // The menu service stamps nav Back with context nav:back;
+                        // normalize to this plugin's legacy "back" context so
                         // handle_button's context-aware up-navigation still fires.
                         string resp_ctx = llJsonGetValue(msg, ["context"]);
-                        if (resp_ctx == "" && llJsonGetValue(msg, ["button"]) == "Back") resp_ctx = "back";
+                        if (resp_ctx == "nav:back") resp_ctx = "back";
                         handle_button(resp_ctx);
                     }
                 }
@@ -577,6 +569,9 @@ default {
                 if ((llJsonGetValue(msg, ["session_id"]) != JSON_INVALID)) {
                     if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup();
                 }
+            }
+            else if (type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup();
             }
         }
     }

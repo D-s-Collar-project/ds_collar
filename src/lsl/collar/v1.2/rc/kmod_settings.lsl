@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 9
 PURPOSE: Validation guards, roster conversion, and LSD settings store
 CHANGES:
+- v1.2 rev 9: whitelisted safeword.word (owned by plugin_maint) in MANAGED_SETTINGS_KEYS so the wearer's personal safeword persists via the single-writer settings.delta protocol.
 - v1.2 rev 8: ownership changes now REBOOT the collar instead of a light settings.sync, split by ENTRY vs EXIT. ENTRY (handle_set_owner: add/transfer) → request_owner_reboot() = kernel.reset.soft: scripts reset, roster + notecard KEPT (the new owner inherits a working collar; the card's "only one" guard blocks any stale card owner re-streaming). EXIT (handle_clear_owner: release) → factory_reset() = notecard removed + LSD wiped, SAME as runaway: a released/fled wearer's collar is fully cleared because the dom's authority — and their card settings — cease to apply, and an emptied owner slot would otherwise let the card re-stream the owner back. Removed clear_owner_records (subsumed by the wipe). Boot-safe: card path seeds via card_add_owner → user_write, never these handlers; trustee/blacklist mutations keep the light sync.
 - v1.2 rev 7: Reset Config no longer has its own card parser. The bespoke path (snapshot owner+lock → llLinksetDataReset → request card re-stream → finalize_reset_config) was redundant with kmod_bootstrap (which owns card I/O) AND bricked: readiness was stamped only in finalize, which fired only after the card re-stream handshake completed — a stalled stream (e.g. bootstrap's `Streaming` in-flight guard stuck) left the sentinel unset = pre-boot brick. Now handle_reset_config just WIPES config (deletes every LSD key except user.* roster + access.isowned/multiowner + lock.locked + safeguard.last_owner) and broadcasts kernel.reset.factory — the standard boot rebuilds everything: plugins re-seed their OWN defaults (the config source; the card is NOT — see feedback_card_not_config_source), kmod_settings re-stamps readiness, kmod_bootstrap re-applies the card OVERRIDE if present / ignores if absent (the wipe cleared settings.cardapplied). Removed finalize_reset_config + the InResetConfig/ResetConfigKeys/ResetConfigValues state. Reload/card-edit paths unchanged.
 - v1.2 rev 6: The notecard is an OVERRIDE, never a requirement — decouple readiness from the card so a present-but-unstreamable card can't brick the UI. Two markers now: settings.bootstrapped (readiness; kmod_auth's gate) is stamped IMMEDIATELY in state_entry on any fresh boot (the old "card present → wait for settings.card.streamed" branch is gone — that branch left the sentinel unstamped forever on owner-change boots whose card handshake didn't land, so auth never went ready = no UI). New settings.cardapplied marker gates the card override: process_streamed_card + finalize_reset_config set it; Reload Settings / card-edit clear it (NOT the readiness sentinel, so the UI stays up through a reload); a wipe clears both so the card re-applies for a new owner. kmod_bootstrap now streams the card gated on settings.cardapplied, not the readiness sentinel.
@@ -310,6 +311,7 @@ list MANAGED_SETTINGS_KEYS = [
     "chat.prefix",            // plugin_chat
     "chat.channel",           // plugin_chat
     "chat.public",            // plugin_chat
+    "safeword.word",          // plugin_maint (wearer's personal safeword)
     "bell.visible",           // plugin_bell
     "bell.enablesound",       // plugin_bell
     "bell.volume",            // plugin_bell

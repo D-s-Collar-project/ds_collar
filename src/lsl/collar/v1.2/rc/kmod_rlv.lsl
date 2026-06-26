@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: kmod_rlv.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 8
 PURPOSE: RLV subsystem. Single point of @-command emission for all
   refcount-stateful RLV restrictions in the collar. Owns the third-party
   RLV relay protocol (RELAY_CHANNEL listen, auth queue, ASK dialog,
@@ -20,6 +20,7 @@ ARCHITECTURE: Spun off from plugin_relay v1.10 rev 21 to keep that
     (one-shot or pre-existing semantics — Phase 2 migration), and
     kmod_leash (=force / =clear only, no refcount overlap).
 CHANGES:
+- v1.2 rev 8: system-wide safeword. claim_clear_all() drops every claim (@detach from plugin_lock and the leash's @sittp are direct llOwnerSay, not claims, so they survive). do_safeword_clear(system_wide): relay.safeword (relay menu Safeword/Unbind) stays relay-only; the new safeword.fired (the wearer's bare word / "<prefix> safeword", from kmod_chat) goes system-wide — drop all claims + @unsit=force. The force-unsit lands here, AFTER the releases, where the ordering is safe in-engine — the reason the safeword release lives in kmod_rlv and not a plugin.
 - v1.2 rev 7: Removed vestigial kernel registration. As an engine, kmod_rlv has no menu presence and no other module reads its reg.* row — it was the lone kmod registering with the kernel (a leftover from the plugin_relay split, rev 21). Deleted register_self() + its state_entry/refresh calls, send_pong(), and the kernel.ping handler (it was the only module that ponged — a closed loop sustaining only its own last_seen row). Now consistent with auth/settings/bootstrap/menu/dialogs/chat. KMOD_CONTEXT retained (reset-target filter). No functional change to the RLV engine or bus API.
 - v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 --------------------*/
@@ -247,6 +248,22 @@ claim_clear(string consumer) {
 }
 
 
+// Drop EVERY claim (all consumers) — the system-wide safeword. Emits @behav=y
+// for each currently-applied behav, then empties the registry. @detach
+// (plugin_lock) and the leash's @sittp are issued DIRECTLY, never claimed, so
+// they are not in Baked and survive untouched.
+claim_clear_all() {
+    integer i = 0;
+    integer n = llGetListLength(Baked);
+    while (i < n) {
+        llOwnerSay("@" + llList2String(Baked, i) + "=y");
+        i += 1;
+    }
+    Baked = [];
+    Claims = [];
+}
+
+
 /* -------------------- RELAY-SIDE RESTRICTION TRACKING -------------------- */
 
 string source_consumer(key obj) {
@@ -349,6 +366,21 @@ relay_safeword_clear() {
     TempAvBlack = [];
 
     rearm_timer();
+}
+
+
+// Wearer safeword, scope chosen by source. Relay-only (system_wide FALSE — the
+// relay menu Safeword/Unbind) cuts just external relay sources. System-wide
+// (TRUE — the safeword word / "<prefix> safeword") additionally drops every
+// collar-internal claim (restrict, folders, outfits) and force-stands the
+// wearer. @detach + the leash's @sittp are direct, not claims, so they stay;
+// the leash itself is unclipped by kmod_leash_engine on the same broadcast.
+do_safeword_clear(integer system_wide) {
+    relay_safeword_clear();
+    if (system_wide) {
+        claim_clear_all();
+        llOwnerSay("@unsit=force");
+    }
 }
 
 
@@ -855,7 +887,16 @@ default {
                 return;
             }
             if (msg_type == "relay.safeword") {
-                relay_safeword_clear();
+                // Relay menu Safeword/Unbind: relay-only (cut external sources).
+                do_safeword_clear(FALSE);
+                return;
+            }
+            if (msg_type == "safeword.fired") {
+                // The wearer's safeword (bare word / "<prefix> safeword"): the
+                // whole kit — drop every collar-imposed restriction except the
+                // directly-issued @detach (lock) and the leash's @sittp, then
+                // force-stand. kmod_leash_engine unclips the leash separately.
+                do_safeword_clear(TRUE);
                 return;
             }
             if (msg_type == "relay.ground_rez") {

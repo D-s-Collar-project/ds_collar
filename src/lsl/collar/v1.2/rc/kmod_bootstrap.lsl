@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_bootstrap.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 8
 CHANGES:
+- v1.2 rev 8: self-healing cross-version (v1.x->v1.2) update re-seed. remote.update.complete used to do a lone llResetScript() (restarts only bootstrap); a cross-schema update leaves the old LSD roster unreadable by the new user.*-based scripts, so the wearer comes up "uncommitted" with no menus and a normal reboot can't recover it (only a FULL script reset re-reads the card). handle_update_complete() now detects the brick (zero user.* records) and forces the design recovery: clears settings.cardapplied + broadcasts kernel.reset.soft so the WHOLE collar restarts together, the card re-streams (legacy access.* scratch preserved, so migrate rebuilds from it OR the card), and the roster repopulates. Scoped: a healthy collar (roster present) just restarts — a normal v1.2->v1.2 update never re-reads the card or disturbs live config. (kernel.reset.soft = scripts reset, roster+card KEPT, per kmod_settings rev 8.)
 - v1.2 rev 7: publish rlv.active to LSD in announce_status ("1"/"0" per RLV detection). CROSS-MODULE: kmod_ui reads it to hide RLV-required plugins (mask bit 0x40) when RLV is off. Written each boot (and re-detected on attach), so it tracks the real state.
 - v1.2 rev 6: Touch-guard. Clears boot.ready at boot start and sets it "1" at "Collar startup complete", so kmod_ui ignores touches until startup finishes. Automates the manual "don't touch until startup done" workaround — a touch mid-boot fires kmod_ui's menu render + view rebuild, piling concurrent LSD writes/bus traffic onto the plugin-registration window (which under load drops registrations and strands plugins from the menu). CROSS-MODULE CONTRACT: boot.ready, read by kmod_ui. Also tightened the RLV probe: 3 retries (was 10), first at +2s (was +5s), 30s deadline (was 60s) — caps the no-RLV touch-guard wait at 30s.
 - v1.2 rev 4: Card streaming is gated on settings.cardapplied, not the readiness sentinel. The notecard is an OVERRIDE, never a requirement: kmod_settings now stamps readiness (settings.bootstrapped) immediately and independently, so gating the stream on the readiness sentinel was both wrong (a missed handshake left readiness unstamped = no UI) and circular. We stream once per fresh boot (card present + settings.cardapplied unset) and the self-heal retry re-points to the same marker — now non-fatal, since readiness no longer waits on the card. Fixes "new owner / blank-card collar gets no UI".
@@ -404,6 +405,31 @@ announce_status() {
     llLinksetDataWrite(KEY_BOOT_READY, "1");
 }
 
+/* -------------------- UPDATE COMPLETION -------------------- */
+
+// update_shim broadcasts remote.update.complete just before self-deletion.
+// A lone llResetScript() (the old behaviour) restarts only bootstrap — but a
+// cross-version update (v1.x -> v1.2) leaves the LSD in the OLD schema, and the
+// new scripts read the new user.* roster, which the old data never populated:
+// the wearer comes up "uncommitted" with no menus. The design recovery is a
+// re-seed from the notecard, which only happens reliably when the WHOLE collar
+// resets together (the card-stream handshake needs bootstrap + kmod_settings
+// both fresh) — exactly the "fully reset the scripts and the card is re-read"
+// behaviour. So: if the roster is empty (the migration brick), clear the card
+// marker and broadcast a full soft reset so every script restarts and the card
+// re-streams (the legacy access.* scratch data is preserved, so migrate rebuilds
+// from it OR the card). A healthy collar (roster present) just restarts — a
+// normal v1.2 -> v1.2 update never re-reads the card or disturbs live config.
+handle_update_complete() {
+    if (llGetListLength(llLinksetDataFindKeys("^user\\.", 0, -1)) == 0) {
+        llLinksetDataDelete(KEY_CARD_APPLIED);
+        llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
+            "type", "kernel.reset.soft"
+        ]), NULL_KEY);
+    }
+    llResetScript();
+}
+
 /* -------------------- EVENTS -------------------- */
 default
 {
@@ -566,7 +592,7 @@ state starting
         // the new script set live in the collar.
         else if (num == REMOTE_BUS) {
             if (msg_type == "remote.update.complete") {
-                llResetScript();
+                handle_update_complete();
             }
         }
     }
@@ -631,7 +657,7 @@ state running
         // so startup orchestration re-runs with the new script set live.
         else if (num == REMOTE_BUS) {
             if (msg_type == "remote.update.complete") {
-                llResetScript();
+                handle_update_complete();
             }
         }
     }

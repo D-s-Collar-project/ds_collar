@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_dialogs.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 7
 PURPOSE: Centralized dialog management for shared listener handling
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.2 rev 7: nav:close handled centrally — a Close click closes the session and broadcasts the new ui.dialog.close (distinct from ui.dialog.timeout) so consumers tear down once instead of redrawing.
 - v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 --------------------*/
 
@@ -477,6 +478,22 @@ default
                 if (j != -1) {
                     string ctx_val = llJsonGetValue(button_map_json, ["c", j]);
                     if (ctx_val != JSON_INVALID) clicked_context = ctx_val;
+                }
+
+                // Close (nav:close) is handled centrally: tear down the session
+                // and broadcast ui.dialog.close so the owning consumer clears its
+                // session state — NOT a button response (the menu must not redraw).
+                // ui.dialog.close is the unified "this session is closing" signal
+                // (also what consumers send to close their own dialog). Timeouts
+                // keep their own ui.dialog.timeout — uses stay unmuddied.
+                if (clicked_context == "nav:close") {
+                    close_session_at_idx(i);
+                    llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
+                        "type", "ui.dialog.close",
+                        "session_id", session_id,
+                        "user", (string)id
+                    ]), NULL_KEY);
+                    return;
                 }
 
                 // Send response message with context

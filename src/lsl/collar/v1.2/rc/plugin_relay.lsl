@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_relay.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 12
 PURPOSE: Wearer-facing UI for the collar's RLV relay.
 ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   protocol engine (RELAY_CHANNEL listen, auth queue, ASK dialog, source
@@ -10,6 +10,9 @@ ARCHITECTURE: Menu/chat-alias front-end on top of kmod_rlv. The relay
   Hardcore via SETTINGS_BUS, and signals kmod_rlv on UI_BUS for safeword
   / ground-rez / source-list lookups.
 CHANGES:
+- v1.2 rev 12: main + mode menus to menu.fixed, bound-by list to dialog.info (dropped the MainPage cursor + nav:prev/next); cleans up on the new ui.dialog.close.
+- v1.2 rev 11: FULL migration to context routing + pagination. Every button now carries a context via a new btn() helper (main: mode/bound/safeword/unbind; mode: off/ask/on/hc_on/hc_off) and the handler routes by context, not the raw button label — closes the last label-router (the all-by-context invariant). Added a MenuContext (main/mode/list) so nav pages/redraws the right menu, and a MainPage cursor paginating the main menu (clamp/wrap, nav:prev/nav:next, single-page redraw). Response handler reads context not button.
+- v1.2 rev 10: retired the "safeword" chat alias + its now-dead handle_subpath branch — the chat safeword family (the bare word, "<prefix> safeword", "<prefix> safeword <word>") is special-cased in kmod_chat so it bypasses the ACL-gated dispatch and works in TPE / lockdown. The relay menu Safeword/Unbind buttons are UNCHANGED: they still fire relay.safeword, which kmod_rlv routes to do_safeword_clear(FALSE) = relay-only — the bit-flip (relay source → relay-only; the safeword word → system-wide). The relay-clear chat verb is gone (that verb is the safeword now); relay-only clear stays on the menu button.
 - v1.2 rev 9: nav-row consistency — has_nav 0→1 on all three menus so the << >> Back row matches the rest of the UI (was a lone Back); the handler's existing catch-all redraws the inert << >>.
 - v1.2 rev 8: menu-service migration. show_main_menu / show_mode_menu / render_object_list now render via the pager (ui.menu.render, has_nav=0; the "Bound by" source list is an info pager — body + Back, no content buttons). message→body, the local "Back" dropped from each list (the service supplies it), sends moved DIALOG_BUS→UI_BUS. Buttons stay plain label strings — render_menu treats the list opaquely and the handler already routes by button label — so handle_button_click is unchanged. Mode/hardcore/safeword/source logic untouched. (Back still exits to root from every relay screen, as before.)
 - v1.2 rev 7: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (60→124) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
@@ -49,6 +52,7 @@ key CurrentUser = NULL_KEY;
 integer UserAcl = -999;
 list gPolicyButtons = [];
 string SessionId = "";
+string MenuContext = "";  // "main" | "mode" | "list" — which menu is showing
 
 // Pending "Bound by..." request — TRUE while we're waiting for kmod_rlv's
 // relay.list.response. We render once it arrives.
@@ -139,11 +143,10 @@ register_self() {
         "alias",   "relay",
         "context", PLUGIN_CONTEXT
     ]), NULL_KEY);
-    llMessageLinked(LINK_SET, KERNEL_LIFECYCLE, llList2Json(JSON_OBJECT, [
-        "type",    "chat.alias.declare",
-        "alias",   "safeword",
-        "context", PLUGIN_CONTEXT + ".safeword"
-    ]), NULL_KEY);
+    // The "safeword" alias was retired in favour of the wearer's personal
+    // safeword: <prefix>safeword is now handled by kmod_chat (manage the word),
+    // and the bare word triggers the full release. Relay-clear stays on the
+    // relay menu (Safeword / Unbind).
 }
 
 send_pong() {
@@ -170,8 +173,15 @@ persist_hardcore(integer new_hardcore) {
 
 /* -------------------- MENU SYSTEM -------------------- */
 
+// Button data entry: {label, context}. Every relay button routes by its
+// context (the project invariant), never the visible label.
+string btn(string label, string cmd) {
+    return llList2Json(JSON_OBJECT, ["label", label, "context", cmd]);
+}
+
 show_main_menu() {
     SessionId = generate_session_id();
+    MenuContext = "main";
     refresh_mode();
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, UserAcl);
 
@@ -179,53 +189,48 @@ show_main_menu() {
 
     // Pager (has_nav=1): full << >> Back nav row; content = the actions.
     list buttons = [];
-    if (btn_allowed("Mode"))                       buttons += ["Mode"];
-    if (btn_allowed("Bound by..."))                buttons += ["Bound by..."];
-    if (btn_allowed("Safeword") && !Hardcore)      buttons += ["Safeword"];
-    if (btn_allowed("Unbind"))                     buttons += ["Unbind"];
+    if (btn_allowed("Mode"))                       buttons += [btn("Mode", "mode")];
+    if (btn_allowed("Bound by..."))                buttons += [btn("Bound by...", "bound")];
+    if (btn_allowed("Safeword") && !Hardcore)      buttons += [btn("Safeword", "safeword")];
+    if (btn_allowed("Unbind"))                     buttons += [btn("Unbind", "unbind")];
 
+    // menu.fixed — a small structural action set; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL + " Menu",
         "body",       message,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, buttons),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, buttons)
     ]), NULL_KEY);
 }
 
 show_mode_menu() {
     SessionId = generate_session_id();
+    MenuContext = "mode";
     refresh_mode();
 
     string message = "RLV Relay Mode: " + mode_str();
 
-    list buttons = ["OFF", "ASK", "ON"];
+    list buttons = [btn("OFF", "off"), btn("ASK", "ask"), btn("ON", "on")];
     if (Mode == MODE_ON) {
         if (Hardcore) {
-            if (btn_allowed("HC OFF")) buttons += ["HC OFF"];
+            if (btn_allowed("HC OFF")) buttons += [btn("HC OFF", "hc_off")];
         } else {
-            if (btn_allowed("HC ON"))  buttons += ["HC ON"];
+            if (btn_allowed("HC ON"))  buttons += [btn("HC ON", "hc_on")];
         }
     }
 
-    // Pager (has_nav=1: full << >> Back nav row; inert << >> redraw via the
-    // handler's catch-all). Content = the modes.
+    // menu.fixed — the mode set (OFF/ASK/ON + HC toggle); never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      "Relay Mode",
         "body",       message,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, buttons),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, buttons)
     ]), NULL_KEY);
 }
 
@@ -233,6 +238,7 @@ show_mode_menu() {
 // of {name, restr_count} objects.
 render_object_list(string sources_json) {
     SessionId = generate_session_id();
+    MenuContext = "list";
 
     list arr = [];
     if (sources_json != "" && sources_json != JSON_INVALID) {
@@ -266,18 +272,15 @@ render_object_list(string sources_json) {
         }
     }
 
-    // Info pager (has_nav=1 for nav-row consistency; the source list is the body).
+    // dialog.info — a terminal read-out (the source list is the body); a single
+    // OK dismisses back to the main menu (handler catch-all for MenuContext "list").
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "dialog.info",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      "Bound by",
-        "body",       message,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, []),
-        "page",       0
+        "body",       message
     ]), NULL_KEY);
 }
 
@@ -291,17 +294,30 @@ set_mode(integer new_mode, integer clear_hardcore) {
     if (clear_hardcore) persist_hardcore(FALSE);
 }
 
-handle_button_click(string button) {
-    if (button == "Mode") {
-        show_mode_menu();
+// Every button routes by context (nav:* for navigation, action contexts for
+// content). MenuContext tracks which menu is showing so nav pages/redraws the
+// right one. Action contexts are globally unique, so no per-menu branching.
+handle_button_click(string ctx) {
+    // Navigation. (Close is intercepted by kmod_dialogs; the fixed menus emit
+    // no << >>, so only nav:back arrives here.)
+    if (ctx == "nav:back") {
+        return_to_root();
+        return;
     }
-    else if (button == "Bound by...") {
+
+    // Main-menu actions.
+    if (ctx == "mode") {
+        show_mode_menu();
+        return;
+    }
+    if (ctx == "bound") {
         AwaitingList = TRUE;
         llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
             "type", "relay.list.request"
         ]), NULL_KEY);
+        return;
     }
-    else if (button == "Safeword") {
+    if (ctx == "safeword") {
         if (btn_allowed("Safeword") && !Hardcore) {
             llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
                 "type", "relay.safeword"
@@ -309,8 +325,9 @@ handle_button_click(string button) {
             llRegionSayTo(CurrentUser, 0, "Safeword used - all restrictions cleared");
             show_main_menu();
         }
+        return;
     }
-    else if (button == "Unbind") {
+    if (ctx == "unbind") {
         if (btn_allowed("Unbind")) {
             llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
                 "type", "relay.safeword"
@@ -318,24 +335,30 @@ handle_button_click(string button) {
             llRegionSayTo(CurrentUser, 0, "Unbound - all restrictions cleared");
             show_main_menu();
         }
+        return;
     }
-    else if (button == "OFF") {
+
+    // Mode-menu actions.
+    if (ctx == "off") {
         set_mode(MODE_OFF, TRUE);
         llRegionSayTo(CurrentUser, 0, "Mode set to OFF");
         show_mode_menu();
+        return;
     }
-    else if (button == "ASK") {
+    if (ctx == "ask") {
         set_mode(MODE_ASK, TRUE);
         llRegionSayTo(CurrentUser, 0, "Mode set to ASK");
         show_mode_menu();
+        return;
     }
-    else if (button == "ON") {
+    if (ctx == "on") {
         Mode = MODE_ON;
         persist_mode(MODE_ON);
         if (!Hardcore) llRegionSayTo(CurrentUser, 0, "Mode set to ON");
         show_mode_menu();
+        return;
     }
-    else if (button == "HC ON") {
+    if (ctx == "hc_on") {
         if (btn_allowed("HC ON")) {
             Hardcore = TRUE;
             Mode = MODE_ON;
@@ -344,8 +367,9 @@ handle_button_click(string button) {
             llRegionSayTo(CurrentUser, 0, "Hardcore mode ENABLED");
             show_mode_menu();
         }
+        return;
     }
-    else if (button == "HC OFF") {
+    if (ctx == "hc_off") {
         if (btn_allowed("HC OFF")) {
             Hardcore = FALSE;
             Mode = MODE_ON;
@@ -354,13 +378,12 @@ handle_button_click(string button) {
             llRegionSayTo(CurrentUser, 0, "Hardcore mode DISABLED");
             show_mode_menu();
         }
+        return;
     }
-    else if (button == "Back") {
-        return_to_root();
-    }
-    else {
-        show_main_menu();
-    }
+
+    // Unknown — redraw the current menu.
+    if (MenuContext == "mode") show_mode_menu();
+    else                       show_main_menu();
 }
 
 
@@ -436,31 +459,17 @@ handle_subpath(key user, integer acl_level, string subpath) {
         return;
     }
 
-    if (subpath == "safeword") {
-        if (!btn_allowed("Safeword") && !btn_allowed("Unbind")) {
-            llRegionSayTo(user, 0, "Access denied.");
-            gPolicyButtons = [];
-            return;
-        }
-        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-            "type", "relay.safeword"
-        ]), NULL_KEY);
-        llRegionSayTo(user, 0, "Safeword used - all restrictions cleared.");
-        gPolicyButtons = [];
-        return;
-    }
-
     llRegionSayTo(user, 0, "Unknown relay subcommand: " + subpath);
     gPolicyButtons = [];
 }
 
 handle_dialog_response(string msg) {
     if (llJsonGetValue(msg, ["session_id"]) == JSON_INVALID) return;
-    if (llJsonGetValue(msg, ["button"]) == JSON_INVALID) return;
     string session = llJsonGetValue(msg, ["session_id"]);
     if (session != SessionId) return;
-    string button = llJsonGetValue(msg, ["button"]);
-    handle_button_click(button);
+    string ctx = llJsonGetValue(msg, ["context"]);
+    if (ctx == JSON_INVALID) ctx = "";
+    handle_button_click(ctx);
 }
 
 handle_dialog_timeout(string msg) {
@@ -541,6 +550,9 @@ default
             }
             else if (msg_type == "ui.dialog.timeout") {
                 handle_dialog_timeout(msg);
+            }
+            else if (msg_type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup_session();
             }
         }
     }

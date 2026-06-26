@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 11
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -13,6 +13,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              @getpath at picker render; this plugin does NOT maintain any
              shadow lock vector.
 CHANGES:
+- v1.2 rev 11: folder picker mode renamed ordered to menu.ordered (menu-mode taxonomy; no behavior change).
+- v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Actions + pick:<idx> already routed by context.
+- v1.2 rev 9: on safeword.fired, clear the persisted folder-lock list (LockedNames=[] + delete folders.locked) so the locks don't re-apply on the next sync — kmod_rlv already released the detachallthis claims.
 - v1.2 rev 8: RLV gating — ORed bit 0x40 into PLUGIN_ACL_MASK (60→124) so kmod_ui drops this RLV-dependent plugin from the menu when rlv.active=0 (published by kmod_bootstrap). No ACL-visibility change — bit 6 sits above the level bits 1-5.
 - v1.2 rev 7: menu-service migration. show_folder_pick now renders via kmod_menu OL mode (ui.menu.render mode="ordered") + the `fixed` param for the Attach/Detach/Lock|Unlock action buttons — the first consumer of fixed-button OL, which resolves kmod_menu's deferred "flanking fixed-button" note (layout_buttons handles nav+fixed at the low slots, content above, NO padding). Shed the hand-rolled target_slots/padding block (~50 lines): worn/lock indicators now ride in each item's label, breadcrumb+legend stay as the body, the page counter moves to the title. Nav realigned from context (prev/next/back) to button-label (<< >> Back) since the service renders nav as plain buttons (empty context); actions + pick:<idx> still route by context. Browse/drill/lock logic unchanged.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
@@ -400,7 +403,7 @@ show_folder_pick(integer page) {
     // return their own context, nav returns its arrow label.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "ordered",
+        "mode",       "menu.ordered",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "menu_type",  PLUGIN_CONTEXT,
@@ -517,14 +520,11 @@ handle_dialog_response(string msg) {
 
     string ctx = llJsonGetValue(msg, ["context"]);
     if (ctx == JSON_INVALID) ctx = "";
-    // Nav (<< >> Back) renders as plain buttons → empty context, so route nav
-    // by the button LABEL; actions + folder picks carry their own context.
-    string button = llJsonGetValue(msg, ["button"]);
-    if (button == JSON_INVALID) button = "";
+    // Every button routes by context: nav (nav:*), actions, and folder picks.
 
     if (MenuContext != "pick") return;
 
-    if (button == "Back" || ctx == "back") {
+    if (ctx == "nav:back") {
         // At root, exit the plugin. At a subfolder, pop one level and
         // re-scan so Back walks the user back up the path.
         if (CurrentPath == "") {
@@ -540,12 +540,12 @@ handle_dialog_response(string msg) {
     // Wrap-around paging per plugin_animate convention. LastMaxPage was
     // stashed by the most recent show_folder_pick render — current by the
     // time a click reaches us.
-    if (button == "<<") {
+    if (ctx == "nav:prev") {
         if (PickPage == 0) show_folder_pick(LastMaxPage);
         else               show_folder_pick(PickPage - 1);
         return;
     }
-    if (button == ">>") {
+    if (ctx == "nav:next") {
         if (PickPage >= LastMaxPage) show_folder_pick(0);
         else                         show_folder_pick(PickPage + 1);
         return;
@@ -736,6 +736,13 @@ default
                 CurrentUser = id;
                 UserAcl = start_acl;
                 show_main();
+            }
+            else if (msg_type == "safeword.fired") {
+                // Wearer safeword: kmod_rlv's system-wide clear already released
+                // our detachallthis claims; clear the persisted lock list so they
+                // don't re-apply on the next sync.
+                LockedNames = [];
+                persist_locked();
             }
         }
         else if (num == DIALOG_BUS) {

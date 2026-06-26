@@ -32,8 +32,17 @@ string jv(string msg, string field) {
     return v;
 }
 
-// Compact "label=context|label=context" from button_data, or "label|label"
-// from a plain buttons array. Truncated for sanity on big menus.
+string clip(string s, integer n) {
+    integer len = llStringLength(s);
+    if (len > n) return llGetSubString(s, 0, n - 1) + " …(+" + (string)(len - n) + ")";
+    return s;
+}
+
+// Compact "label=context|label=context" from button_data, "label|label" from a
+// plain buttons array, OR "name|name" from a picker's items array (menu.ordered
+// /unordered send `items`, NOT `buttons` — the original tool missed this and
+// printed "(no buttons)", hiding exactly the empty-picker case). Truncated for
+// sanity on big menus.
 string btn_summary(string msg) {
     string bd = llJsonGetValue(msg, ["button_data"]);
     if (bd != JSON_INVALID) {
@@ -46,14 +55,19 @@ string btn_summary(string msg) {
             pairs += (jv(it, "label") + "=" + jv(it, "context"));
             i += 1;
         }
-        return (string)n + ":[" + llDumpList2String(pairs, " | ") + "]";
+        return "btn_data " + (string)n + ":[" + clip(llDumpList2String(pairs, " | "), 500) + "]";
     }
     string b = llJsonGetValue(msg, ["buttons"]);
     if (b != JSON_INVALID) {
         list items = llJson2List(b);
-        return (string)llGetListLength(items) + ":[" + llDumpList2String(items, " | ") + "]";
+        return "buttons " + (string)llGetListLength(items) + ":[" + clip(llDumpList2String(items, " | "), 500) + "]";
     }
-    return "(no buttons)";
+    string it2 = llJsonGetValue(msg, ["items"]);
+    if (it2 != JSON_INVALID) {
+        list items = llJson2List(it2);
+        return "items " + (string)llGetListLength(items) + ":[" + clip(llDumpList2String(items, " | "), 500) + "]";
+    }
+    return "(no buttons/items)";
 }
 
 // Short fixed-ish float (LSL has no real number formatting).
@@ -94,8 +108,8 @@ default {
                 + "\"  ctx=" + jv(msg, "context"));
         }
         else if (t == "ui.menu.render") {
-            emit("RENDER", "sess=" + sess + "  type=" + jv(msg, "menu_type")
-                + "  cat=" + jv(msg, "category") + "  nav=" + jv(msg, "has_nav")
+            emit("RENDER", "sess=" + sess + "  mode=" + jv(msg, "mode")
+                + "  type=" + jv(msg, "menu_type") + "  page=" + jv(msg, "page")
                 + "  " + btn_summary(msg));
         }
         else if (t == "ui.dialog.open") {

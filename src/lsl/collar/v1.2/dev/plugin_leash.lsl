@@ -1,12 +1,13 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.2
-REVISION: 12
+REVISION: 13
 PURPOSE: Self-contained leash UI — main menu, Settings (length/turn/texture/
          enhanced), Get Holder, direct actions (Clip/Unclip/Yank/Take), AND
          the target picker (avatar picker for Pass/Offer/Coffle, object scan
          for Post, offer-reception modal). Absorbed plugin_leash_target.
 CHANGES:
+- v1.2 rev 13: FIX — length menu's fixed-row spacer was btn(" ","") (a lone-space label); the space trimmed to "" through the menu-render JSON round-trips and llDialog threw "all buttons must have label strings", so the length menu never opened (Settings > Length looked dead). Changed the spacer to "-", matching the nav-row spacer — non-whitespace, survives the round-trip, no dialog-layer special-casing.
 - v1.2 rev 12: main to menu.fixed (dropped showMenu page param + LeashPage cursor + main prev/next), picker to menu.ordered, offer to dialog.modal; cleans up on the new ui.dialog.close.
 - v1.2 rev 11: main menu now paginates — showMenu gained a `page` arg; showMainMenu clamps/wraps a LeashPage cursor to its button count and pages on prev/next (the normalized nav contexts), settings/texture/length pass page 0 (their << >> redraw). Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 10: length menu reworked — -1m/ +1m are now dedicated fixed buttons (contexts len_dec/len_inc) flanking a blank spacer, landing at slots 3 and 5 in the row above nav (needs kmod_menu rev 15 pager `fixed` support). << >> revert to plain inert nav (no longer repurposed as ±1m). showMenu() gained a `fixed` param; the other three menus pass [].
@@ -275,7 +276,7 @@ showLengthMenu() {
         btn("1m",  "1"),  btn("3m",  "3"),  btn("5m",  "5"),
         btn("10m", "10"), btn("15m", "15"), btn("20m", "20")
     ];
-    list fixed = [btn("-1m", "len_dec"), btn(" ", ""), btn("+1m", "len_inc")];
+    list fixed = [btn("-1m", "len_dec"), btn("-", ""), btn("+1m", "len_inc")];
     showMenu("length", "Length",
              "Select leash length\nCurrent: " + (string)LeashLength + "m",
              item_buttons, fixed);

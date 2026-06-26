@@ -1,10 +1,14 @@
 /*--------------------
 PLUGIN: plugin_owners.lsl
 VERSION: 1.2
-REVISION: 13
+REVISION: 17
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 17: main to menu.fixed, owner/trustee pickers to menu.unordered/menu.ordered, confirm to dialog.modal; cleans up on the new ui.dialog.close.
+- v1.2 rev 16: main menu now paginates — separate MainPage cursor (distinct from CurrentPage, which is the LIST pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
+- v1.2 rev 15: handle_button is now fully context-routed — dropped the vestigial `(cmd == "" && label == "Back")` fallback + the unused `label` param + the button read at the call site. (Corrects rev 14's note: there is NO numbered_list path — it was fully retired in rev 8 (pickers→UL/OL) + rev 13 (confirms→modal); the label fallback was dead code, not a live legacy path.)
+- v1.2 rev 14: service-menu nav routes by context (nav:back/nav:prev/nav:next). Pickers + confirms already flow through the menu service.
 - v1.2 rev 13: unified the release + runaway EXIT flows into one spine keyed on OwnerConsents (1=release/owner-authorized, 0=runaway/owner-bypassed). release_owner+release_wearer+runaway (3 branches) → exit_owner_auth + exit_wearer (2): the bit gates the owner-auth step (release only) and the terminal action — release → clear_owner (→ kmod_settings soft reboot, rev 8); runaway → trigger_runaway (factory reset). All wording, notices, targets, and cancel behavior preserved; chat /access rem owner enters the same spine.
 - v1.2 rev 12: unified owner/transfer/trustee acquisition into one spine keyed on CandidateIsOwner (1=owner, 0=trustee) + has_owner() (owner = set vs transfer). Collapsed 10 handler branches (set/transfer/trustee × select/accept/hon + set_confirm) to 4 (acq_select/acq_accept/acq_hon/acq_confirm); sensor+no_sensor dispatch merged into finish_scan(); show_honorific picks the honorific pool by the bit. All consent semantics preserved (set wearer double-confirm, trustee already-check, transfer outgoing-owner notice, distinct messages, separate honorific pools). Measured -1523B (92.1% → 89.8% Mono). Validated in-world (add owner incl. double-confirm, release).
 - v1.2 rev 11: security fix surfaced by the chat/menu gating trace — `/access rem owner` gated release on btn_allowed("Release") alone, so a trustee (policy lists Release at ACL 3) could release the owner, which the menu forbids via its is_owner gate. Added the matching !is_owner(CurrentUser) check: release is now owner-only on both paths. ACL 3's Release policy entry is dormant (is_owner enforces); trustees exit via Rem Trustee = resign.
@@ -389,17 +393,15 @@ show_main() {
     if (btn_allowed("Add Trustee")) button_data += [btn("Add Trustee", "add_trustee")];
     if (btn_allowed("Rem Trustee")) button_data += [btn("Rem Trustee", "rem_trustee")];
 
+    // menu.fixed — a structural owner/trustee action set; never paginates.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
         "title",      PLUGIN_LABEL,
         "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
     ]), NULL_KEY);
 }
 
@@ -435,7 +437,7 @@ show_confirm(key target, string ctx, string title, string body) {
     MenuContext = ctx;
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "modal",
+        "mode",       "dialog.modal",
         "session_id", SessionId,
         "user",       (string)target,
         "title",      title,
@@ -463,7 +465,7 @@ show_candidates(string context, string title, string prompt) {
         i++;
     }
 
-    render_list_picker(CurrentUser, context, "unordered", title, prompt, items);
+    render_list_picker(CurrentUser, context, "menu.unordered", title, prompt, items);
 }
 
 show_honorific(key target, string context) {
@@ -475,7 +477,7 @@ show_honorific(key target, string context) {
     // UL picker, flat items (label == context == the honorific). Honorific
     // lists are short (<=6) and single-page, so pin the page cursor at 0.
     CurrentPage = 0;
-    render_list_picker(target, context, "unordered", "Honorific",
+    render_list_picker(target, context, "menu.unordered", "Honorific",
         "What would you like to be called?", choices);
 }
 
@@ -586,7 +588,7 @@ show_remove_trustee() {
         i++;
     }
 
-    render_list_picker(CurrentUser, "remove_trustee", "ordered", "Remove Trustee",
+    render_list_picker(CurrentUser, "remove_trustee", "menu.ordered", "Remove Trustee",
         "Select to remove:", names);
 }
 
@@ -631,10 +633,11 @@ redraw_picker() {
 
 /* -------------------- BUTTON HANDLING -------------------- */
 
-handle_button(string cmd, string label) {
-    // Numbered list contexts use the label as a number index; button_data contexts use cmd
-    // "Back" from numbered_list has empty context, route by label
-    if (cmd == "back" || (cmd == "" && label == "Back")) {
+handle_button(string cmd) {
+    // Every dialog routes by context — all owners menus flow through the menu
+    // service (pager / UL+OL pickers / modal confirms), so nav is nav:back and
+    // every pick carries its cmd. No label routing anywhere.
+    if (cmd == "nav:back") {
         if (MenuContext == "main") {
             llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
                 "type", "ui.menu.return", "user", (string)CurrentUser
@@ -695,20 +698,20 @@ handle_button(string cmd, string label) {
             show_remove_trustee();
         }
         else {
-            // Inert << >> on this single-page pager — just redraw the menu.
+            // Unknown (e.g. the inert spacer) — redraw.
             show_main();
         }
         return;
     }
 
-    // LIST picker paging: << >> arrive as an empty context with the arrow as
-    // the button label; wrap CurrentPage off the active picker's count and
-    // redraw. (Content picks below carry their value in cmd, not the label.)
-    if (label == "<<" || label == ">>") {
+    // LIST picker paging: << >> arrive from the menu service with nav:* contexts;
+    // wrap CurrentPage off the active picker's count and redraw. (Content picks
+    // below carry their value in cmd.)
+    if (cmd == "nav:prev" || cmd == "nav:next") {
         integer cnt = picker_count();
         integer max_page = 0;
         if (cnt > 0) max_page = (cnt - 1) / LIST_PAGE_SIZE;
-        if (label == "<<") {
+        if (cmd == "nav:prev") {
             if (CurrentPage == 0) CurrentPage = max_page;
             else CurrentPage -= 1;
         }
@@ -964,9 +967,7 @@ default {
                     if (llJsonGetValue(msg, ["session_id"]) == SessionId) {
                         string resp_ctx = llJsonGetValue(msg, ["context"]);
                         if (resp_ctx == JSON_INVALID) resp_ctx = "";
-                        string resp_btn = llJsonGetValue(msg, ["button"]);
-                        if (resp_btn == JSON_INVALID) resp_btn = "";
-                        handle_button(resp_ctx, resp_btn);
+                        handle_button(resp_ctx);
                     }
                 }
             }
@@ -974,6 +975,9 @@ default {
                 if ((llJsonGetValue(msg, ["session_id"]) != JSON_INVALID)) {
                     if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup();
                 }
+            }
+            else if (type == "ui.dialog.close") {
+                if (llJsonGetValue(msg, ["session_id"]) == SessionId) cleanup();
             }
         }
     }

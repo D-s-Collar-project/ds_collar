@@ -1,11 +1,14 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl   (v1.2 redesign)
 VERSION: 1.2
-REVISION: 6
+REVISION: 9
 PURPOSE: Self-contained leashing engine. Absorbs the former
          kmod_leash_proto holder-discovery handshake: there is no proto
          sibling and no engine<->proto IPC.
 CHANGES:
+- v1.2 rev 9: leanness pass (tier 1, behaviour-identical). Cached (float)LeashLength once per followTick (was recast 3x/tick); inlined three single-caller name-only wrappers (updateParticlesTarget, sendOfferPending, notifyLeashTransfer) to shed their function frames. -1153B → 92.8% (from 94.6%), now below the pre-rev-8 baseline. The 2-state design is deliberately kept — leashing IS a state machine.
+- v1.2 rev 8: FIX — auto-reclip never fired for Lockmeister/avatar leashes. kmod_particles emits particles.lm.released on ANY target-disappearance (incl. the leasher TPing away), and handleLmReleased treated it as a deliberate unclip — clearLeashState(TRUE) wiped the reclip state before the 6s offsim grace could arm it ("Released by X (Lockmeister)", no re-leash). Now handleLmReleased checks llGetAgentInfo(leasher): if OFFSIM it routes through the offsim/reclip path (arm reclip, "Auto-released (offsim)") like checkLeasherPresence; a deliberate release / detach-while-present still clears as before.
+- v1.2 rev 7: the wearer's safeword (safeword.fired from kmod_chat) now also drops the leash — folded into the existing sos.leash.release handler (releaseLeashInternal on the wearer), so SOS Unleash and the safeword share one release path.
 - v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 - v1.2 rev 2: findLeashpointPrim matches "leashpoint" as a SUBSTRING of the prim description (was exact ==), so an OpenCollar leashpoint (desc has config after the word) is recognized. Mirrors kmod_particles' find_leashpoint_link.
 - v1.2 rev 1: Deferred-restraint clip. A fresh gated grab/coffle now enters leashed to reuse its probe/listener/timer but HOLDS @follow + the leashed-broadcast (so plugin_leash's enhanced-TP stays off) + the success notice until a holder confirms (native plugin.leash.target OR Lockmeister particles.lm.grabbed → commitPendingLeash). No holder within PENDING_WINDOW (2s) → denyPendingLeash: "Unable to leash: No holder found to clip leash to." / "...coffle...No collar...", with nothing restrained. Post / reclip / cold-restart / take-over pass gate_on_holder=FALSE (or hit the was_leashed guard) and activate immediately as before. Added: PendingHolder / PendingNotice / PendingDeadline + claimLeash gate_on_holder param. Leashpoint prim matched by DESCRIPTION "leashpoint" (consistent with kmod_particles' find_leashpoint_link).
@@ -195,22 +198,6 @@ setParticlesState(integer active, key target) {
     llMessageLinked(LINK_SET, UI_BUS, msg, NULL_KEY);
 }
 
-updateParticlesTarget(key target) {
-    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type", "particles.update",
-        "target", (string)target
-    ]), NULL_KEY);
-}
-
-/* -------------------- OFFER PROTOCOL -------------------- */
-sendOfferPending(key target, key originator) {
-    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type", "plugin.leash.offer.pending",
-        "target", (string)target,
-        "originator", (string)originator
-    ]), NULL_KEY);
-}
-
 /* -------------------- SETTINGS PERSISTENCE -------------------- */
 persistSetting(string setting_key, string value) {
     llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
@@ -297,12 +284,6 @@ integer takeStateChange() {
 }
 
 /* -------------------- NOTIFICATIONS -------------------- */
-notifyLeashTransfer(key from_user, key to_user, string action) {
-    llRegionSayTo(from_user, 0, "Leash " + action + " to " + llKey2Name(to_user));
-    llRegionSayTo(to_user, 0, "Leash received from " + llKey2Name(from_user));
-    llRegionSayTo(llGetOwner(), 0, "Leash " + action + " to " + llKey2Name(to_user) + " by " + llKey2Name(from_user));
-}
-
 /* -------------------- HOLDER DISCOVERY (absorbed proto) -------------------- */
 
 // Find this collar's LeashPoint prim (child named "leashpoint",
@@ -568,7 +549,10 @@ followTick() {
     // raw mode anchor.
     if (llGetListLength(details) == 0 && target_key == HolderTarget) {
         HolderTarget = NULL_KEY;
-        updateParticlesTarget(follow_target);
+        llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+            "type", "particles.update",
+            "target", (string)follow_target
+        ]), NULL_KEY);
         target_key = follow_target;
         details = llGetObjectDetails(target_key, [OBJECT_POS]);
     }
@@ -578,17 +562,18 @@ followTick() {
 
     vector wearer_pos = llGetRootPosition();
     float distance = llVecDist(wearer_pos, target_pos);
+    float len = (float)LeashLength;
 
-    integer new_at_limit = (distance >= (float)LeashLength);
+    integer new_at_limit = (distance >= len);
     if (new_at_limit != AtLimit) {
         AtLimit = new_at_limit;
         updateControlsMask();
     }
 
-    if (ControlsOk && distance > (float)LeashLength) {
+    if (ControlsOk && distance > len) {
         // Pull to 0.85 * length so there is slack on arrival; gentle tau (1.0)
         // keeps walking in the leashed direction feasible.
-        vector pull_pos = target_pos + llVecNorm(wearer_pos - target_pos) * (float)LeashLength * 0.85;
+        vector pull_pos = target_pos + llVecNorm(wearer_pos - target_pos) * len * 0.85;
         if (llVecMag(pull_pos - LastTargetPos) > 0.2) {
             llMoveToTarget(pull_pos, 1.0);
             LastTargetPos = pull_pos;
@@ -824,7 +809,9 @@ passLeashInternal(key new_leasher) {
     // new session directly (re-follow + re-handshake + LM for the new leasher).
     activateLeashFromState();
 
-    notifyLeashTransfer(old_leasher, new_leasher, "passed");
+    llRegionSayTo(old_leasher, 0, "Leash passed to " + llKey2Name(new_leasher));
+    llRegionSayTo(new_leasher, 0, "Leash received from " + llKey2Name(old_leasher));
+    llRegionSayTo(llGetOwner(), 0, "Leash passed to " + llKey2Name(new_leasher) + " by " + llKey2Name(old_leasher));
 }
 
 yankToLeasher() {
@@ -864,6 +851,21 @@ handleLmGrabbed(key controller) {
 handleLmReleased() {
     if (!Leashed) return;
     key old_leasher = Leasher;
+    // kmod_particles emits lm.released on ANY target-disappearance, including the
+    // leasher simply TPing away. An LM drop while the leasher is OFFSIM is a
+    // departure, not a deliberate unclip: route it through the offsim path so the
+    // leash auto-reclips when they return (mirrors checkLeasherPresence). A
+    // genuine remote release (or a detach while the leasher is still present)
+    // falls through and clears the reclip state as before.
+    if (llGetAgentInfo(old_leasher) == 0) {
+        integer now_time = llGetUnixTime();
+        LastLeasher = old_leasher;
+        autoReleaseOffsim();
+        ReclipScheduled = now_time + 2;
+        ReclipAttempts = 0;
+        ReclipDeadline = now_time + RECLIP_SAFETY_WINDOW;
+        return;
+    }
     clearLeashState(TRUE);
     llRegionSayTo(llGetOwner(), 0, "Released by " + llKey2Name(old_leasher) + " (Lockmeister)");
 }
@@ -937,7 +939,11 @@ routeLinkMessage(integer num, string msg, key id) {
             else if (action == "pass")        passLeashInternal(target);
             else if (action == "offer") {
                 if (Leashed) llRegionSayTo(user, 0, "Cannot offer leash: already leashed.");
-                else sendOfferPending(target, user);
+                else llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+                    "type", "plugin.leash.offer.pending",
+                    "target", (string)target,
+                    "originator", (string)user
+                ]), NULL_KEY);
             }
             else if (action == "set_length")  setLengthInternal((integer)jsonGet(msg, "length", "0"));
             else if (action == "toggle_turn") toggleTurnInternal();
@@ -945,7 +951,8 @@ routeLinkMessage(integer num, string msg, key id) {
             return;
         }
 
-        if (msg_type == "sos.leash.release") {
+        // SOS Unleash and the wearer's safeword both fully drop the leash.
+        if (msg_type == "sos.leash.release" || msg_type == "safeword.fired") {
             if (id == llGetOwner()) {
                 releaseLeashInternal(id);
             }

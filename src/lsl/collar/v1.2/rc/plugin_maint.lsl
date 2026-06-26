@@ -1,8 +1,12 @@
 /*--------------------
 PLUGIN: plugin_maint.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 11
 CHANGES:
+- v1.2 rev 11: restructured into category to action — root drills into Configuration (view/reload/reset settings + access list) and System (reload/update/clear leash); Safeword, Get HUD, User Manual stay standalone. Every screen is now menu.fixed (dropped the MainPage pager), confirms are dialog.modal, safeword is dialog.info.
+- v1.2 rev 10: FIX — the main menu never paginated, but at ACL 2/4 it has 10 buttons (Update Collar is the 10th) which spill onto a 2nd page; << >> were treated as inert (bell single-page pattern), so Update Collar was UNREACHABLE (looked like a removed button). Added a MainPage cursor: show_main_menu clamps/wraps it to the policy-filtered button count and passes it to the pager; the handler pages on nav:prev/nav:next; fresh entry resets to page 1. Pre-existing since the rev-7 menu-service migration (the inert << >> predates the nav-by-context work).
+- v1.2 rev 9: FIX — Back was dead after the nav-by-context change (kmod_menu rev 14). The handler matched "back"/"Back" via the empty-context→label fallback, but nav Back now carries context nav:back, so the fallback never fired. Route Back by nav:back (+ "ok" for the INFO-mode OK); dropped the dead label fallback. (Regression from the nav sweep, which only audited paginating plugins.)
+- v1.2 rev 8: owns the wearer's personal safeword config + aftercare. safeword.word (default "safeword"); a wearer-only Safeword menu entry — policy ACL 2/4 only (owner/trustee never see it; deliberately absent from View Settings) → INFO dialog showing the current word + the change command. Config is "<prefix> safeword <word>" (kmod_chat-detected, any ACL incl TPE): the safeword.set link-handler writes the new word via settings.delta (identity-gated). Also owns the AFTERCARE: on safeword.fired (the engines — kmod_rlv/leash/restrict/outfits/folders — do the clears) it confirms to the wearer and IMs every primary owner (acl 5) — "Your property <name> has used their safeword..." — self-owned wearer → no IM. Owner-opacity: wearer-only button, not in View Settings, identity gate.
 - v1.2 rev 7: menu-service migration (last raw-dialog plugin). show_main_menu → pager (ui.menu.render, has_nav=1; the maintenance actions are content, local Back dropped to the service nav row); the three Yes/No confirms (Reset Config / Clear Leash / Update Collar) → modal mode (No-first, returns confirm/cancel — unchanged routing). Sends moved DIALOG_BUS→UI_BUS; response handler falls back to the button label for nav, routes Back via "back"/"Back", and redraws on the inert << >>. View Settings / Access List stay on chat (long dumps exceed a dialog's 511-char body). Action logic untouched.
 - v1.2 rev 6: stopped writing reg.<ctx> + acl.policycontext directly to LSD (self-declare write-storm); register_self now announces cat/mask/policy in kernel.register.declare; kernel is sole serial writer. Removed write_plugin_reg + reset-handler LSD deletes. See collar_kernel rev 6.
 - v1.2 rev 1: Settings view enumerates owners/trustees from the user-record roster (user.<uuid>, rank-ordered, fmt_role_person_lines) instead of the retired access.owner-/trustee- keys; mode label stays on the notecard-only access.multiowner policy flag.
@@ -35,6 +39,11 @@ string PLUGIN_LABEL = "Maintenance";
 /* -------------------- INVENTORY ITEMS -------------------- */
 string HUD_ITEM = "Control HUD";
 string MANUAL_NOTECARD = "D/s Collar User Manual";
+
+/* -------------------- SETTINGS KEYS -------------------- */
+// We own the wearer's personal safeword. kmod_chat reads it (detection);
+// absent key falls back to "safeword". Never shown in View Settings (owner-opaque).
+string KEY_SAFEWORD = "safeword.word";
 
 /* -------------------- STATE -------------------- */
 key CurrentUser = NULL_KEY;
@@ -85,11 +94,14 @@ register_self() {
     // Trustees (ACL 3) deliberately excluded — updates rewrite scripts and
     // are wearer/owner business. TPE wearer becomes ACL 0 and gets nothing
     // here, so no runtime tpe.mode check is needed.
+    // Safeword is wearer-only (ACL 2/4, never 3/5): only the sub sees or changes
+    // their own safeword (owner-opaque). The chat command works at any ACL incl
+    // TPE; this menu entry is the discoverable, non-TPE path.
     string policy = llList2Json(JSON_OBJECT, [
         "1", "Get HUD,User Manual",
-        "2", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
+        "2", "Safeword,View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
         "3", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual",
-        "4", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
+        "4", "Safeword,View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Reset Config,Update Collar",
         "5", "View Settings,Reload Settings,Access List,Reload Collar,Clear Leash,Get HUD,User Manual,Update Collar"
     ]);
 
@@ -122,46 +134,145 @@ string btn(string label, string cmd) {
     return llList2Json(JSON_OBJECT, ["label", label, "context", cmd]);
 }
 
+// Every maint screen is a small structural set, so they all render as
+// menu.fixed ([Close . - . Back] — Close exits the menu system, Back goes up
+// one level). Categories keep each screen well under one page.
+show_fixed(string title, string body, list button_data) {
+    SessionId = generate_session_id();
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "mode",       "menu.fixed",
+        "session_id", SessionId,
+        "user",       (string)CurrentUser,
+        "title",      title,
+        "body",       body,
+        "buttons",    llList2Json(JSON_ARRAY, button_data)
+    ]), NULL_KEY);
+}
+
+// TRUE if any of `labels` is allowed at the current ACL — a category button
+// shows only when it leads to at least one permitted action.
+integer any_allowed(list labels) {
+    integer i = 0;
+    integer n = llGetListLength(labels);
+    while (i < n) {
+        if (btn_allowed(llList2String(labels, i))) return TRUE;
+        i += 1;
+    }
+    return FALSE;
+}
+
+// Root: two category drill-downs (Configuration, System) + standalone items
+// (Safeword wearer-only; Get HUD / User Manual for everyone).
 show_main_menu() {
     MenuContext = "main";
     gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, CurrentUserAcl);
 
-    string body = "Maintenance:\n\n";
     list button_data = [];
+    if (any_allowed(["View Settings", "Reload Settings", "Reset Config", "Access List"]))
+        button_data += [btn("Configuration", "config")];
+    if (any_allowed(["Reload Collar", "Update Collar", "Clear Leash"]))
+        button_data += [btn("System", "system")];
+    if (btn_allowed("Safeword"))    button_data += [btn("Safeword", "safeword")];
+    if (btn_allowed("Get HUD"))     button_data += [btn("Get HUD", "get_hud")];
+    if (btn_allowed("User Manual")) button_data += [btn("User Manual", "user_manual")];
 
-    if (btn_allowed("View Settings"))    button_data += [btn("View Settings", "view_settings")];
-    if (btn_allowed("Reload Settings"))  button_data += [btn("Reload Settings", "reload_settings")];
-    if (btn_allowed("Access List"))      button_data += [btn("Access List", "access_list")];
-    if (btn_allowed("Reload Collar"))    button_data += [btn("Reload Collar", "reload_collar")];
-    if (btn_allowed("Clear Leash"))      button_data += [btn("Clear Leash", "clear_leash")];
-    if (btn_allowed("Get HUD"))          button_data += [btn("Get HUD", "get_hud")];
-    if (btn_allowed("User Manual"))      button_data += [btn("User Manual", "user_manual")];
-    if (btn_allowed("Reset Config"))     button_data += [btn("Reset Config", "reset_config")];
-    if (btn_allowed("Update Collar"))    button_data += [btn("Update Collar", "update_collar")];
+    show_fixed("Maintenance",
+        "Collar configuration, system actions, and documentation.", button_data);
+}
 
-    if (btn_allowed("View Settings")) {
-        body += "System utilities and documentation.";
-    }
-    else {
-        body += "Get HUD or user manual.";
-    }
+// Configuration category: view / reload / reset settings + the access roster.
+show_config_menu() {
+    MenuContext = "config";
+    gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, CurrentUserAcl);
 
+    list button_data = [];
+    if (btn_allowed("View Settings"))   button_data += [btn("View Settings", "view_settings")];
+    if (btn_allowed("Reload Settings")) button_data += [btn("Reload Settings", "reload_settings")];
+    if (btn_allowed("Reset Config"))    button_data += [btn("Reset Config", "reset_config")];
+    if (btn_allowed("Access List"))     button_data += [btn("Access List", "access_list")];
+
+    show_fixed("Configuration",
+        "View, reload, or reset collar settings; show the access roster.", button_data);
+}
+
+// System category: reboot the scripts, run the updater, clear the leash.
+show_system_menu() {
+    MenuContext = "system";
+    gPolicyButtons = get_policy_buttons(PLUGIN_CONTEXT, CurrentUserAcl);
+
+    list button_data = [];
+    if (btn_allowed("Reload Collar")) button_data += [btn("Reload Collar", "reload_collar")];
+    if (btn_allowed("Update Collar")) button_data += [btn("Update Collar", "update_collar")];
+    if (btn_allowed("Clear Leash"))   button_data += [btn("Clear Leash", "clear_leash")];
+
+    show_fixed("System",
+        "Reboot the collar, check for updates, or clear the leash.", button_data);
+}
+
+// Wearer-only read-only view of the safeword + how to change it. INFO mode
+// (single OK). The actual change is the "<prefix> safeword <word>" chat command,
+// which works at any ACL incl TPE; this is the discoverable surface.
+show_safeword_info() {
+    MenuContext = "safeword";
     SessionId = generate_session_id();
 
-    // Pager (has_nav=1): the service supplies the << >> Back nav row; content =
-    // the maintenance actions.
+    string word = llLinksetDataRead(KEY_SAFEWORD);
+    if (word == "") word = "safeword";
+
+    string prefix = llLinksetDataRead("chat.prefix");
+    string hint;
+    if (prefix != "") hint = prefix + " safeword <new word>";
+    else              hint = "<prefix> safeword <new word>";
+
+    string body = "Your safeword: " + word + "\n\n";
+    body += "Say it alone in chat — openly or in ((ooc)) — and ALL restraints release (leash, RLV, relay) and your owner is asked to check on you. The collar stays locked; ownership is unchanged.\n\n";
+    body += "Only you can change it. To change, type:\n  " + hint;
+
+    // dialog.info: single OK, no nav row. The OK routes back to the maint menu.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
+        "type", "ui.menu.render",
+        "mode", "dialog.info",
         "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      "Maintenance",
-        "body",       body,
-        "category",   PLUGIN_CATEGORY,
-        "has_nav",    1,
-        "buttons",    llList2Json(JSON_ARRAY, button_data),
-        "page",       0
+        "user", (string)CurrentUser,
+        "title", "Safeword",
+        "body", body
     ]), NULL_KEY);
+}
+
+// kmod_chat detected "<prefix> safeword <word>" from the wearer (identity-gated
+// there). Change the word. plugin_maint is the sole owner of safeword.word.
+handle_safeword_set(string word, key user) {
+    if (user != llGetOwner()) return;   // belt-and-suspenders identity gate
+    if (word == JSON_INVALID) word = "";
+    word = llStringTrim(word, STRING_TRIM);
+    if (word == "") return;   // the no-arg form INVOKES the safeword; never reaches here
+    // Single-writer settings.delta — kmod_settings is the LSD writer.
+    llMessageLinked(LINK_SET, SETTINGS_BUS,
+        "settings.delta:" + KEY_SAFEWORD + ":" + word, NULL_KEY);
+    llRegionSayTo(user, 0, "Safeword changed to: " + word);
+}
+
+// The safeword fired (the engines do the clears). We own the aftercare side:
+// IM every primary owner (roster acl 5) so the dom is summoned to check on the
+// wearer. A self-owned/unowned wearer has no acl-5 records, so no IM is sent.
+notify_owners() {
+    key wearer = llGetOwner();
+    string nm = llGetDisplayName(wearer);
+    if (nm == "") nm = llKey2Name(wearer);
+    string note = "Your property " + nm + " has used their safeword. Please establish contact and check on their well-being.";
+    list keys = llLinksetDataFindKeys("^user\\.", 0, -1);
+    integer i = 0;
+    integer n = llGetListLength(keys);
+    while (i < n) {
+        string k = llList2String(keys, i);
+        list f = llCSV2List(llLinksetDataRead(k));
+        if (llList2Integer(f, 0) == 5) {            // acl 5 = primary owner
+            key ow = (key)llGetSubString(k, 5, -1); // strip "user."
+            if (ow != wearer) llInstantMessage(ow, note);
+        }
+        i += 1;
+    }
 }
 
 /* -------------------- ACTIONS -------------------- */
@@ -319,7 +430,7 @@ show_reset_config_confirm() {
     // Modal confirm: No-first, returns confirm/cancel (handler routes by context).
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "modal",
+        "mode",       "dialog.modal",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "title",      "Reset Config",
@@ -355,7 +466,7 @@ show_clear_leash_confirm() {
     // Modal confirm: No-first, returns confirm/cancel.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "modal",
+        "mode",       "dialog.modal",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "title",      "Clear Leash",
@@ -421,7 +532,7 @@ show_update_confirm() {
     // Modal confirm: No-first, returns confirm/cancel.
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
         "type",       "ui.menu.render",
-        "mode",       "modal",
+        "mode",       "dialog.modal",
         "session_id", SessionId,
         "user",       (string)CurrentUser,
         "title",      "Update Collar",
@@ -536,95 +647,67 @@ handle_dialog_response(string msg) {
     if (session != SessionId) return;
 
     string cmd = llJsonGetValue(msg, ["context"]);
-    // Nav (<< >> Back) renders as plain buttons with empty context → fall back
-    // to the button label so the handler can route them.
-    if (cmd == JSON_INVALID || cmd == "") cmd = llJsonGetValue(msg, ["button"]);
+    if (cmd == JSON_INVALID) cmd = "";
 
-    // Navigation
-    if (cmd == "back" || cmd == "Back") {
-        if (MenuContext != "main") {
-            show_main_menu();
-        }
-        else {
-            return_to_root();
-        }
+    // Navigation. Back from a category (or the safeword info "ok") goes up to the
+    // maint root; Back from the root exits to the collar menu. (Close is handled
+    // centrally by kmod_dialogs → ui.dialog.close; the modals have no Back.)
+    if (cmd == "nav:back" || cmd == "ok") {
+        if (MenuContext == "main") return_to_root();
+        else                       show_main_menu();
         return;
     }
 
-    // Confirmation dialogs — route by menu context
+    // Confirmation dialogs (dialog.modal) — route by menu context; cancel
+    // returns to the category the action lives in.
     if (MenuContext == "reset_config") {
-        if (cmd == "confirm") {
-            do_reset_config();
-            return;
-        }
-        show_main_menu();
+        if (cmd == "confirm") { do_reset_config(); return; }
+        show_config_menu();
         return;
     }
-
     if (MenuContext == "clear_leash") {
-        if (cmd == "confirm") {
-            do_clear_leash();
-            return;
-        }
-        show_main_menu();
+        if (cmd == "confirm") { do_clear_leash(); show_system_menu(); return; }
+        show_system_menu();
         return;
     }
-
     if (MenuContext == "update_confirm") {
-        if (cmd == "confirm") {
-            do_confirm_update();
-            return;
-        }
+        if (cmd == "confirm") { do_confirm_update(); return; }
         do_cancel_update();
-        show_main_menu();
+        show_system_menu();
         return;
     }
 
-    // Main menu commands
-    if (cmd == "view_settings") {
-        do_view_settings();
-        show_main_menu();
-        return;
-    }
-    if (cmd == "access_list") {
-        do_display_access_list();
-        show_main_menu();
-        return;
-    }
-    if (cmd == "reload_settings") {
-        do_reload_settings();
-        show_main_menu();
-        return;
-    }
-    if (cmd == "clear_leash") {
-        show_clear_leash_confirm();
-        return;
-    }
-    if (cmd == "reload_collar") {
-        do_reload_collar();
-        show_main_menu();
-        return;
-    }
-    if (cmd == "get_hud") {
-        do_give_hud();
-        show_main_menu();
-        return;
-    }
-    if (cmd == "user_manual") {
-        do_give_manual();
-        show_main_menu();
-        return;
-    }
-    if (cmd == "reset_config") {
-        show_reset_config_confirm();
-        return;
-    }
-    if (cmd == "update_collar") {
-        do_start_update_scan();
+    // Root: category drill-downs + standalone actions.
+    if (MenuContext == "main") {
+        if (cmd == "config")      show_config_menu();
+        else if (cmd == "system") show_system_menu();
+        else if (cmd == "safeword") show_safeword_info();
+        else if (cmd == "get_hud")     { do_give_hud();    show_main_menu(); }
+        else if (cmd == "user_manual") { do_give_manual(); show_main_menu(); }
+        else show_main_menu();   // unknown / inert spacer
         return;
     }
 
-    // Inert << >> on the main pager — redraw.
+    // Configuration category — actions return to the category.
+    if (MenuContext == "config") {
+        if (cmd == "view_settings")        { do_view_settings();      show_config_menu(); }
+        else if (cmd == "reload_settings") { do_reload_settings();    show_config_menu(); }
+        else if (cmd == "access_list")     { do_display_access_list();show_config_menu(); }
+        else if (cmd == "reset_config")    show_reset_config_confirm();
+        else show_config_menu();
+        return;
+    }
+
+    // System category — actions return to the category (confirms/scan branch off).
+    if (MenuContext == "system") {
+        if (cmd == "reload_collar")      { do_reload_collar(); show_system_menu(); }
+        else if (cmd == "update_collar") do_start_update_scan();
+        else if (cmd == "clear_leash")   show_clear_leash_confirm();
+        else show_system_menu();
+        return;
+    }
+
+    // Unknown context — redraw root.
     show_main_menu();
 }
 
@@ -701,6 +784,20 @@ default {
         /* -------------------- UI START -------------------- */if (num == UI_BUS) {
             string msg_type = llJsonGetValue(msg, ["type"]);
             if (msg_type == JSON_INVALID) return;
+
+            if (msg_type == "safeword.fired") {
+                // Wearer safeword (the engines do the clears). We own the
+                // aftercare: confirm to the wearer and summon the dom(s).
+                llRegionSayTo(llGetOwner(), 0, "Safeword acknowledged — all restraints released.");
+                notify_owners();
+                return;
+            }
+
+            if (msg_type == "safeword.set") {
+                // From kmod_chat ("<prefix> safeword <word>"), already wearer-gated.
+                handle_safeword_set(llJsonGetValue(msg, ["word"]), id);
+                return;
+            }
 
             if (msg_type == "ui.menu.start") {
                 if (llJsonGetValue(msg, ["acl"]) == JSON_INVALID) return;
