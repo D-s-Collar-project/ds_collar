@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D/s Collar v1.2 — dev vs stable revisions</title>
+<style>
+  :root {
+    --bg: #11151a; --panel: #1a2029; --line: #2b333f;
+    --txt: #d7dee7; --dim: #8b97a6; --hdr: #e8edf3;
+    --ok: #2e7d4f; --ok-bg: #16271d; --warn: #c8412e; --warn-bg: #2a1614;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem; background: var(--bg); color: var(--txt);
+    font: 14px/1.5 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  h1 { color: var(--hdr); font-size: 1.35rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); margin: 0 0 1.25rem; font-size: .85rem; }
+  .summary {
+    display: inline-block; padding: .5rem .9rem; border-radius: 6px;
+    background: var(--panel); border: 1px solid var(--line); margin-bottom: 1.25rem;
+  }
+  .summary b { color: var(--hdr); }
+  table { border-collapse: collapse; width: 100%; max-width: 880px; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th, td { padding: .5rem .8rem; text-align: left; border-bottom: 1px solid var(--line); }
+  th { background: #20262f; color: var(--hdr); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; cursor: pointer; user-select: none; }
+  th:hover { color: #fff; }
+  tr:last-child td { border-bottom: none; }
+  td.rev { text-align: center; font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+  td.name { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+  .pill { display: inline-block; min-width: 3.4rem; text-align: center; padding: .12rem .55rem; border-radius: 999px; font-weight: 600; font-size: .78rem; }
+  .pill.no  { color: #7fd6a3; background: var(--ok-bg);  border: 1px solid var(--ok); }
+  .pill.yes { color: #f1a79b; background: var(--warn-bg); border: 1px solid var(--warn); }
+  tr.needs td { background: var(--warn-bg); }
+  footer { color: var(--dim); font-size: .78rem; margin-top: 1.5rem; max-width: 880px; }
+  code { background: #0d1116; padding: .1rem .35rem; border-radius: 4px; color: #c8d2dd; }
+</style>
+</head>
+<body>
+  <h1>D/s Collar v1.2 — script revisions</h1>
+  <p class="sub">Pipeline stage compare: <code>src/lsl/collar/v1.2/dev</code> vs <code>src/lsl/collar/v1.2/stable</code> · generated 2026-06-26 by <code>gen_versions.sh</code></p>
+
+  <div class="summary" id="summary"></div>
+
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th data-k="stable" data-t="s">Stable script</th>
+        <th data-k="dev" data-t="s">Dev script</th>
+        <th data-k="devRev" data-t="n">Dev rev</th>
+        <th data-k="stableRev" data-t="n">Stable rev</th>
+        <th data-k="need" data-t="b">Update needed</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <footer>
+    <strong>Update needed</strong> is <code>true</code> when the dev revision is greater than the stable revision —
+    i.e. dev has changes not yet promoted downstream. A row also flags red if a script exists in one stage but not the
+    other (shown as <code>—</code>). Regenerate with <code>./gen_versions.sh</code> after a rev bump or reconcile.
+  </footer>
+
+<script>
+// [name, devRev, stableRev]  (-1 = absent in that stage). Generated — do not hand-edit.
+const RAW = [
+  ["collar_kernel.lsl", 6, 6],
+  ["control_hud.lsl", 0, 0],
+  ["kmod_auth.lsl", 6, 6],
+  ["kmod_bootstrap.lsl", 8, 8],
+  ["kmod_chat.lsl", 7, 7],
+  ["kmod_dialogs.lsl", 7, 7],
+  ["kmod_leash_engine.lsl", 9, 9],
+  ["kmod_menu.lsl", 16, 16],
+  ["kmod_particles.lsl", 6, 6],
+  ["kmod_remote.lsl", 6, 6],
+  ["kmod_rlv.lsl", 8, 8],
+  ["kmod_settings.lsl", 9, 9],
+  ["kmod_ui.lsl", 11, 11],
+  ["leash_holder.lsl", 0, 0],
+  ["plugin_animate.lsl", 9, 9],
+  ["plugin_bell.lsl", 12, 12],
+  ["plugin_blacklist.lsl", 12, 12],
+  ["plugin_chat.lsl", 11, 11],
+  ["plugin_folders.lsl", 11, 11],
+  ["plugin_leash.lsl", 13, 13],
+  ["plugin_lock.lsl", 8, 8],
+  ["plugin_maint.lsl", 11, 11],
+  ["plugin_outfits.lsl", 14, 14],
+  ["plugin_owners.lsl", 17, 17],
+  ["plugin_public.lsl", 6, 6],
+  ["plugin_relay.lsl", 12, 12],
+  ["plugin_restrict.lsl", 13, 13],
+  ["plugin_rlvex.lsl", 12, 12],
+  ["plugin_sos.lsl", 10, 10],
+  ["plugin_status.lsl", 9, 9],
+  ["plugin_strip.lsl", 11, 11],
+  ["plugin_tpe.lsl", 8, 8],
+];
+
+const rows = RAW.map(([name, devRev, stableRev]) => ({
+  stable: stableRev < 0 ? "—" : name,
+  dev:    devRev    < 0 ? "—" : name,
+  devRev, stableRev,
+  need:   devRev > stableRev   // dev ahead of stable → promotion needed
+}));
+
+const fmtRev = r => r < 0 ? "—" : String(r);
+
+function render(data) {
+  const tb = document.querySelector("#tbl tbody");
+  tb.innerHTML = data.map(r => `
+    <tr class="${r.need ? "needs" : ""}">
+      <td class="name">${r.stable}</td>
+      <td class="name">${r.dev}</td>
+      <td class="rev">${fmtRev(r.devRev)}</td>
+      <td class="rev">${fmtRev(r.stableRev)}</td>
+      <td class="rev"><span class="pill ${r.need ? "yes" : "no"}">${r.need ? "true" : "false"}</span></td>
+    </tr>`).join("");
+}
+
+const need = rows.filter(r => r.need).length;
+document.querySelector("#summary").innerHTML =
+  need === 0
+    ? `<b>${rows.length}</b> scripts · <b style="color:#7fd6a3">all in sync</b> — no promotion needed.`
+    : `<b>${rows.length}</b> scripts · <b style="color:#f1a79b">${need} need promotion</b> (dev ahead of stable).`;
+
+// Click a header to sort; default keeps source (alpha) order.
+let dir = 1, lastK = null;
+document.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
+  const k = th.dataset.k, t = th.dataset.t;
+  dir = (lastK === k) ? -dir : 1; lastK = k;
+  const sorted = [...rows].sort((a, b) => {
+    let av = a[k], bv = b[k];
+    if (t === "n") return (av - bv) * dir;
+    if (t === "b") return ((av ? 1 : 0) - (bv ? 1 : 0)) * dir;
+    return String(av).localeCompare(String(bv)) * dir;
+  });
+  render(sorted);
+}));
+
+render(rows);
+</script>
+</body>
+</html>
