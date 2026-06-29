@@ -2,9 +2,13 @@
 #
 # gen_versions.sh — regenerate script_versions.html from the live tree.
 #
-# Scans dev/ and stable/ for every *.lsl, reads each file's REVISION header,
-# and writes a self-contained dashboard comparing dev vs stable revisions
-# (Update needed = dev rev > stable rev). Run after any rev bump or reconcile.
+# Scans dev/, rc/, and stable/ for every *.lsl, reads each file's REVISION
+# header, and writes a self-contained dashboard comparing revisions across the
+# 3-stage promotion pipeline (dev -> rc -> stable). A transition flags red when
+# an upstream stage is ahead of the downstream one:
+#   dev -> rc     when devRev > rcRev
+#   rc  -> stable when rcRev  > stableRev
+# Run after any rev bump or reconcile.
 #
 #   cd src/lsl/collar/v1.2 && ./gen_versions.sh
 #
@@ -16,13 +20,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DEV="dev"
+RC="rc"
 STABLE="stable"
 OUT="script_versions.html"
 
-if [ ! -d "$DEV" ] || [ ! -d "$STABLE" ]; then
-  echo "error: expected '$DEV/' and '$STABLE/' beside this script" >&2
-  exit 1
-fi
+for d in "$DEV" "$RC" "$STABLE"; do
+  if [ ! -d "$d" ]; then
+    echo "error: expected '$d/' beside this script" >&2
+    exit 1
+  fi
+done
 
 # First REVISION integer in a file's header; "-1" if file missing / no header.
 rev_of() {
@@ -33,28 +40,31 @@ rev_of() {
   echo "${r:--1}"
 }
 
-# Union of basenames across both stages, sorted, de-duped.
+# Union of basenames across all three stages, sorted, de-duped.
 names=$(
-  { ls "$DEV"/*.lsl "$STABLE"/*.lsl 2>/dev/null || true; } \
+  { ls "$DEV"/*.lsl "$RC"/*.lsl "$STABLE"/*.lsl 2>/dev/null || true; } \
   | xargs -n1 basename 2>/dev/null | sort -u
 )
 
 if [ -z "$names" ]; then
-  echo "error: no .lsl files found in $DEV/ or $STABLE/" >&2
+  echo "error: no .lsl files found in $DEV/, $RC/ or $STABLE/" >&2
   exit 1
 fi
 
-# Build the RAW JS rows: ["name", devRev, stableRev],
+# Build the RAW JS rows: ["name", devRev, rcRev, stableRev],
 ROWS=""
 count=0
-need=0
+need_rc=0
+need_stable=0
 while IFS= read -r base; do
   [ -n "$base" ] || continue
   d=$(rev_of "$DEV/$base")
+  r=$(rev_of "$RC/$base")
   s=$(rev_of "$STABLE/$base")
-  ROWS+="  [\"$base\", $d, $s],"$'\n'
+  ROWS+="  [\"$base\", $d, $r, $s],"$'\n'
   count=$((count + 1))
-  if [ "$d" -gt "$s" ]; then need=$((need + 1)); fi
+  if [ "$d" -gt "$r" ]; then need_rc=$((need_rc + 1)); fi
+  if [ "$r" -gt "$s" ]; then need_stable=$((need_stable + 1)); fi
 done <<< "$names"
 
 # Strip the trailing newline from ROWS for tidy output.
@@ -69,7 +79,7 @@ cat > "$OUT" <<'EOF_HEAD'
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>D/s Collar v1.2 — dev vs stable revisions</title>
+<title>D/s Collar v1.2 — dev / rc / stable revisions</title>
 <style>
   :root {
     --bg: #11151a; --panel: #1a2029; --line: #2b333f;
@@ -88,9 +98,9 @@ cat > "$OUT" <<'EOF_HEAD'
     background: var(--panel); border: 1px solid var(--line); margin-bottom: 1.25rem;
   }
   .summary b { color: var(--hdr); }
-  table { border-collapse: collapse; width: 100%; max-width: 880px; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  table { border-collapse: collapse; width: 100%; max-width: 920px; background: var(--panel); border-radius: 8px; overflow: hidden; }
   th, td { padding: .5rem .8rem; text-align: left; border-bottom: 1px solid var(--line); }
-  th { background: #20262f; color: var(--hdr); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; cursor: pointer; user-select: none; }
+  th { background: #20262f; color: var(--hdr); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; cursor: pointer; -webkit-user-select: none; user-select: none; }
   th:hover { color: #fff; }
   tr:last-child td { border-bottom: none; }
   td.rev { text-align: center; font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
@@ -99,37 +109,38 @@ cat > "$OUT" <<'EOF_HEAD'
   .pill.no  { color: #7fd6a3; background: var(--ok-bg);  border: 1px solid var(--ok); }
   .pill.yes { color: #f1a79b; background: var(--warn-bg); border: 1px solid var(--warn); }
   tr.needs td { background: var(--warn-bg); }
-  footer { color: var(--dim); font-size: .78rem; margin-top: 1.5rem; max-width: 880px; }
+  footer { color: var(--dim); font-size: .78rem; margin-top: 1.5rem; max-width: 920px; }
   code { background: #0d1116; padding: .1rem .35rem; border-radius: 4px; color: #c8d2dd; }
 </style>
 </head>
 <body>
   <h1>D/s Collar v1.2 — script revisions</h1>
-  <p class="sub">Pipeline stage compare: <code>src/lsl/collar/v1.2/dev</code> vs <code>src/lsl/collar/v1.2/stable</code> · generated __DATE__ by <code>gen_versions.sh</code></p>
+  <p class="sub">3-stage pipeline compare: <code>dev</code> → <code>rc</code> → <code>stable</code> · generated __DATE__ by <code>gen_versions.sh</code></p>
 
   <div class="summary" id="summary"></div>
 
   <table id="tbl">
     <thead>
       <tr>
-        <th data-k="stable" data-t="s">Stable script</th>
-        <th data-k="dev" data-t="s">Dev script</th>
-        <th data-k="devRev" data-t="n">Dev rev</th>
-        <th data-k="stableRev" data-t="n">Stable rev</th>
-        <th data-k="need" data-t="b">Update needed</th>
+        <th data-k="name" data-t="s">Script</th>
+        <th data-k="devRev" data-t="n">Dev</th>
+        <th data-k="rcRev" data-t="n">RC</th>
+        <th data-k="stableRev" data-t="n">Stable</th>
+        <th data-k="toRc" data-t="b">dev → rc</th>
+        <th data-k="toStable" data-t="b">rc → stable</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
 
   <footer>
-    <strong>Update needed</strong> is <code>true</code> when the dev revision is greater than the stable revision —
-    i.e. dev has changes not yet promoted downstream. A row also flags red if a script exists in one stage but not the
-    other (shown as <code>—</code>). Regenerate with <code>./gen_versions.sh</code> after a rev bump or reconcile.
+    Each transition flags <code>true</code> when an upstream stage's revision is greater than the downstream stage's —
+    i.e. changes not yet promoted: <code>dev → rc</code> when dev rev &gt; rc rev, <code>rc → stable</code> when rc rev &gt; stable rev.
+    A <code>—</code> means the script is absent from that stage. Regenerate with <code>./gen_versions.sh</code> after a rev bump or reconcile.
   </footer>
 
 <script>
-// [name, devRev, stableRev]  (-1 = absent in that stage). Generated — do not hand-edit.
+// [name, devRev, rcRev, stableRev]  (-1 = absent in that stage). Generated — do not hand-edit.
 const RAW = [
 EOF_HEAD
 
@@ -138,11 +149,10 @@ printf '%s\n' "$ROWS" >> "$OUT"
 cat >> "$OUT" <<'EOF_TAIL'
 ];
 
-const rows = RAW.map(([name, devRev, stableRev]) => ({
-  stable: stableRev < 0 ? "—" : name,
-  dev:    devRev    < 0 ? "—" : name,
-  devRev, stableRev,
-  need:   devRev > stableRev   // dev ahead of stable → promotion needed
+const rows = RAW.map(([name, devRev, rcRev, stableRev]) => ({
+  name, devRev, rcRev, stableRev,
+  toRc:     devRev > rcRev,      // dev ahead of rc      → promote dev → rc
+  toStable: rcRev  > stableRev,  // rc  ahead of stable  → promote rc → stable
 }));
 
 const fmtRev = r => r < 0 ? "—" : String(r);
@@ -150,20 +160,22 @@ const fmtRev = r => r < 0 ? "—" : String(r);
 function render(data) {
   const tb = document.querySelector("#tbl tbody");
   tb.innerHTML = data.map(r => `
-    <tr class="${r.need ? "needs" : ""}">
-      <td class="name">${r.stable}</td>
-      <td class="name">${r.dev}</td>
+    <tr class="${(r.toRc || r.toStable) ? "needs" : ""}">
+      <td class="name">${r.name}</td>
       <td class="rev">${fmtRev(r.devRev)}</td>
+      <td class="rev">${fmtRev(r.rcRev)}</td>
       <td class="rev">${fmtRev(r.stableRev)}</td>
-      <td class="rev"><span class="pill ${r.need ? "yes" : "no"}">${r.need ? "true" : "false"}</span></td>
+      <td class="rev"><span class="pill ${r.toRc ? "yes" : "no"}">${r.toRc ? "true" : "false"}</span></td>
+      <td class="rev"><span class="pill ${r.toStable ? "yes" : "no"}">${r.toStable ? "true" : "false"}</span></td>
     </tr>`).join("");
 }
 
-const need = rows.filter(r => r.need).length;
+const needRc = rows.filter(r => r.toRc).length;
+const needStable = rows.filter(r => r.toStable).length;
 document.querySelector("#summary").innerHTML =
-  need === 0
-    ? `<b>${rows.length}</b> scripts · <b style="color:#7fd6a3">all in sync</b> — no promotion needed.`
-    : `<b>${rows.length}</b> scripts · <b style="color:#f1a79b">${need} need promotion</b> (dev ahead of stable).`;
+  (needRc === 0 && needStable === 0)
+    ? `<b>${rows.length}</b> scripts · <b style="color:#7fd6a3">all in sync</b> — nothing to promote.`
+    : `<b>${rows.length}</b> scripts · <b style="color:#f1a79b">${needRc}</b> need <code>dev → rc</code> · <b style="color:#f1a79b">${needStable}</b> need <code>rc → stable</code>.`;
 
 // Click a header to sort; default keeps source (alpha) order.
 let dir = 1, lastK = null;
@@ -188,4 +200,4 @@ EOF_TAIL
 # Single-line token swap (date is YYYY-MM-DD, sed-safe).
 sed -i "s/__DATE__/$DATE/" "$OUT"
 
-echo "wrote $OUT — $count scripts, $need need promotion (as of $DATE)"
+echo "wrote $OUT — $count scripts, $need_rc need dev->rc, $need_stable need rc->stable (as of $DATE)"
