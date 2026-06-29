@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 16
+REVISION: 17
 CHANGES:
+- v1.2 rev 17: new menu.sensor picker mode — a scan-and-pick service. A plugin sends ui.menu.render {mode:"menu.sensor",kind,range,title,prompt,requester,user}; kmod_menu owns the llSensor + sensor()/no_sensor() + the picker session + the pick->key resolve, and replies ui.sensor.result {requester,name,key}|{cancelled}. Render shape keys off kind: objects->OL (object key), agents->UL (avatar key), collars->scan collars + resolve OBJECT_OWNER deduped->UL (avatar key, so coffle is leash-to-avatar). Centralising the scan also centralises the JSON-safe {label} build, so a candidate name beginning with '[' or '{' can never collapse the array (the picker-empty bug, fixed once for all sensor pickers). kmod_menu is no longer stateless (holds the single-flight scan session); it now also listens on DIALOG_BUS for its own picker session only. First consumer: plugin_restrict force-sit.
 - v1.2 rev 16: render unified — render_menu + render_list collapse into one render_paged(shape) covering the four menu.x shapes (fixed/pager/unordered/ordered); dialog.modal flanked to [No, spacer, Yes]; dispatch switches the six explicit menu.x / dialog.x modes (bare-name transition aliases dropped).
 - v1.2 rev 15: the pager (render_menu) now accepts the optional `fixed` action-button list, like render_list — fixed buttons reserve the low slots right after nav and page_size shrinks by the fixed count. A blank spacer ({label:" ",context:""}) among the fixed buttons positions them (plugin_leash's length menu uses [-1m," ",+1m] to flank -1m/+1m at slots 3 and 5). Menus that send no `fixed` are unchanged (page_size stays PAGE_SIZE).
 - v1.2 rev 14: nav buttons now carry contexts (nav:prev/nav:next/nav:back/nav:close) via the new nav_obj() helper — in render_menu + render_list — instead of bare label strings. The dialog layer already context-routes {label,context} objects, so consumers route nav by context like every other button (no more label-routing exception); the visible label is now free to restyle (e.g. UTF-8 arrows) with zero routing impact.
@@ -41,6 +42,28 @@ integer SHAPE_FIXED = 0;  // [Close . - . Back], single page (never paginates)
 integer SHAPE_PAGER = 1;  // [<< . >> . exit], paginates
 integer SHAPE_UL    = 2;  // unordered picker: A-Z sort, name on the button
 integer SHAPE_OL    = 3;  // ordered picker: number on the button + numbered body
+
+/* -------------------- SENSOR PICKER (menu.sensor) -------------------- */
+// A scan-and-pick service mode, single-flight. A plugin sends ui.menu.render
+// mode "menu.sensor" {kind,range,title,prompt,requester,user}; we own the
+// llSensor + the picker session + the pick->key resolve, and reply with
+// ui.sensor.result {requester,name,key} (or {cancelled}). Centralising the
+// scan also centralises the JSON-safe {label} build, so a candidate name
+// beginning with '[' or '{' can never collapse the array (the picker-empty bug).
+// Render shape keys off kind: objects -> OL (object key); agents -> UL (avatar
+// key); collars -> scan collars, resolve OBJECT_OWNER to the wearer, UL (avatar
+// key). So coffle (collars) is a leash-to-avatar — the collar scan is only the
+// gate.
+integer SensorActive    = FALSE;
+string  SensorRequester = "";   // plugin context to return the result to
+string  SensorUserStr   = "";   // (string) of the driving avatar
+string  SensorKind      = "";   // "objects" | "agents" | "collars"
+string  SensorTitle     = "";
+string  SensorPrompt    = "";
+integer SensorShape     = 2;    // SHAPE_UL (agents/collars) or SHAPE_OL (objects)
+string  SensorSession   = "";   // dialog session id for the picker
+integer SensorPage      = 0;
+list    SensorCands     = [];   // resolved stride list [name, key, name, key, ...]
 
 /* -------------------- HELPERS -------------------- */
 
@@ -372,6 +395,133 @@ show_message(string msg) {
     llRegionSayTo(user, 0, message_text);
 }
 
+/* -------------------- SENSOR PICKER -------------------- */
+
+// Map the requested kind to llSensor type flags. Unknown -> objects.
+integer sensor_flags_for(string kind) {
+    if (kind == "agents")  return AGENT;
+    if (kind == "collars") return PASSIVE | SCRIPTED;
+    return PASSIVE | ACTIVE | SCRIPTED;
+}
+
+// Reply to the requesting plugin. cleared=TRUE clears SensorActive here so a
+// stray late dialog event can't double-fire.
+sensor_send_result(string name, string key_str, integer cancelled) {
+    SensorActive = FALSE;
+    list f = ["type", "ui.sensor.result", "requester", SensorRequester, "user", SensorUserStr];
+    if (cancelled) f += ["cancelled", "1"];
+    else           f += ["name", name, "key", key_str];
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, f), NULL_KEY);
+}
+
+// No candidates: tell the user, then hand a cancel back to the requester so it
+// can redraw its own menu.
+sensor_done_none() {
+    string noun = "objects";
+    if (SensorKind != "objects") noun = "people";
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type", "ui.message.show",
+        "user", SensorUserStr,
+        "message", "No " + noun + " found nearby."
+    ]), NULL_KEY);
+    sensor_send_result("", "", TRUE);
+}
+
+// Build the picker items from the held candidates and feed the shared renderer.
+// UL: name on the button + key in the context (the pick returns the key directly).
+// OL: a {label} object (always JSON-safe) + pick:<index> into SensorCands.
+render_sensor_picker() {
+    // SensorSession is fixed for the scan (set in handle_sensor_request); paging
+    // re-renders reuse it, so kmod_dialogs cleanly replaces the same dialog.
+    list items = [];
+    integer n = llGetListLength(SensorCands) / 2;
+    integer i = 0;
+    while (i < n) {
+        string nm = llList2String(SensorCands, i * 2);
+        if (llStringLength(nm) > 28) nm = llGetSubString(nm, 0, 25) + "...";
+        if (SensorShape == SHAPE_UL) {
+            items += [llList2Json(JSON_OBJECT, ["label", nm, "context", llList2String(SensorCands, i * 2 + 1)])];
+        }
+        else {
+            items += [llList2Json(JSON_OBJECT, ["label", nm])];
+        }
+        i += 1;
+    }
+
+    string m = llList2Json(JSON_OBJECT, [
+        "type",       "ui.menu.render",
+        "session_id", SensorSession,
+        "user",       SensorUserStr,
+        "menu_type",  SensorRequester,
+        "title",      SensorTitle,
+        "body",       SensorPrompt,
+        "items",      llList2Json(JSON_ARRAY, items),
+        "page",       SensorPage
+    ]);
+    render_paged(m, SensorShape);
+}
+
+// Kick off a scan. Single-flight: a new request supersedes any in-flight one.
+handle_sensor_request(string msg) {
+    if (!validate_required_fields(msg, ["user", "requester"])) return;
+
+    SensorRequester = llJsonGetValue(msg, ["requester"]);
+    SensorUserStr   = llJsonGetValue(msg, ["user"]);
+
+    SensorKind = llJsonGetValue(msg, ["kind"]);
+    if (SensorKind == JSON_INVALID || SensorKind == "") SensorKind = "objects";
+
+    SensorTitle = llJsonGetValue(msg, ["title"]);
+    if (SensorTitle == JSON_INVALID) SensorTitle = "Select";
+    SensorPrompt = llJsonGetValue(msg, ["prompt"]);
+    if (SensorPrompt == JSON_INVALID) SensorPrompt = "Select an option:";
+
+    // objects -> OL; people (agents/collars) -> UL.
+    if (SensorKind == "objects") SensorShape = SHAPE_OL;
+    else                         SensorShape = SHAPE_UL;
+
+    float range = (float)llJsonGetValue(msg, ["range"]);
+    if (range <= 0.0) range = 10.0;
+
+    SensorSession = "sensor_" + (string)llGetKey() + "_" + (string)llGetUnixTime();
+    SensorCands  = [];
+    SensorPage   = 0;
+    SensorActive = TRUE;
+    llSensor("", NULL_KEY, sensor_flags_for(SensorKind), range, PI);
+}
+
+// Pick / nav / cancel for the active sensor session (DIALOG_BUS responses).
+handle_sensor_response(string msg) {
+    if (!SensorActive) return;
+    if (llJsonGetValue(msg, ["session_id"]) != SensorSession) return;
+
+    string ctx = llJsonGetValue(msg, ["context"]);
+    if (ctx == JSON_INVALID) ctx = "";
+
+    if (ctx == "nav:back") {
+        sensor_send_result("", "", TRUE);
+        return;
+    }
+    if (ctx == "nav:prev") { SensorPage -= 1; render_sensor_picker(); return; }
+    if (ctx == "nav:next") { SensorPage += 1; render_sensor_picker(); return; }
+
+    if (llGetSubString(ctx, 0, 4) == "pick:") {
+        // OL: index into SensorCands.
+        integer idx = (integer)llGetSubString(ctx, 5, -1);
+        if (idx * 2 + 1 < llGetListLength(SensorCands)) {
+            sensor_send_result(llList2String(SensorCands, idx * 2),
+                               llList2String(SensorCands, idx * 2 + 1), FALSE);
+        }
+        return;
+    }
+
+    // UL: the context IS the key; the name sits at the preceding stride slot.
+    integer ki = llListFindList(SensorCands, [(key)ctx]);
+    if (ki != -1) {
+        sensor_send_result(llList2String(SensorCands, ki - 1), ctx, FALSE);
+    }
+}
+
 /* -------------------- EVENTS -------------------- */
 
 // Stateless renderer — no init needed, so no state_entry; the state's
@@ -394,13 +544,14 @@ default
             if (msg_type == "ui.menu.render") {
                 // Two families: navigable menus (menu.*) all flow through the one
                 // render_paged(shape); terminal dialogs (dialog.*) are their own
-                // small renderers. menu.* share render_paged (four shapes);
-                // dialog.* are terminal. A missing/unknown mode defaults to the
+                // small renderers. menu.sensor scans first, then renders an OL/UL
+                // picker over the result. A missing/unknown mode defaults to the
                 // safe paginating pager.
                 string mode = llJsonGetValue(msg, ["mode"]);
                 if      (mode == "menu.fixed")     render_paged(msg, SHAPE_FIXED);
                 else if (mode == "menu.unordered") render_paged(msg, SHAPE_UL);
                 else if (mode == "menu.ordered")   render_paged(msg, SHAPE_OL);
+                else if (mode == "menu.sensor")    handle_sensor_request(msg);
                 else if (mode == "dialog.modal")   render_modal(msg);
                 else if (mode == "dialog.info")    render_info(msg);
                 else                               render_paged(msg, SHAPE_PAGER);
@@ -408,7 +559,64 @@ default
             else if (msg_type == "ui.message.show") {
                 show_message(msg);
             }
+            return;
         }
+
+        // DIALOG_BUS: only our own sensor-picker session concerns us — kmod_ui
+        // owns the menu sessions, and handle_sensor_response self-gates on
+        // SensorSession. A close/timeout on our session is a cancel.
+        if (num == DIALOG_BUS) {
+            if (msg_type == "ui.dialog.response") {
+                handle_sensor_response(msg);
+            }
+            else if (msg_type == "ui.dialog.timeout" || msg_type == "ui.dialog.close") {
+                if (SensorActive && llJsonGetValue(msg, ["session_id"]) == SensorSession) {
+                    sensor_send_result("", "", TRUE);
+                }
+            }
+            return;
+        }
+    }
+
+    // menu.sensor scan results. Resolution is kind-specific: agents -> the
+    // avatar; collars -> the collar's OBJECT_OWNER (deduped, so coffle leashes to
+    // a person); objects -> the object. Excludes the collar prim + the wearer.
+    sensor(integer num_detected) {
+        if (!SensorActive) return;
+
+        key wearer = llGetOwner();
+        key my_key = llGetKey();
+        SensorCands = [];
+
+        integer i = 0;
+        while (i < num_detected) {
+            key dk = llDetectedKey(i);
+            if (SensorKind == "agents") {
+                if (dk != wearer) SensorCands += [llDetectedName(i), dk];
+            }
+            else if (SensorKind == "collars") {
+                key owner = llGetOwnerKey(dk);
+                if (dk != my_key && owner != wearer && owner != NULL_KEY
+                    && llListFindList(SensorCands, [owner]) == -1) {
+                    SensorCands += [llKey2Name(owner), owner];
+                }
+            }
+            else {
+                if (dk != my_key && dk != wearer) SensorCands += [llDetectedName(i), dk];
+            }
+            i += 1;
+        }
+
+        if (llGetListLength(SensorCands) == 0) {
+            sensor_done_none();
+            return;
+        }
+        render_sensor_picker();
+    }
+
+    no_sensor() {
+        if (!SensorActive) return;
+        sensor_done_none();
     }
 
     changed(integer change) {

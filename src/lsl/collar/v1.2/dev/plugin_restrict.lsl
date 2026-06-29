@@ -1,13 +1,15 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.2
-REVISION: 13
+REVISION: 15
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.2 rev 15: force-sit migrated to the new kmod_menu menu.sensor service (rev 17). Deleted start_sit_scan/display_sit_targets + the sensor()/no_sensor() events + SitCandidates/SitPage/ScanInitiator + the sit_select dialog block. force_sit now sends ui.menu.render mode menu.sensor {kind:objects}; the picked object's key returns via ui.sensor.result -> handle_sit_result -> force_sit_on. The rev-14 {label}-wrap fix is subsumed (the JSON-safe build lives in the service now). First consumer of menu.sensor; pattern extends to the other 3 sensor pickers once validated.
+- v1.2 rev 14: FIX force-sit picker collapsed to a single blank row whenever a nearby object's name began with '[' or '{' (e.g. "[Ds] Chesterfield..."). display_sit_targets now wraps each sit-target name as a {label} object instead of a bare string: llList2Json(JSON_ARRAY, rawnames) auto-types a bare element that looks like JSON and returns JSON_INVALID for the WHOLE array on a parse failure, nuking every entry. Systemic to all raw-string UL/OL pickers (animate/outfits/blacklist/folders/owners/leash/strip) — same wrap needed there.
 - v1.2 rev 13: main to menu.fixed (dropped MainPage cursor + main prev/next), category toggle-list to menu.pager (still paginates), sit-target picker to menu.ordered; cleans up on the new ui.dialog.close.
 - v1.2 rev 12: main menu now paginates — separate MainPage cursor (distinct from CurrentPage/SitPage, the category + sit pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 11: nav routes by context (nav:back/nav:prev/nav:next) across all three menu blocks (main/sit_select/category), not the button label; dropped the now-unused `button` local. Categories, toggles, and pick:<idx> already routed by context.
@@ -90,10 +92,9 @@ integer DIALOG_PAGE_SIZE = 9;  // 9 items + 3 nav buttons = 12 total
 
 /* -------------------- FORCE SIT STATE -------------------- */
 
-list SitCandidates = [];  // Stride list: [name, key, name, key, ...]
-integer SitPage = 0;
-float SIT_SCAN_RANGE = 10.0;  // Scan range in meters
-key ScanInitiator = NULL_KEY;  // Track who initiated the scan to prevent race conditions
+// Object scanning + the picker now live in kmod_menu's menu.sensor service;
+// this plugin only fires the request and acts on the returned key.
+integer SIT_SCAN_RANGE = 10;  // Scan range in meters (passed to menu.sensor)
 
 /* -------------------- HELPER FUNCTIONS -------------------- */
 
@@ -348,51 +349,32 @@ list get_category_labels(string cat_name) {
 
 /* -------------------- FORCE SIT/UNSIT -------------------- */
 
-start_sit_scan() {
-    SitCandidates = [];
-    SitPage = 0;
-    MenuContext = "sit_scan";
-    ScanInitiator = CurrentUser;  // Lock scan to this user
-
-    llRegionSayTo(CurrentUser, 0, "Scanning for nearby objects...");
-    llSensor("", NULL_KEY, PASSIVE | ACTIVE | SCRIPTED, SIT_SCAN_RANGE, PI);
+// Ask kmod_menu's menu.sensor service to scan for nearby objects, build the
+// (JSON-safe) list, render the OL picker, and reply ui.sensor.result with the
+// chosen object's key. No llSensor / picker / candidate list lives here anymore.
+request_sit_pick() {
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",      "ui.menu.render",
+        "mode",      "menu.sensor",
+        "kind",      "objects",
+        "range",     (string)SIT_SCAN_RANGE,
+        "title",     "Force Sit",
+        "prompt",    "Select an object to sit on:",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser
+    ]), NULL_KEY);
 }
 
-display_sit_targets() {
-    integer total_items = llGetListLength(SitCandidates) / 2;
-
-    if (total_items == 0) {
-        llRegionSayTo(CurrentUser, 0, "No objects found nearby.");
-        show_main();
-        return;
+// menu.sensor result: act on the picked object's key, then redraw the menu.
+handle_sit_result(string msg) {
+    if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+    key ru = (key)llJsonGetValue(msg, ["user"]);
+    if (ru == NULL_KEY) return;
+    CurrentUser = ru;
+    if (llJsonGetValue(msg, ["cancelled"]) == JSON_INVALID) {
+        force_sit_on((key)llJsonGetValue(msg, ["key"]));
     }
-
-    SessionId = generate_session_id();
-    MenuContext = "sit_select";
-
-    // OL picker: object names go in the numbered body (names can exceed the
-    // 24-char button cap); the click returns pick:<global-index> into the
-    // SitCandidates stride list. The service pages off SitPage.
-    list items = [];
-    integer i = 0;
-    while (i < total_items) {
-        string obj_name = llList2String(SitCandidates, i * 2);
-        if (llStringLength(obj_name) > 28) obj_name = llGetSubString(obj_name, 0, 25) + "...";
-        items += [obj_name];
-        i = i + 1;
-    }
-
-    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.ordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      "Force Sit",
-        "body",       "Select an object to sit on:",
-        "items",      llList2Json(JSON_ARRAY, items),
-        "page",       SitPage
-    ]), NULL_KEY);
+    show_main();  // redraw the restrict menu after a pick or a cancel
 }
 
 force_sit_on(key target) {
@@ -571,7 +553,7 @@ handle_dialog_response(string msg) {
             show_main();
         }
         else if (ctx == "force_sit") {
-            start_sit_scan();
+            request_sit_pick();
         }
         else if (ctx == "force_unsit") {
             force_unsit();
@@ -582,33 +564,8 @@ handle_dialog_response(string msg) {
             show_main();
         }
     }
-    // Sit selection menu
-    else if (MenuContext == "sit_select") {
-        if (ctx == "nav:back") {
-            show_main();
-        }
-        else if (ctx == "nav:prev") {
-            integer max_page = (llGetListLength(SitCandidates) / 2 - 1) / 9;
-            if (SitPage == 0) SitPage = max_page;
-            else              SitPage = SitPage - 1;
-            display_sit_targets();
-        }
-        else if (ctx == "nav:next") {
-            integer max_page = (llGetListLength(SitCandidates) / 2 - 1) / 9;
-            if (SitPage >= max_page) SitPage = 0;
-            else                     SitPage = SitPage + 1;
-            display_sit_targets();
-        }
-        else if (llGetSubString(ctx, 0, 4) == "pick:") {
-            // OL pick: pick:<global-index> into the SitCandidates stride list.
-            integer list_idx = (integer)llGetSubString(ctx, 5, -1) * 2;
-            if (list_idx + 1 < llGetListLength(SitCandidates)) {
-                key target = (key)llList2String(SitCandidates, list_idx + 1);
-                force_sit_on(target);
-                show_main();
-            }
-        }
-    }
+    // (Sit selection is now owned by kmod_menu's menu.sensor picker; the pick
+    // returns via ui.sensor.result -> handle_sit_result, not through this handler.)
     // Category menu
     else if (MenuContext == "category") {
         if (ctx == "nav:back") {
@@ -737,6 +694,10 @@ default
                 Restrictions = [];
                 persist_restrictions();
             }
+            else if (type == "ui.sensor.result") {
+                // Force-sit object picked (or cancelled) by the menu.sensor service.
+                handle_sit_result(msg);
+            }
         }
         // Dialogs
         else if (num == DIALOG_BUS) {
@@ -752,37 +713,6 @@ default
         }
     }
 
-    sensor(integer num_detected) {
-        if (MenuContext != "sit_scan") return;
-        if (CurrentUser == NULL_KEY) return;
-        // Verify scan belongs to the user who initiated it (race condition guard)
-        if (CurrentUser != ScanInitiator) return;
-
-        key wearer = llGetOwner();
-        key my_key = llGetKey();
-        SitCandidates = [];
-
-        integer i = 0;
-        while (i < num_detected) {
-            key detected_key = llDetectedKey(i);
-            // Exclude self (collar) and wearer
-            if (detected_key != my_key && detected_key != wearer) {
-                string detected_name = llDetectedName(i);
-                SitCandidates += [detected_name, detected_key];
-            }
-            i = i + 1;
-        }
-
-        display_sit_targets();
-    }
-
-    no_sensor() {
-        if (MenuContext != "sit_scan") return;
-        if (CurrentUser == NULL_KEY) return;
-        // Verify scan belongs to the user who initiated it (race condition guard)
-        if (CurrentUser != ScanInitiator) return;
-
-        llRegionSayTo(CurrentUser, 0, "No objects found within " + (string)((integer)SIT_SCAN_RANGE) + "m.");
-        show_main();
-    }
+    // sensor()/no_sensor() removed — object scanning is owned by kmod_menu's
+    // menu.sensor service (see request_sit_pick / handle_sit_result).
 }

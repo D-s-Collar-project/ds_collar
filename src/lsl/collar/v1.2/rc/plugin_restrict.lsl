@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_restrict.lsl
 VERSION: 1.2
-REVISION: 13
+REVISION: 14
 PURPOSE: Manage RLV restriction toggles grouped by functional category
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
               RLV emission routed through kmod_rlv on UI_BUS so refcount
               coordinates with relay sources that may request the same
               behav.
 CHANGES:
+- v1.2 rev 14: FIX force-sit picker collapsed to a single blank row whenever a nearby object's name began with '[' or '{' (e.g. "[Ds] Chesterfield..."). display_sit_targets now wraps each sit-target name as a {label} object instead of a bare string: llList2Json(JSON_ARRAY, rawnames) auto-types a bare element that looks like JSON and returns JSON_INVALID for the WHOLE array on a parse failure, nuking every entry. Systemic to all raw-string UL/OL pickers (animate/outfits/blacklist/folders/owners/leash/strip) — same wrap needed there.
 - v1.2 rev 13: main to menu.fixed (dropped MainPage cursor + main prev/next), category toggle-list to menu.pager (still paginates), sit-target picker to menu.ordered; cleans up on the new ui.dialog.close.
 - v1.2 rev 12: main menu now paginates — separate MainPage cursor (distinct from CurrentPage/SitPage, the category + sit pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 11: nav routes by context (nav:back/nav:prev/nav:next) across all three menu blocks (main/sit_select/category), not the button label; dropped the now-unused `button` local. Categories, toggles, and pick:<idx> already routed by context.
@@ -378,7 +379,13 @@ display_sit_targets() {
     while (i < total_items) {
         string obj_name = llList2String(SitCandidates, i * 2);
         if (llStringLength(obj_name) > 28) obj_name = llGetSubString(obj_name, 0, 25) + "...";
-        items += [obj_name];
+        // Wrap as a {label} object, NEVER a bare string. A bare array element
+        // beginning with '[' or '{' (e.g. an object named "[Ds] Chesterfield...")
+        // is auto-typed by llList2Json as nested JSON; on a parse failure it
+        // returns JSON_INVALID for the ENTIRE array, collapsing the picker to one
+        // blank row. As a quoted object VALUE the name is always safe.
+        // render_paged reads .label and treats a label-only item as a flat name.
+        items += [llList2Json(JSON_OBJECT, ["label", obj_name])];
         i = i + 1;
     }
 

@@ -412,7 +412,12 @@ local function force_sit_flow()
         for _, c in ipairs(candidates) do
             local nm = c.name
             if ll.StringLength(nm) > 28 then nm = ll.GetSubString(nm, 0, 25) .. "..." end
-            items[#items + 1] = nm
+            -- Wrap as a {label} object, NEVER a bare string: a bare array element
+            -- beginning with '[' or '{' (e.g. "[Ds] Chesterfield...") is auto-typed
+            -- by ll.List2Json as nested JSON and returns JSON_INVALID for the WHOLE
+            -- array on a parse failure, collapsing the picker. render_paged reads
+            -- .label and treats a label-only item as a flat name.
+            items[#items + 1] = ll.List2Json(JSON_OBJECT, {"label", nm})
         end
 
         local ctx = menu_await{

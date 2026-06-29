@@ -222,6 +222,8 @@ applySettingsSync() {
     tmp = llLinksetDataRead(KEY_LEASH_TURNTO);
     if (tmp != "") TurnToFace = (integer)tmp;
     tmp = llLinksetDataRead(KEY_LEASH_TEXTURE);
+    // TEMP DIAGNOSTIC — what does LSD hold for the texture at each restore/sync?
+    llOwnerSay("[tex] applySettingsSync: LSD leash.texture='" + tmp + "' inmem=" + LeashTexture);
     if (tmp == "chain" || tmp == "silk" || tmp == "invisible") LeashTexture = tmp;
 
     // Cold-restart fallback only: if we wake Leashed with no in-memory follow
@@ -681,12 +683,16 @@ toggleTurnInternal() {
 
 setTextureInternal(string texture) {
     if (texture != "chain" && texture != "silk" && texture != "invisible") return;
+    // TEMP DIAGNOSTIC — is the set reaching here, and does it persist or no-op?
+    llOwnerSay("[tex] setTextureInternal('" + texture + "') inmem=" + LeashTexture);
     if (texture == LeashTexture) {
+        llOwnerSay("[tex]   == in-mem -> NO persist (no-op)");
         NeedBroadcast = TRUE;
         return;
     }
     LeashTexture = texture;
     persistSetting(KEY_LEASH_TEXTURE, texture);
+    llOwnerSay("[tex]   changed -> persistSetting(leash.texture, '" + texture + "')");
     NeedBroadcast = TRUE;
 
     if (Leashed) {
