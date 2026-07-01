@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 10
 PURPOSE: Validation guards, roster conversion, and LSD settings store
 CHANGES:
+- v1.2 rev 10: FIX — blacklist cleared on update. migrate_legacy_roster() unconditionally delete_role(-1)'d the blacklist then rebuilt from the card; with the card silent on the blacklist (the norm — it's UI-managed safety state), a card re-stream on update wiped it for good. Now the blacklist is only wiped-and-rebuilt when the card actually declares one; a silent card leaves the runtime blacklist intact. Surgical live fix (the full non-destructive-seed rework lives in the experimental stage).
 - v1.2 rev 9: whitelisted safeword.word (owned by plugin_maint) in MANAGED_SETTINGS_KEYS so the wearer's personal safeword persists via the single-writer settings.delta protocol.
 - v1.2 rev 8: ownership changes now REBOOT the collar instead of a light settings.sync, split by ENTRY vs EXIT. ENTRY (handle_set_owner: add/transfer) → request_owner_reboot() = kernel.reset.soft: scripts reset, roster + notecard KEPT (the new owner inherits a working collar; the card's "only one" guard blocks any stale card owner re-streaming). EXIT (handle_clear_owner: release) → factory_reset() = notecard removed + LSD wiped, SAME as runaway: a released/fled wearer's collar is fully cleared because the dom's authority — and their card settings — cease to apply, and an emptied owner slot would otherwise let the card re-stream the owner back. Removed clear_owner_records (subsumed by the wipe). Boot-safe: card path seeds via card_add_owner → user_write, never these handlers; trustee/blacklist mutations keep the light sync.
 - v1.2 rev 7: Reset Config no longer has its own card parser. The bespoke path (snapshot owner+lock → llLinksetDataReset → request card re-stream → finalize_reset_config) was redundant with kmod_bootstrap (which owns card I/O) AND bricked: readiness was stamped only in finalize, which fired only after the card re-stream handshake completed — a stalled stream (e.g. bootstrap's `Streaming` in-flight guard stuck) left the sentinel unset = pre-boot brick. Now handle_reset_config just WIPES config (deletes every LSD key except user.* roster + access.isowned/multiowner + lock.locked + safeguard.last_owner) and broadcasts kernel.reset.factory — the standard boot rebuilds everything: plugins re-seed their OWN defaults (the config source; the card is NOT — see feedback_card_not_config_source), kmod_settings re-stamps readiness, kmod_bootstrap re-applies the card OVERRIDE if present / ignores if absent (the wipe cleared settings.cardapplied). Removed finalize_reset_config + the InResetConfig/ResetConfigKeys/ResetConfigValues state. Reload/card-edit paths unchanged.
@@ -618,10 +619,15 @@ normalize_flag(string k) {
 // cleared first so a reload rebuilds cleanly. Flag scalars are untouched here
 // (normalized separately). The scratch keys are deleted once converted.
 migrate_legacy_roster() {
-    // Clear any prior roster so a reload doesn't leave stale owners/trustees.
+    // Clear any prior roster so a reload rebuilds owners/trustees cleanly.
     delete_role(5);
     delete_role(3);
-    delete_role(-1);
+    // Blacklist is UI-managed safety state and the card is usually silent on it.
+    // Only wipe-and-rebuild it when the card ACTUALLY declares a blacklist; a
+    // silent card leaves the runtime blacklist intact. Fixes the blacklist being
+    // cleared on update (a card re-stream used to delete_role(-1) unconditionally,
+    // then rebuild from an absent card line = gone).
+    if (llLinksetDataRead(CARD_BLACKLIST) != "") delete_role(-1);
 
     integer i;
     integer n;
