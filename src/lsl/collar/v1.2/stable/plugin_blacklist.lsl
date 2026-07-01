@@ -1,10 +1,11 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.2
-REVISION: 12
+REVISION: 13
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 13: chat command "<prefix> blacklist add <uuid|username>" for direct blacklisting without the sensor picker. Arrives as subpath "add.<arg>" (bare "add" still opens the picker); handle_subpath routes it to direct_blacklist_add. UUID works for anyone; a username resolves against region avatars (llGetAgentList, synchronous — no name2key, so absent people need a UUID). Same +Blacklist ACL gate and kmod_settings guards as the picker.
 - v1.2 rev 12: main to menu.fixed (dropped MainPage cursor + main prev/next), add/remove pickers to menu.ordered, list view to dialog.info; cleans up on the new ui.dialog.close.
 - v1.2 rev 11: main menu now paginates — separate MainPage cursor (distinct from CurrentPage, the OL pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused BTN_BACK constant.
@@ -197,6 +198,44 @@ send_blacklist_remove(string uuid_str) {
     ]), NULL_KEY);
 }
 
+// Direct blacklist add from a chat command ("<prefix> blacklist add <arg>").
+// arg is a UUID (works for anyone, online or off) or a username resolved against
+// avatars CURRENTLY IN THE REGION (llGetAgentList — synchronous, no name2key
+// service; someone not present must be given by UUID). kmod_settings' guards
+// (no owner/trustee/wearer/dupe, 64 cap) still apply on the receiving side.
+direct_blacklist_add(key user, string arg) {
+    arg = llStringTrim(arg, STRING_TRIM);
+    if (arg == "") {
+        llRegionSayTo(user, 0, "Usage: blacklist add <username|uuid>");
+        return;
+    }
+
+    // UUID form: a well-formed key casts non-null (usernames never do).
+    if ((key)arg != NULL_KEY) {
+        send_blacklist_add(arg, "");   // kmod_settings resolves the display name
+        llRegionSayTo(user, 0, "Blacklisting " + arg + ".");
+        return;
+    }
+
+    // Username form: match a region avatar's login name (case-insensitive).
+    string want = llToLower(arg);
+    list agents = llGetAgentList(AGENT_LIST_REGION, []);
+    integer n = llGetListLength(agents);
+    integer i = 0;
+    while (i < n) {
+        key a = llList2Key(agents, i);
+        string uname = llGetUsername(a);
+        if (uname != "" && llToLower(uname) == want) {
+            send_blacklist_add((string)a, uname);
+            llRegionSayTo(user, 0, "Blacklisting " + uname + ".");
+            return;
+        }
+        i += 1;
+    }
+    llRegionSayTo(user, 0,
+        "No one named '" + arg + "' is in the region. Blacklist someone who isn't here by their UUID.");
+}
+
 /* -------------------- MENU DISPLAY -------------------- */
 
 show_main_menu() {
@@ -249,6 +288,19 @@ handle_subpath(key user, integer acl_level, string subpath) {
         MenuContext = "add_scan";
         CandidateKeys = [];
         llSensor("", NULL_KEY, AGENT, BLACKLIST_RADIUS, PI);
+        return;
+    }
+    // "add.<uuid|username>" — direct add from chat (bare "add" above = picker).
+    // Chat dot-joins args, so a dotted username (first.last) survives as the
+    // remainder after "add.".
+    if (llSubStringIndex(subpath, "add.") == 0) {
+        if (!btn_allowed("+Blacklist")) {
+            llRegionSayTo(user, 0, "Access denied.");
+            gPolicyButtons = [];
+            return;
+        }
+        gPolicyButtons = [];
+        direct_blacklist_add(user, llGetSubString(subpath, 4, -1));
         return;
     }
     if (subpath == "rem") {
