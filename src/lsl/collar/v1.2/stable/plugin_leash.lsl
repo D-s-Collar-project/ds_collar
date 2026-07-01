@@ -1,12 +1,13 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.2
-REVISION: 13
+REVISION: 14
 PURPOSE: Self-contained leash UI — main menu, Settings (length/turn/texture/
          enhanced), Get Holder, direct actions (Clip/Unclip/Yank/Take), AND
          the target picker (avatar picker for Pass/Offer/Coffle, object scan
          for Post, offer-reception modal). Absorbed plugin_leash_target.
 CHANGES:
+- v1.2 rev 14: FIX — Texture button was added to Settings unconditionally, so any ACL that could open Settings (incl. ACL 1 public) saw it, while the intended audience is ACL 3/4/5 only. Gated the button + its body line behind UserAcl>=3 (folded into the existing Enhanced gate), and fail-closed the texture context + chain/silk/invisible set (engine trusts the plugin's ACL, so the floor must live here).
 - v1.2 rev 13: FIX — length menu's fixed-row spacer was btn(" ","") (a lone-space label); the space trimmed to "" through the menu-render JSON round-trips and llDialog threw "all buttons must have label strings", so the length menu never opened (Settings > Length looked dead). Changed the spacer to "-", matching the nav-row spacer — non-whitespace, survives the round-trip, no dialog-layer special-casing.
 - v1.2 rev 12: main to menu.fixed (dropped showMenu page param + LeashPage cursor + main prev/next), picker to menu.ordered, offer to dialog.modal; cleans up on the new ui.dialog.close.
 - v1.2 rev 11: main menu now paginates — showMenu gained a `page` arg; showMainMenu clamps/wraps a LeashPage cursor to its button count and pages on prev/next (the normalized nav contexts), settings/texture/length pass page 0 (their << >> redraw). Defensive; part of the all-pagers-operational pass.
@@ -230,27 +231,28 @@ showSettingsMenu() {
     list item_buttons = [btn("Length", "length")];
     if (TurnToFace) item_buttons += [btn("Turn: On",  "toggle_turn")];
     else            item_buttons += [btn("Turn: Off", "toggle_turn")];
-    item_buttons += [btn("Texture", "texture")];
 
-    // Enhanced toggle is ACL 3+ only (trustees/owners). Engine enforces
-    // the same floor on the action; this just hides the button for
-    // lower ACLs so they don't get a deny notice.
+    // Texture + Enhanced are ACL 3+ only (trustees/self-owned & unowned
+    // wearers/primary owner). The owned wearer (ACL 2) and public (ACL 1)
+    // don't get a say in leash appearance. The texture context handler
+    // enforces the same floor, so a stale/spoofed menu fails closed.
     if (UserAcl >= 3) {
+        item_buttons += [btn("Texture", "texture")];
         if (EnhancedMode) item_buttons += [btn("Enhance: Y", "toggle_enhanced")];
         else              item_buttons += [btn("Enhance: N", "toggle_enhanced")];
     }
-
-    string texture_label = "Chain";
-    if      (LeashTexture == "silk")      texture_label = "Silk";
-    else if (LeashTexture == "invisible") texture_label = "Invisible";
 
     string turn_state = "Disabled";
     if (TurnToFace) turn_state = "Enabled";
 
     string body = "Leash Settings\nLength: " + (string)LeashLength
-                + "m\nTurn to leasher: " + turn_state
-                + "\nTexture: " + texture_label;
+                + "m\nTurn to leasher: " + turn_state;
     if (UserAcl >= 3) {
+        string texture_label = "Chain";
+        if      (LeashTexture == "silk")      texture_label = "Silk";
+        else if (LeashTexture == "invisible") texture_label = "Invisible";
+        body += "\nTexture: " + texture_label;
+
         string enh_state = "Disabled";
         if (EnhancedMode) enh_state = "Enabled";
         body += "\nEnhanced mode: " + enh_state;
@@ -682,7 +684,8 @@ handleButtonClick(string ctx) {
             showSettingsMenu();
         }
         else if (ctx == "texture") {
-            showTextureMenu();
+            if (UserAcl >= 3) showTextureMenu();
+            else              showSettingsMenu();
         }
         else if (ctx == "back") {
             showMainMenu();
@@ -697,8 +700,11 @@ handleButtonClick(string ctx) {
             showSettingsMenu();
         }
         else if (ctx == "chain" || ctx == "silk" || ctx == "invisible") {
-            sendAction("set_texture", ["texture", ctx], CurrentUser);
-            scheduleStateQuery("settings");
+            if (UserAcl >= 3) {
+                sendAction("set_texture", ["texture", ctx], CurrentUser);
+                scheduleStateQuery("settings");
+            }
+            else showSettingsMenu();
         }
         else {
             // Inert << >> — redraw.

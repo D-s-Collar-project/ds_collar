@@ -1,9 +1,12 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.2
-REVISION: 6
+REVISION: 9
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 CHANGES:
+- v1.2 rev 9: FIX — resetting this script alone (engine still leashed) brought the beam back as "chain", because ParticleStyle resets to its default and the Lockmeister re-render paints from it directly (no style field). state_entry now restores ParticleStyle from the persisted leash.texture, so an independent reset resumes the saved style.
+- v1.2 rev 8: narrower leash beam — particle width (CHAIN_*_SCALE X) 0.04 → 0.025; segment length unchanged. Cosmetic.
+- v1.2 rev 7: new particles.style message — a style-only update that repaints the CURRENT TargetKey (LM holder or native leashpoint) with a new style, without re-specifying a target. The leash engine sends this on a texture change instead of a full particles.start, which previously forced it to re-guess a target it doesn't own (the LM holder lives here as TargetKey) and snapped the beam to the avatar centre. No-op when nothing is rendering. Pairs with kmod_leash_engine rev 11.
 - v1.2 rev 6: OC/LM holder discovery fixed. handle_lm_enable now fires the Lockmeister query IMMEDIATELY (it only opened the listen before — never asked, so a passive/self-keyed OpenCollar holder stayed silent and the engine's 2s deferred-restraint window denied it; the in-world trace showed zero -8888 outbound). New send_lm_query() also queries the HOLDER's key ("<holder>handle"/"collar"), not just the wearer's — an OC leash holder's `handle` listen is an exact match on its OWN owner key, so a wearer-keyed query never reached it. lm_ping routes through the same helper so the keep-alive re-queries the holder (whose own announce timer stops after a couple pulses).
 - v1.2 rev 2: find_leashpoint_link matches "leashpoint" as a SUBSTRING of the prim description (was exact ==), so an OpenCollar leashpoint — whose desc carries a slew of config after the word "leashpoint" — is recognized. Engine's findLeashpointPrim updated to match.
 - v1.2 rev 1: find_leashpoint_link now identifies the leashpoint prim by its DESCRIPTION == "leashpoint" (was name AND desc, which made a desc-only/name-only leashpoint fall through to LINK_ROOT — the beam emitted from the collar root instead of the ring). Matches the engine's findLeashpointPrim convention so both scripts emit from / dock at the same prim.
@@ -41,8 +44,8 @@ string   SILK_TEXTURE      = "78ce70e9-b10d-3650-a54c-aca6bdc9cddb";
 float    CHAIN_BURST_RATE  = 0.02;                  // ~50 sprites/sec
 integer  CHAIN_PART_COUNT  = 1;
 float    CHAIN_MAX_AGE     = 2.0;                   // travel time src->target
-vector   CHAIN_START_SCALE = <0.04, 0.10, 0.0>;     // Y aligns to motion (FOLLOW_VELOCITY)
-vector   CHAIN_END_SCALE   = <0.04, 0.10, 0.0>;
+vector   CHAIN_START_SCALE = <0.035, 0.10, 0.0>;    // X = beam width, Y = segment length (aligns to motion, FOLLOW_VELOCITY)
+vector   CHAIN_END_SCALE   = <0.035, 0.10, 0.0>;
 vector   CHAIN_START_COLOR = <1.0, 1.0, 1.0>;
 vector   CHAIN_END_COLOR   = <1.0, 1.0, 1.0>;
 float    CHAIN_START_ALPHA = 1.0;
@@ -355,6 +358,23 @@ handle_particles_start(string msg) {
     else               llSetTimerEvent(0.0);
 }
 
+// Style-only update: change the leash texture on the CURRENT beam without
+// re-specifying a target. kmod_particles owns the live target (the Lockmeister
+// holder or the native leashpoint), so the leash engine must NOT re-guess it on
+// a texture change — doing so snapped a Lockmeister beam to the avatar centre.
+// Re-renders the existing TargetKey with the new style; no-op if nothing is up.
+handle_particles_style(string msg) {
+    string style_field = llJsonGetValue(msg, ["style"]);
+    if (style_field == JSON_INVALID) return;
+    if (style_field == ParticleStyle) return;
+    ParticleStyle = style_field;
+    if (TargetKey != NULL_KEY) {
+        render_leash_particles(TargetKey);
+        if (needs_timer()) llSetTimerEvent(PARTICLE_UPDATE_RATE);
+        else               llSetTimerEvent(0.0);
+    }
+}
+
 handle_particles_stop(string msg) {
     if (llJsonGetValue(msg, ["source"]) == JSON_INVALID) {
         return;
@@ -464,6 +484,15 @@ default
         LmAuthorized = FALSE;
         close_lm_listen();
 
+        // Restore the persisted leash style so a re-render after an INDEPENDENT
+        // reset of this script (the engine still leashed) uses the saved texture,
+        // not the default. Matters for the Lockmeister path, which paints from
+        // ParticleStyle directly (no style field) — without this it came back chain.
+        string saved_style = llLinksetDataRead("leash.texture");
+        if (saved_style == "chain" || saved_style == "silk" || saved_style == "invisible") {
+            ParticleStyle = saved_style;
+        }
+
         // Clear any leftover particles from before the reset
         render_leash_particles(NULL_KEY);
     }
@@ -514,6 +543,9 @@ default
         }
         else if (msg_type == "particles.update") {
             handle_particles_update(msg);
+        }
+        else if (msg_type == "particles.style") {
+            handle_particles_style(msg);
         }
         else if (msg_type == "particles.lm.enable") {
             handle_lm_enable(msg);
