@@ -1,12 +1,15 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 12
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy filtering (animation buttons are dynamic content).
 CHANGES:
+- v1.2 rev 12: fixed buttons now carry an ACL mask (kmod_menu rev 22) — [Stop] and [Close] rows are "…\tslot\tPLUGIN_ACL_MASK", and the request forwards the toucher's `acl` (captured from ui.menu.start into CurrentAcl). Both use PLUGIN_ACL_MASK (62), so they show for anyone who can open Animate; the mechanism lets a fixed slot fall back to a normal button when the toucher's ACL doesn't qualify.
+- v1.2 rev 11: two fixed actions flank the action row via explicit slots (kmod_menu rev 21) — [Stop]@3 and [Close]@5, so slot 4 stays a content anim. New "close" branch in handle_picker_result exits the menu (no re-show, no return-to-root).
+- v1.2 rev 10: migrated to menu.picker (central picker, kmod_menu rev 19+). Sends candidates as key-first rows "index\tname\n..." (index leads each row so the field never [/{-leads; anim names with [ ] { } render for real) + a fixed [Stop]; kmod_menu owns the session, paging, and the click and replies ONE ui.menu.picker.result. Dropped the plugin-side dialog session (SessionId), page cursor (CurrentPage/PAGE_SIZE), generate_session_id, handle_button_click, and the whole DIALOG_BUS handler. New handle_picker_result(context,cancelled,page): cancelled -> root; "stop" -> stop+reshow; else context is the anim index -> play+reshow. Re-shows land on the SAME page (page round-trips via the result). No longer routes by anim name (was context==name, which poisoned on bracket-leading names).
 - v1.2 rev 9: animation picker mode renamed unordered to menu.unordered (menu-mode taxonomy; no behavior change).
 - v1.2 rev 8: response handler routes every button by context — nav (nav:*), [Stop] (context "stop"), anim items (UL flat item: context == anim name) — was button-label-routed. handle_button_click takes context, not the raw label.
 - v1.2 rev 7: render via the menu service's UNORDERED picker mode (ui.menu.render mode="unordered") instead of building the slot-mapped dialog locally. Hands kmod_menu the full anim list + [Stop] as a fixed button; kmod_menu A-Z-sorts, pages, and lays out. Deleted ~90 lines of hand-rolled slot mapping + the empty-case dialog. Anims are now alphabetized (was inventory order); page indicator moved to the title. Handler/events unchanged (still name-based). PAGE_SIZE 8 must match kmod_menu's 12-3-1.
@@ -17,7 +20,8 @@ CHANGES:
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
 integer UI_BUS = 900;
-integer DIALOG_BUS = 950;
+// menu.picker: kmod_menu owns the dialog session; the result returns on UI_BUS,
+// so this plugin no longer talks to DIALOG_BUS directly.
 
 /* -------------------- PLUGIN IDENTITY -------------------- */
 string PLUGIN_CONTEXT = "ui.core.animate";
@@ -28,13 +32,11 @@ string PLUGIN_LABEL = "Animate";
 integer MAX_ANIMATIONS = 128;
 
 /* -------------------- STATE -------------------- */
-// Session management
+// The active menu user + their ACL level (from ui.menu.start). kmod_menu owns the
+// picker session + paging + the click (menu.picker), so there is no per-plugin
+// session id or page cursor anymore. CurrentAcl gates which fixed buttons show.
 key CurrentUser = NULL_KEY;
-string SessionId = "";
-
-// Pagination
-integer CurrentPage = 0;
-integer PAGE_SIZE = 8;  // 8 animations + 4 nav buttons = 12 total
+integer CurrentAcl = 0;
 
 // Animation inventory — read live from inventory; LastAnimCount only used to detect
 // add/remove deltas in CHANGED_INVENTORY so the plugin can reset itself.
@@ -47,10 +49,6 @@ integer HasPermission = FALSE;
 /* -------------------- HELPERS -------------------- */
 
 
-
-string generate_session_id() {
-    return PLUGIN_CONTEXT + "_" + (string)llGetUnixTime();
-}
 
 /* -------------------- ANIMATION INVENTORY MANAGEMENT -------------------- */
 
@@ -167,28 +165,7 @@ send_pong() {
 /* -------------------- UI / MENU SYSTEM -------------------- */
 
 show_animation_menu(integer page) {
-    SessionId = generate_session_id();
-
     integer total_anims = get_animation_count();
-
-    // Keep our own page cursor for the << >> wrap in handle_button_click;
-    // kmod_menu also clamps. PAGE_SIZE must match kmod_menu's unordered
-    // page_size = 12 - 3 nav - 1 fixed ([Stop]) = 8. CROSS-MODULE.
-    integer max_page = 0;
-    if (total_anims > 0) max_page = (total_anims - 1) / PAGE_SIZE;
-    if (page < 0) page = 0;
-    if (page > max_page) page = max_page;
-    CurrentPage = page;
-
-    // Hand the FULL anim list to the menu service (unordered mode): it A-Z
-    // sorts, pages, and lays out via the shared layout_buttons. [Stop] rides
-    // as a fixed button; the click returns the anim name to handle_button_click.
-    list items = [];
-    integer i = 0;
-    while (i < total_anims) {
-        items += [llGetInventoryName(INVENTORY_ANIMATION, i)];
-        i += 1;
-    }
 
     string body = "Select an animation to play.";
     if (total_anims == 0) {
@@ -198,19 +175,30 @@ show_animation_menu(integer page) {
         body += "\nPlaying: " + LastPlayedAnim;
     }
 
+    // Candidates as key-first rows "index\tname\n...": the index is our routing
+    // token (it leads each row, so the field value never [/{-leads) and comes
+    // back verbatim as the result context; the name (which may hold [ ] { }) sits
+    // in field 2, safe. kmod_menu auto-shapes, paginates, owns the click, and
+    // replies with ONE ui.menu.picker.result. [Stop] rides as a fixed action.
+    string items = "";
+    integer i = 0;
+    while (i < total_anims) {
+        if (i > 0) items += "\n";
+        items += (string)i + "\t" + llGetInventoryName(INVENTORY_ANIMATION, i);
+        i += 1;
+    }
+
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.unordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      PLUGIN_LABEL,
-        "body",       body,
-        "items",      llList2Json(JSON_ARRAY, items),
-        "fixed",      llList2Json(JSON_ARRAY, [
-            llList2Json(JSON_OBJECT, ["label", "[Stop]", "context", "stop"])
-        ]),
-        "page",       CurrentPage
+        "type",      "ui.menu.render",
+        "mode",      "menu.picker",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser,
+        "title",     PLUGIN_LABEL,
+        "prompt",    body,
+        "items",     items,
+        "fixed",     "stop\t[Stop]\t3\t" + (string)PLUGIN_ACL_MASK + "\nclose\t[Close]\t5\t" + (string)PLUGIN_ACL_MASK,
+        "acl",       (string)CurrentAcl,
+        "page",      (string)page
     ]), NULL_KEY);
 }
 
@@ -250,62 +238,36 @@ handle_subpath(string subpath) {
 
 /* -------------------- BUTTON HANDLING -------------------- */
 
-// Every button routes by context: nav (nav:*), [Stop] (context "stop"), and
-// the anim items (UL flat items, so context == the anim name).
-handle_button_click(string context) {
-    // Back - return to root menu
-    if (context == "nav:back") {
+// One ui.menu.picker.result per interaction (kmod_menu owns the picker, paging,
+// and the click). `page` is the page the pick happened on, so re-shows land back
+// there instead of jumping to page 0. cancelled -> Back/timeout: pop to the root
+// menu. "stop" -> the fixed [Stop] action: stop, then re-show. Otherwise context
+// is the animation index we handed out: play it, then re-show for another pick.
+handle_picker_result(string context, integer cancelled, integer page) {
+    if (cancelled) {
         ui_return_root();
-        cleanup_session();
+        CurrentUser = NULL_KEY;
         return;
     }
 
-    // Stop button
+    if (context == "close") {
+        // Close exits the menu entirely — kmod_menu already closed the picker
+        // session on the action click, so just drop our state: no re-show, no root.
+        CurrentUser = NULL_KEY;
+        return;
+    }
+
     if (context == "stop") {
         stop_all_animations();
-        show_animation_menu(CurrentPage);
+        show_animation_menu(page);
         return;
     }
 
-    // Pagination - left (with wrap)
-    if (context == "nav:prev") {
-        integer total_anims = get_animation_count();
-        integer max_page = (total_anims - 1) / PAGE_SIZE;
-
-        if (CurrentPage == 0) {
-            // Wrap to last page
-            show_animation_menu(max_page);
-        }
-        else {
-            show_animation_menu(CurrentPage - 1);
-        }
-        return;
-    }
-
-    // Pagination - right (with wrap)
-    if (context == "nav:next") {
-        integer total_anims = get_animation_count();
-        integer max_page = (total_anims - 1) / PAGE_SIZE;
-
-        if (CurrentPage >= max_page) {
-            // Wrap to first page
-            show_animation_menu(0);
-        }
-        else {
-            show_animation_menu(CurrentPage + 1);
-        }
-        return;
-    }
-
-    // Animation item: context is the anim name (UL flat item).
-    if (llGetInventoryType(context) == INVENTORY_ANIMATION) {
-        start_animation(context);
-        show_animation_menu(CurrentPage);
-        return;
-    }
-
-    // Unknown - redraw menu
-    show_animation_menu(CurrentPage);
+    // Candidate pick: context is the inventory index we handed out. Inventory is
+    // stable (CHANGED_INVENTORY resets the plugin), so index -> name is consistent.
+    string anim = llGetInventoryName(INVENTORY_ANIMATION, (integer)context);
+    if (anim != "") start_animation(anim);
+    show_animation_menu(page);
 }
 
 /* -------------------- UI NAVIGATION -------------------- */
@@ -320,16 +282,10 @@ ui_return_root() {
 
 /* -------------------- SESSION CLEANUP -------------------- */
 
+// kmod_menu owns the picker session now; nothing plugin-side to close. On reset
+// an open picker simply times out. Just drop the active user.
 cleanup_session() {
-    if (SessionId != "") {
-        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-            "type", "ui.dialog.close",
-            "session_id", SessionId
-        ]), NULL_KEY);
-    }
     CurrentUser = NULL_KEY;
-    SessionId = "";
-    CurrentPage = 0;
 }
 
 /* -------------------- EVENTS -------------------- */
@@ -415,6 +371,7 @@ default {
                 if (id == NULL_KEY) return;
 
                 CurrentUser = id;
+                CurrentAcl  = (integer)llJsonGetValue(msg, ["acl"]);
 
                 string subpath = "";
                 string sp = llJsonGetValue(msg, ["subpath"]);
@@ -425,40 +382,21 @@ default {
                     return;
                 }
 
-                CurrentPage = 0;
                 show_animation_menu(0);
                 return;
             }
 
-            return;
-        }
-
-        /* -------------------- DIALOG RESPONSE -------------------- */if (num == DIALOG_BUS) {
-            string msg_type = llJsonGetValue(msg, ["type"]);
-            if (msg_type == JSON_INVALID) return;
-
-            if (msg_type == "ui.dialog.response") {
-                if (llJsonGetValue(msg, ["session_id"]) == JSON_INVALID) return;
-                if (llJsonGetValue(msg, ["session_id"]) != SessionId) return;
-
-                string context = llJsonGetValue(msg, ["context"]);
-                if (context == JSON_INVALID) context = "";
-
-                string user_str = llJsonGetValue(msg, ["user"]);
-                if (user_str == JSON_INVALID) return;
-                key user = (key)user_str;
-
-                if (user != CurrentUser) return;
-
-                handle_button_click(context);
-                return;
-            }
-
-            if (msg_type == "ui.dialog.timeout") {
-                if (llJsonGetValue(msg, ["session_id"]) == JSON_INVALID) return;
-                if (llJsonGetValue(msg, ["session_id"]) != SessionId) return;
-
-                cleanup_session();
+            // Picker result from kmod_menu (menu.picker). Filter to our requester
+            // and the active user; branch in handle_picker_result.
+            if (msg_type == "ui.menu.picker.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                string ru = llJsonGetValue(msg, ["user"]);
+                if (ru == JSON_INVALID || (key)ru != CurrentUser) return;
+                integer was_cancelled = (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID);
+                string ctx = llJsonGetValue(msg, ["context"]);
+                if (ctx == JSON_INVALID) ctx = "";
+                integer page = (integer)llJsonGetValue(msg, ["page"]);
+                handle_picker_result(ctx, was_cancelled, page);
                 return;
             }
 
