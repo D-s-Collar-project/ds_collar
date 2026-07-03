@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bespoke_ui.lsl  (v1.2)
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
 PURPOSE: Bespoke install UI for the install_shim (fresh-target) path.
   Driver hands off via LM_BESPOKE_START with wearer / shim / pin; this
   script presents a one-stop toggle dialog of subsystems (HUD, Animations,
@@ -21,6 +21,11 @@ ARCHITECTURE: Lives in the same prim as updater_driver (the installer
   returns a scripts list. Subsystem and core-script definitions are
   hard-coded here per the user spec rather than derived from the
   bundler's heuristic grouping.
+CHANGES:
+  r1 — Dropped plugin_leash_target from the Leashing subsystem CSV: it merged
+       into plugin_leash (v1.2) and no longer ships. Set is now
+       kmod_leash_engine,kmod_particles,plugin_leash,leash_holder — matches the
+       bundler's leash_members().
 --------------------*/
 
 
@@ -102,7 +107,7 @@ list bespoke_subsystems() {
         "Bell",           "plugin_bell",
         "Access",         "plugin_owners,plugin_blacklist",
         "Chat",           "plugin_chat,kmod_chat",
-        "Leashing",       "kmod_leash_engine,kmod_particles,plugin_leash,plugin_leash_target,leash_holder",
+        "Leashing",       "kmod_leash_engine,kmod_particles,plugin_leash,leash_holder",
         "Locking",        "plugin_lock",
         "Maintenance",    "plugin_maint,plugin_status",
         "Public",         "plugin_public",

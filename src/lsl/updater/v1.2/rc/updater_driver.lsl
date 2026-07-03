@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_driver.lsl  (v1.2)
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
 PURPOSE: Installer-side orchestrator. Wearer touches the installer prim;
   top-level menu offers two paths:
     UPDATE COLLAR — scans the region for collars (5s window), shows a
@@ -20,6 +20,8 @@ ARCHITECTURE: Lives in the installer linkset root. Sibling updater_bundler
   protocol with shim uses a random per-session secure channel passed as
   llRemoteLoadScriptPin's start_param. Dialog channels are per-session
   random negative ints.
+CHANGES:
+- v1.2 rev 1: install-range guard. llRemoteLoadScriptPin reaches only ~10m and fails SILENTLY beyond it (the "install just doesn't happen when I'm far from the installer" symptom). Both ship chokepoints now refuse up front when the target is > INSTALL_RANGE (5m) from the installer prim, with a "move closer and try again" notice: load_shim checks CollarKey (update / install-onto-existing), dispatch_shim_ship checks ShimTarget (fresh install). New target_in_range() helper + INSTALL_RANGE constant.
 --------------------*/
 
 
@@ -68,6 +70,11 @@ float BUNDLE_TIMEOUT      = 240.0;
 float INVITE_TIMEOUT      = 60.0;
 float DIALOG_TIMEOUT      = 120.0;   // wearer has 2 min to answer a dialog
 float SHIM_OFFER_TIMEOUT  = 180.0;   // 3 min from give to install.shim.ready
+
+// llRemoteLoadScriptPin reaches only ~10m and fails SILENTLY beyond it, so an
+// out-of-range target is refused up front. 5m (the observed reliable distance)
+// leaves margin for the target's bounding box / center offset.
+float INSTALL_RANGE       = 5.0;
 
 // Pagination. Page size for paginated dialogs is derived from
 // `9 - action_count` per the dialog convention; feature picker has 1
@@ -521,11 +528,26 @@ accept_invitation(string msg) {
 // invite path uses accept_invitation directly and never needed this
 // helper.)
 
+// TRUE if `target` is within install range of this prim. llRemoteLoadScriptPin
+// reaches only ~10m and fails silently past it, so an out-of-range target is
+// refused up front with a clear message rather than a mystery no-op.
+integer target_in_range(key target) {
+    list d = llGetObjectDetails(target, [OBJECT_POS]);
+    if (llGetListLength(d) == 0) return FALSE;
+    return llVecDist(llGetPos(), llList2Vector(d, 0)) <= INSTALL_RANGE;
+}
+
 // Deposit update_shim into the collar. next_phase says which post-load
 // path to take (update vs install).
 load_shim(string next_phase) {
     if (llGetInventoryType(SHIM_SCRIPT) != INVENTORY_SCRIPT) {
         notice("Installer is missing " + SHIM_SCRIPT + "; cannot proceed.");
+        cleanup_all();
+        return;
+    }
+
+    if (!target_in_range(CollarKey)) {
+        notice("The collar is too far away — move within " + (string)((integer)INSTALL_RANGE) + "m of the installer and try again.");
         cleanup_all();
         return;
     }
@@ -720,6 +742,11 @@ string build_shim_payload(list scripts) {
 }
 
 dispatch_shim_ship(list scripts) {
+    if (!target_in_range(ShimTarget)) {
+        notice("The target is too far away — move it within " + (string)((integer)INSTALL_RANGE) + "m of the installer and try again.");
+        cleanup_all();
+        return;
+    }
     Phase = "shim_bundling";
     llSetTimerEvent(BUNDLE_TIMEOUT);
     notice("Installing " + (string)llGetListLength(scripts) + " scripts...");

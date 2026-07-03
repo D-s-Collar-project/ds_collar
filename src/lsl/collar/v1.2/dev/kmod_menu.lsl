@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 17
+REVISION: 18
 CHANGES:
+- v1.2 rev 18: FIX — a sensor picker still collapsed to one blank box when a candidate name CONTAINED a '[' or '{' (e.g. "[Ds] Chesterfield…", "HUD-Foo 2.0 [FULL PERMS]…"). The rev-17 {label}-wrap only protected a name that WAS a bare '[…]' element; LSL's JSON array/object splitters don't skip brackets inside a quoted value, so a bracket within the name still mis-tracked nesting and JSON_INVALID-collapsed the array (rendered as a single blank box). New json_safe() neutralises [ ] { } in the DISPLAY name only ([]→(), {}→()); pickers return keys / pick-indices and the result name comes from SensorCands, so the real name is unaffected. NOTE: plugin-side pickers (blacklist/animate/outfits/owners/folders/leash/strip) build their own items and carry the same latent bug — they need the same json_safe on display strings.
 - v1.2 rev 17: new menu.sensor picker mode — a scan-and-pick service. A plugin sends ui.menu.render {mode:"menu.sensor",kind,range,title,prompt,requester,user}; kmod_menu owns the llSensor + sensor()/no_sensor() + the picker session + the pick->key resolve, and replies ui.sensor.result {requester,name,key}|{cancelled}. Render shape keys off kind: objects->OL (object key), agents->UL (avatar key), collars->scan collars + resolve OBJECT_OWNER deduped->UL (avatar key, so coffle is leash-to-avatar). Centralising the scan also centralises the JSON-safe {label} build, so a candidate name beginning with '[' or '{' can never collapse the array (the picker-empty bug, fixed once for all sensor pickers). kmod_menu is no longer stateless (holds the single-flight scan session); it now also listens on DIALOG_BUS for its own picker session only. First consumer: plugin_restrict force-sit.
 - v1.2 rev 16: render unified — render_menu + render_list collapse into one render_paged(shape) covering the four menu.x shapes (fixed/pager/unordered/ordered); dialog.modal flanked to [No, spacer, Yes]; dispatch switches the six explicit menu.x / dialog.x modes (bare-name transition aliases dropped).
 - v1.2 rev 15: the pager (render_menu) now accepts the optional `fixed` action-button list, like render_list — fixed buttons reserve the low slots right after nav and page_size shrinks by the fixed count. A blank spacer ({label:" ",context:""}) among the fixed buttons positions them (plugin_leash's length menu uses [-1m," ",+1m] to flank -1m/+1m at slots 3 and 5). Menus that send no `fixed` are unchanged (page_size stays PAGE_SIZE).
@@ -84,6 +85,21 @@ integer validate_required_fields(string json_str, list field_names) {
         i += 1;
     }
     return TRUE;
+}
+
+// Neutralise [ ] { } in a DISPLAY string. LSL's JSON array/object splitters
+// don't skip brackets inside a quoted value — a '[' or '{' within a name is
+// counted as a real nesting-open, so it collapses the whole picker array to one
+// JSON_INVALID marker (rendered as a blank box). The {label}-wrap does NOT save
+// it (the bracket is inside the value). Cosmetic only: pickers return keys /
+// pick-indices and the result name comes from SensorCands, so the real name is
+// unaffected — only what's shown on the dialog changes ([]→() , {}→()).
+string json_safe(string s) {
+    s = llReplaceSubString(s, "[", "(", 0);
+    s = llReplaceSubString(s, "]", ")", 0);
+    s = llReplaceSubString(s, "{", "(", 0);
+    s = llReplaceSubString(s, "}", ")", 0);
+    return s;
 }
 
 /* -------------------- BUTTON LAYOUT (canonical reverse-map) -------------------- */
@@ -437,7 +453,7 @@ render_sensor_picker() {
     integer n = llGetListLength(SensorCands) / 2;
     integer i = 0;
     while (i < n) {
-        string nm = llList2String(SensorCands, i * 2);
+        string nm = json_safe(llList2String(SensorCands, i * 2));
         if (llStringLength(nm) > 28) nm = llGetSubString(nm, 0, 25) + "...";
         if (SensorShape == SHAPE_UL) {
             items += [llList2Json(JSON_OBJECT, ["label", nm, "context", llList2String(SensorCands, i * 2 + 1)])];
