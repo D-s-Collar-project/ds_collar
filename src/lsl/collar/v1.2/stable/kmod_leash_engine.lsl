@@ -1,11 +1,12 @@
 /*--------------------
 MODULE: kmod_leash_engine.lsl   (v1.2 redesign)
 VERSION: 1.2
-REVISION: 11
+REVISION: 12
 PURPOSE: Self-contained leashing engine. Absorbs the former
          kmod_leash_proto holder-discovery handshake: there is no proto
          sibling and no engine<->proto IPC.
 CHANGES:
+- v1.2 rev 12: tidy — a set_texture with no texture field now falls back to the current LeashTexture (the LSD-configured value), not a hardcoded "chain", so a malformed message can't reset a configured leash. Behaviour-identical in the normal flow (plugin_leash always sends the texture).
 - v1.2 rev 11: FIX — changing the leash texture snapped the beam to the leasher's avatar centre instead of repainting on the holder. setTextureInternal re-targeted via HolderTarget-else-FollowTarget, but on a Lockmeister leash the engine doesn't own the holder prim (kmod_particles does, as TargetKey), so it fell back to FollowTarget = the avatar. A texture change is style-only: now it sends a new particles.style message (no target) and kmod_particles re-paints whatever it is currently rendering. Pairs with kmod_particles rev 7.
 - v1.2 rev 10: FIX — after a reset (e.g. owner-change re-stream) an avatar leash resumed on the leasher's COLLAR (avatar centre) with the default "chain" beam, and stayed stuck there: the engine persisted only the leasher avatar, not the resolved leashpoint prim, so cold-restart re-queried Lockmeister and the collar answered "collar ok" while the texture defaulted (kmod_particles' ParticleStyle resets to chain, only set via particles.start). Now the resolved leashpoint prim is persisted (leash.holder) — captured on the native target resolve AND the Lockmeister grab (the "prim" field) — and on cold-restart the engine renders straight to it via setParticlesState, which carries the saved texture through particles.start's style field. The native-render-to-a-prim priority in kmod_particles then blocks the "collar ok" re-query from dragging the beam back to the avatar centre. Stale prim (leasher re-rezzed) fails the existence check and falls back to the old re-query. Fixes both the chain-texture and avatar-centre symptoms; no kmod_particles change. Cleared on unleash.
 - v1.2 rev 9: leanness pass (tier 1, behaviour-identical). Cached (float)LeashLength once per followTick (was recast 3x/tick); inlined three single-caller name-only wrappers (updateParticlesTarget, sendOfferPending, notifyLeashTransfer) to shed their function frames. -1153B → 92.8% (from 94.6%), now below the pre-rev-8 baseline. The 2-state design is deliberately kept — leashing IS a state machine.
@@ -973,7 +974,7 @@ routeLinkMessage(integer num, string msg, key id) {
             }
             else if (action == "set_length")  setLengthInternal((integer)jsonGet(msg, "length", "0"));
             else if (action == "toggle_turn") toggleTurnInternal();
-            else if (action == "set_texture") setTextureInternal(jsonGet(msg, "texture", "chain"));
+            else if (action == "set_texture") setTextureInternal(jsonGet(msg, "texture", LeashTexture));
             return;
         }
 

@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.2
-REVISION: 14
+REVISION: 15
 PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -50,6 +50,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              click and hides those items for the rest of the session.
              No shared shadow lock vector between plugins.
 CHANGES:
+- v1.2 rev 15: FIX — outfit OL rendered empty when any outfit folder name started with a digit/bracket ("1920s Gown", "[Formal]"): raw names in llList2Json(JSON_ARRAY,...) auto-type and return JSON_INVALID, poisoning the whole ui.menu.render message so nothing drew. Items now {label}-wrapped (the systemic picker fix; matches force-sit/menu.sensor).
 - v1.2 rev 14: outfit picker to menu.ordered, per-outfit action + empty menus to menu.fixed; cleans up on the new ui.dialog.close.
 - v1.2 rev 13: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Actions + pick:<idx> already routed by context.
 - v1.2 rev 12: on safeword.fired, clearthe persisted per-outfit lock list (LockedOutfits=[] + delete outfits.locked) so the locks don't re-apply on the next sync — kmod_rlv already released the detachallthis claims. A bad-actor-imposed locked outfit can't survive the wearer's safeword (unlock ≠ strip; the wearer just regains the ability to remove it).
@@ -313,7 +314,11 @@ show_picker(integer page) {
         string outfit_name = llList2String(Outfits, i);
         string mark = "";
         if (llListFindList(LockedOutfits, [outfit_name]) != -1) mark = " *";
-        items += [outfit_name + mark];
+        // {label}-wrap: a bare name starting with a digit/bracket (e.g. "1920s
+        // Gown", "[Formal]") auto-types under llList2Json(JSON_ARRAY,...) and
+        // returns JSON_INVALID, poisoning the whole render. As an object the name
+        // is a quoted value, never auto-typed. kmod_menu reads .label.
+        items += [llList2Json(JSON_OBJECT, ["label", outfit_name + mark])];
         i += 1;
     }
 

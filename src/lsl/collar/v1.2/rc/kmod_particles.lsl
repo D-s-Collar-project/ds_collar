@@ -1,9 +1,10 @@
 /*--------------------
 MODULE: kmod_particles.lsl
 VERSION: 1.2
-REVISION: 9
+REVISION: 10
 PURPOSE: Visual connection renderer with Lockmeister compatibility
 CHANGES:
+- v1.2 rev 10: tidy — handle_particles_start's style default is now the current ParticleStyle (the LSD-resolved value), not a hardcoded "chain", so a particles.start with no style field keeps the configured style instead of resetting to chain. Behaviour-identical in the normal flow (the engine always sends style).
 - v1.2 rev 9: FIX — resetting this script alone (engine still leashed) brought the beam back as "chain", because ParticleStyle resets to its default and the Lockmeister re-render paints from it directly (no style field). state_entry now restores ParticleStyle from the persisted leash.texture, so an independent reset resumes the saved style.
 - v1.2 rev 8: narrower leash beam — particle width (CHAIN_*_SCALE X) 0.04 → 0.025; segment length unchanged. Cosmetic.
 - v1.2 rev 7: new particles.style message — a style-only update that repaints the CURRENT TargetKey (LM holder or native leashpoint) with a new style, without re-specifying a target. The leash engine sends this on a texture change instead of a full particles.start, which previously forced it to re-guess a target it doesn't own (the LM holder lives here as TargetKey) and snapped the beam to the avatar centre. No-op when nothing is rendering. Pairs with kmod_leash_engine rev 11.
@@ -310,7 +311,10 @@ handle_particles_start(string msg) {
     // Resolve the requested style up front so the idempotence guard can
     // include it — a style change (chain↔silk) must trigger re-render
     // even when source and target are unchanged.
-    string new_style = "chain";
+    // Default to the current/configured style (LSD-resolved), not a hardcoded
+    // "chain": a particles.start with no style field must never reset a
+    // configured leash back to chain — it keeps whatever is already set.
+    string new_style = ParticleStyle;
     string style_field = llJsonGetValue(msg, ["style"]);
     if (style_field != JSON_INVALID) new_style = style_field;
 
