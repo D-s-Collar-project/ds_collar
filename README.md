@@ -1,6 +1,6 @@
-# D/s Collar Modular
+# D/s Collar
 
-**D/s Collar Modular** is a modular, script-driven D/s collar system for Second Life.  
+**D/s Collar** is a modular, script-driven D/s collar system for Second Life.  
 It provides a modern, lightweight, and extensible framework for collars, emphasizing **security, modularity, and performance**.  
 
 This project replaces the old monolithic collars with a clean kernel + plugin architecture, using JSON messaging and strict ABI conventions.
