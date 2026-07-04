@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.2
-REVISION: 11
+REVISION: 12
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.2 rev 12: layer/attachment picker migrated to menu.picker (central picker, kmod_menu rev 22), forced OL. show_picker sends candidates as key-first rows "index\tdisplay\n..." (no fixed action buttons); kmod_menu owns the session, paging, and the click and replies ONE ui.menu.picker.result (handle_picker_result: Back -> category menu; numeric -> apply_pick, which strips + re-shows async at PickPage). Dropped the picker branch of handle_dialog_response + LastMaxPage. The category chooser stays plugin-owned menu.fixed (SessionId + ui.dialog.response) — untouched.
 - v1.2 rev 11: category chooser to menu.fixed, layer/attachment picker to menu.ordered; cleans up on the new ui.dialog.close.
 - v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Categories + pick:<idx> already routed by context.
 - v1.2 rev 9: nav-row consistency — show_category_menu has_nav 0→1 so the << >> Back row matches the rest of the UI; catch-all redraw for the inert << >> (the strip picker already pages).
@@ -102,8 +103,7 @@ list    WornLayers         = [];     // stride 1
 list    WornAttach         = [];     // stride 2: [slot, item_name]
 
 string  CurrentCategory = "";        // "" = chooser, "L" = layers, "A" = attach
-integer PickPage    = 0;
-integer LastMaxPage = 0;
+integer PickPage    = 0;   // current picker page; menu.picker owns paging (kept for the async re-show)
 
 string  AttemptedItem    = "";
 list    DiscoveredLocked = [];
@@ -217,7 +217,6 @@ cleanup_session() {
     WornAttach         = [];
     CurrentCategory    = "";
     PickPage           = 0;
-    LastMaxPage        = 0;
     AttemptedItem      = "";
     DiscoveredLocked   = [];
 }
@@ -441,7 +440,6 @@ show_category_menu() {
     SessionId       = sid();
     CurrentCategory = "";
     PickPage        = 0;
-    LastMaxPage     = 0;
 
     string body = "Strip menu\n\n";
     body += locked_folders_line();
@@ -468,6 +466,9 @@ show_category_menu() {
     ]), NULL_KEY);
 }
 
+// menu.picker (OL): kmod_menu owns the session, paging, and the click. No fixed
+// action buttons (nav + numbered items only). Picking an item strips it; the
+// picker re-shows async after the strip verify. One ui.menu.picker.result returns.
 show_picker(string category, integer page) {
     integer total;
     string  header;
@@ -479,55 +480,48 @@ show_picker(string category, integer page) {
         header = "Strip — Attachments\n";
     }
 
-    SessionId       = sid();
     CurrentCategory = category;
-
-    integer page_size = 9;
-    integer max_page  = 0;
-    if (total > 0) max_page = (total - 1) / page_size;
-    if (page < 0)        page = 0;
-    if (page > max_page) page = max_page;
-    PickPage    = page;
-    LastMaxPage = max_page;
+    PickPage        = page;
 
     string body = header;
     body += locked_folders_line();
     if (llGetListLength(DiscoveredLocked) > 0) body += "* = locked";
     if (total == 0) body += "\n\nNothing to strip.";
 
-    // Items: per-item display (layer name, or "name @slot", ellipsized) + lock
-    // mark; the OL service numbers them and returns pick:<global-index>. The
-    // page counter moves into the title.
-    list items = [];
+    // Candidates as key-first rows "index\tdisplay\n...": the index leads each row
+    // (poison-safe) and is our routing token; the ellipsized name (+ " *" lock mark)
+    // rides in field 2 and renders for real. Forced OL (numbered "tap a number").
+    string items = "";
     integer k = 0;
     while (k < total) {
         string mark = "";
+        string disp = "";
         if (category == "L") {
             string layer_name = llList2String(WornLayers, k);
             if (llListFindList(DiscoveredLocked, ["L:" + layer_name]) != -1) mark = " *";
-            items += [ellipsize(layer_name, 28) + mark];
+            disp = ellipsize(layer_name, 28) + mark;
         }
         else {
             string slot_name = llList2String(WornAttach, k * 2);
             if (llListFindList(DiscoveredLocked, ["A:" + slot_name]) != -1) mark = " *";
             // Bound the whole "name @slot" display (slot suffix was un-capped).
-            items += [ellipsize(llList2String(WornAttach, k * 2 + 1) + " @" + slot_name, 30) + mark];
+            disp = ellipsize(llList2String(WornAttach, k * 2 + 1) + " @" + slot_name, 30) + mark;
         }
+        if (k > 0) items += "\n";
+        items += (string)k + "\t" + disp;
         k += 1;
     }
 
-    // OL via the menu service: nav (<< >> Back) reserves the low slots, numbered
-    // items pack above. No fixed buttons here (page_size 9).
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.ordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      PLUGIN_LABEL,
-        "body",       body,
-        "items",      llList2Json(JSON_ARRAY, items),
-        "page",       page
+        "type",      "ui.menu.render",
+        "mode",      "menu.picker",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser,
+        "title",     PLUGIN_LABEL,
+        "prompt",    body,
+        "items",     items,
+        "shape",     "OL",
+        "page",      (string)page
     ]), NULL_KEY);
 }
 
@@ -573,21 +567,18 @@ handle_dialog_response(string msg) {
         show_category_menu();   // inert << >> — redraw
         return;
     }
+    // The layer/attachment picker is now kmod_menu's menu.picker — its result
+    // arrives as ui.menu.picker.result on UI_BUS (see handle_picker_result), not here.
+}
 
-    if (ctx == "nav:back") { show_category_menu(); return; }
-    if (ctx == "nav:prev") {
-        if (PickPage == 0) show_current_picker(LastMaxPage);
-        else               show_current_picker(PickPage - 1);
-        return;
-    }
-    if (ctx == "nav:next") {
-        if (PickPage >= LastMaxPage) show_current_picker(0);
-        else                         show_current_picker(PickPage + 1);
-        return;
-    }
-    if (llSubStringIndex(ctx, "pick:") == 0) {
-        apply_pick((integer)llGetSubString(ctx, 5, -1));
-    }
+// menu.picker result (layer/attachment picker). Back/timeout -> category menu; a
+// numeric context is the item index -> strip it (the picker re-shows async after
+// the strip verify, via show_current_picker(PickPage)).
+handle_picker_result(string ctx, integer cancelled, integer page) {
+    if (cancelled) { show_category_menu(); return; }
+    if (ctx == "") return;
+    PickPage = page;
+    apply_pick((integer)ctx);
 }
 
 handle_dialog_timeout(string msg) {
@@ -716,6 +707,15 @@ default {
                 PickPage        = 0;
                 llRegionSayTo(CurrentUser, 0, "Reading worn items...");
                 begin_query();
+            }
+            else if (msg_type == "ui.menu.picker.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                if ((key)llJsonGetValue(msg, ["user"]) != CurrentUser) return;
+                integer was_cancelled = (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID);
+                string pctx = llJsonGetValue(msg, ["context"]);
+                if (pctx == JSON_INVALID) pctx = "";
+                integer ppage = (integer)llJsonGetValue(msg, ["page"]);
+                handle_picker_result(pctx, was_cancelled, ppage);
             }
         }
         else if (num == DIALOG_BUS) {

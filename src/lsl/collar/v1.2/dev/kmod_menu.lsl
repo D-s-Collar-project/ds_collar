@@ -1,8 +1,10 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 22
+REVISION: 24
 CHANGES:
+- v1.2 rev 24: fixed action buttons are ALWAYS contiguous (dropped the flanking path). render_picker now just nav + ACL-qualified fixed + content via the shared layout_buttons — the button list is exactly nav+fixed+content, so no padding by construction (consistent with every menu; the earlier explicit-slot/flanking approach was extra complexity whose only purpose was one specific look). Fixed-row format simplified "context\tlabel\tslot\tmask" -> "context\tlabel\tmask" (slot dropped; mask now field 2). animate's [Stop]/[Close] therefore sit contiguous at slots 3/4, content above.
+- v1.2 rev 23: FIX regression — render_picker no longer pads with blank filler buttons (rev 21's explicit-slot grid stamped " " into every empty slot, a field of empty buttons on any partial page, violating the NO-PADDING requirement). [Superseded by rev 24's simpler contiguous-only render.]
 - v1.2 rev 22: fixed actions are now ACL-gated + never leak. (1) LEAK FIX: handle_sensor_request clears PickerFixed (menu.sensor was inheriting a prior menu.picker's fixed buttons — e.g. animate's [Stop]/[Close] bled onto the force-sit picker). (2) ACL GATE: `fixed` rows gain a mask -> "context\tlabel\tslot\tmask", and the request carries the toucher's `acl`; render_picker (pass 1) shows a fixed button only if bit `acl` of its mask is set, otherwise that slot rejoins the content pool as a normal candidate button. page_size shrinks only for fixed buttons that ACTUALLY show. Mask absent -> visible to all (back-compat).
 - v1.2 rev 21: explicit-slot fixed actions. menu.picker `fixed` rows are "context\tlabel\tslot"; render_picker pins each fixed button to its declared dialog slot (3..11) and fills the LEFTOVER slots with candidates in reading order — so a picker can flank content with actions (e.g. [Stop]@3 . anim@4 . [Close]@5) instead of packing them contiguously low. No-fixed pickers (menu.sensor) render identically to before.
 - v1.2 rev 20: DISAMBIGUATION bump — the menu.picker wire contract changed WITHIN rev 19 (parallel labels/keys -> single `items` key-first rows) without a rev bump, so an in-world rev-19 kmod_menu silently mismatched a plugin sending `items` (parsed n=0 -> "Nothing to select"). Current: `items` = "key\tlabel\n...". Also added page round-tripping (optional `page` in the request, current `page` returned in the result, so re-opening after a pick lands on the same page). TEMP [picker] diagnostic removed.
@@ -56,11 +58,11 @@ integer UL_MAX      = 24; // menu.picker auto-shape: all labels <= this -> UL, e
 //   menu.picker {items,fixed?,shape?,page?,acl?,title,prompt,requester,user} — the
 //     plugin provides candidates as key-first rows "key\tlabel\n..." (key = its
 //     own routing token: an index or a UUID; it leads each row so the field value
-//     is never [ / { -led) plus optional fixed action rows "context\tlabel\tslot\tmask"
-//     (each pinned to slot 3..11, shown only if bit `acl` of mask is set, else the
-//     slot becomes a normal candidate button); we reply ui.menu.picker.result
-//     {context,page} — context is the picked key or a fixed-action context
-//     (cancelled -> {cancelled}).
+//     is never [ / { -led) plus optional fixed action rows "context\tlabel\tmask"
+//     (placed contiguously after nav, shown only if bit `acl` of mask is set — an
+//     ACL-denied button is omitted and its slot becomes a normal candidate); we
+//     reply ui.menu.picker.result {context,page} — context is the picked key or a
+//     fixed-action context (cancelled -> {cancelled}).
 // Either way we own the picker session + paging + the pick resolve. BOTH UL and
 // OL route by pick:<absolute-index> into SensorCands (uniform); the shape only
 // changes DISPLAY (UL = name on the button; OL = number + numbered body). No JSON
@@ -533,39 +535,25 @@ picker_none() {
 render_picker() {
     integer n = llGetListLength(SensorCands) / 2;
 
-    // Pass 1: decide which fixed buttons this toucher's ACL qualifies for. A fixed
-    // row is "context\tlabel\tslot\tmask"; it shows only if bit PickerAcl of mask is
-    // set (mask absent -> always). Qualified buttons occupy their slot; an
-    // ACL-denied fixed slot is NOT occupied, so it rejoins the content pool and
-    // becomes a normal candidate button. nav always occupies 0,1,2.
-    list occupied = [0, 1, 2];
-    list fixed_place = [];               // stride [slot, "context\tlabel", ...]
+    // ACL-qualified fixed action buttons, placed CONTIGUOUSLY right after nav via
+    // the shared layout_buttons — content packs above, and the list is EXACTLY
+    // nav+fixed+content buttons: zero padding by construction, consistent with every
+    // menu (no flanking, so no interior gap that could need filler). A fixed row is
+    // "context\tlabel\tmask": mask (field 2, absent -> visible to all) gates on
+    // PickerAcl; an ACL-denied button is omitted so its slot becomes a candidate.
+    list nav = [btn_row("<<", "nav:prev"), btn_row(">>", "nav:next"), btn_row("Back", "nav:back")];
+    list fixed = [];
     integer fc = llGetListLength(PickerFixed);
     integer fi = 0;
     while (fi < fc) {
         list ff = llParseStringKeepNulls(llList2String(PickerFixed, fi), ["\t"], []);
-        integer fslot = (integer)llList2String(ff, 2);
-        integer fmask = -1;              // no mask -> visible to all
-        if (llGetListLength(ff) > 3) fmask = (integer)llList2String(ff, 3);
-        if (fslot >= 3 && fslot < MENU_SLOTS && (fmask & (1 << PickerAcl))
-            && llListFindList(occupied, [fslot]) == -1) {
-            occupied += [fslot];
-            fixed_place += [fslot, llList2String(ff, 0) + "\t" + llList2String(ff, 1)];
-        }
+        integer fmask = -1;
+        if (llGetListLength(ff) > 2) fmask = (integer)llList2String(ff, 2);
+        if (fmask & (1 << PickerAcl)) fixed += [llList2String(ff, 0) + "\t" + llList2String(ff, 1)];
         fi += 1;
     }
-
-    // Content slots = everything not occupied, in visual reading order. page_size
-    // is however many that leaves (shrinks only for fixed buttons that ACTUALLY show).
-    list reading_order = [9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2];
-    list content_slots = [];
-    integer ro = 0;
-    while (ro < 12) {
-        integer rs = llList2Integer(reading_order, ro);
-        if (llListFindList(occupied, [rs]) == -1) content_slots += [rs];
-        ro += 1;
-    }
-    integer page_size = llGetListLength(content_slots);
+    list reserved = nav + fixed;
+    integer page_size = MENU_SLOTS - llGetListLength(reserved);
     if (page_size < 1) page_size = 1;
 
     integer total_pages = (n + page_size - 1) / page_size;
@@ -576,51 +564,24 @@ render_picker() {
     integer pend = pstart + page_size;
     if (pend > n) pend = n;
 
-    // Build the 12-slot output: nav, then qualified fixed buttons, then candidates
-    // into the content slots (in order), then blank fillers for anything left.
-    list out = [];
-    integer s = 0;
-    while (s < MENU_SLOTS) { out += [""]; s += 1; }
-    out = llListReplaceList(out, ["nav:prev\t<<"],   0, 0);
-    out = llListReplaceList(out, ["nav:next\t>>"],   1, 1);
-    out = llListReplaceList(out, ["nav:back\tBack"], 2, 2);
-
-    integer fp = 0;
-    integer fpn = llGetListLength(fixed_place);
-    while (fp < fpn) {
-        out = llListReplaceList(out, [llList2String(fixed_place, fp + 1)],
-                                llList2Integer(fixed_place, fp), llList2Integer(fixed_place, fp));
-        fp += 2;
-    }
-
     string body = SensorPrompt;
-    integer ci = pstart;
-    integer csi = 0;
-    integer csn = llGetListLength(content_slots);
-    while (ci < pend && csi < csn) {
-        integer slot = llList2Integer(content_slots, csi);
-        string nm = llList2String(SensorCands, ci * 2);
+    list content = [];
+    integer i = pstart;
+    while (i < pend) {
+        string nm = llList2String(SensorCands, i * 2);
         if (SensorShape == SHAPE_OL) {
-            string num = (string)(ci - pstart + 1);
-            out = llListReplaceList(out, [btn_row(num, "pick:" + (string)ci)], slot, slot);
+            string num = (string)(i - pstart + 1);
+            content += [btn_row(num, "pick:" + (string)i)];
             body += "\n" + num + ". " + nm;
         }
         else {
             if (llStringLength(nm) > 24) nm = llGetSubString(nm, 0, 23);
-            out = llListReplaceList(out, [btn_row(nm, "pick:" + (string)ci)], slot, slot);
+            content += [btn_row(nm, "pick:" + (string)i)];
         }
-        ci += 1;
-        csi += 1;
+        i += 1;
     }
 
-    // Unfilled slots -> blank filler (" " label, empty context — llDialog needs a
-    // non-empty label, never "").
-    integer oi = 0;
-    while (oi < MENU_SLOTS) {
-        if (llList2String(out, oi) == "") out = llListReplaceList(out, ["\t "], oi, oi);
-        oi += 1;
-    }
-
+    list final_rows = layout_buttons(reserved, content);
     string title = SensorTitle;
     if (total_pages > 1) title += " (" + (string)(SensorPage + 1) + "/" + (string)total_pages + ")";
 
@@ -630,7 +591,7 @@ render_picker() {
         "user", SensorUserStr,
         "title", title,
         "body", body,
-        "button_rows", llDumpList2String(out, "\n"),
+        "button_rows", llDumpList2String(final_rows, "\n"),
         "timeout", 60
     ]), NULL_KEY);
 }
@@ -705,10 +666,10 @@ handle_picker_request(string msg) {
         i += 1;
     }
 
-    // Optional fixed action buttons as rows "context\tlabel\tslot\tmask\n..." (e.g.
-    // "stop\t[Stop]\t3\t62\nclose\t[Close]\t5\t62") — each pinned to its explicit
-    // dialog slot (3..11) by render_picker IF bit PickerAcl of its mask is set;
-    // otherwise the slot rejoins the content pool (falls back to a normal button).
+    // Optional fixed action buttons as rows "context\tlabel\tmask\n..." (e.g.
+    // "stop\t[Stop]\t62\nclose\t[Close]\t62") — placed contiguously after nav by
+    // render_picker and shown only if bit PickerAcl of the mask is set (mask absent
+    // -> always); an ACL-denied button is omitted and its slot becomes a candidate.
     PickerFixed = [];
     string fixed_str = llJsonGetValue(msg, ["fixed"]);
     if (fixed_str != JSON_INVALID && fixed_str != "") PickerFixed = llParseStringKeepNulls(fixed_str, ["\n"], []);

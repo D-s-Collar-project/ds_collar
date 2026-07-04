@@ -1,13 +1,14 @@
 /*--------------------
 PLUGIN: plugin_animate.lsl
 VERSION: 1.2
-REVISION: 12
+REVISION: 13
 PURPOSE: Paginated animation menu driven by inventory contents
 ARCHITECTURE: Consolidated message bus lanes. Access gated by the primary
   collar ACL check (kmod_ui visibility + dispatch against acl.policycontext);
   no per-button policy filtering (animation buttons are dynamic content).
 CHANGES:
-- v1.2 rev 12: fixed buttons now carry an ACL mask (kmod_menu rev 22) — [Stop] and [Close] rows are "…\tslot\tPLUGIN_ACL_MASK", and the request forwards the toucher's `acl` (captured from ui.menu.start into CurrentAcl). Both use PLUGIN_ACL_MASK (62), so they show for anyone who can open Animate; the mechanism lets a fixed slot fall back to a normal button when the toucher's ACL doesn't qualify.
+- v1.2 rev 13: fixed-row format simplified to "context\tlabel\tmask" (kmod_menu rev 24 dropped explicit slots + the flanking layout — fixed buttons are always contiguous now, which the shared layout_buttons renders with zero padding). [Stop]/[Close] now sit contiguous at slots 3/4, content above; both keep PLUGIN_ACL_MASK so they show for anyone who can open Animate.
+- v1.2 rev 12: fixed buttons now carry an ACL mask — [Stop]/[Close] + the toucher's `acl` (captured from ui.menu.start into CurrentAcl); both use PLUGIN_ACL_MASK (62) so they show for anyone who can open Animate.
 - v1.2 rev 11: two fixed actions flank the action row via explicit slots (kmod_menu rev 21) — [Stop]@3 and [Close]@5, so slot 4 stays a content anim. New "close" branch in handle_picker_result exits the menu (no re-show, no return-to-root).
 - v1.2 rev 10: migrated to menu.picker (central picker, kmod_menu rev 19+). Sends candidates as key-first rows "index\tname\n..." (index leads each row so the field never [/{-leads; anim names with [ ] { } render for real) + a fixed [Stop]; kmod_menu owns the session, paging, and the click and replies ONE ui.menu.picker.result. Dropped the plugin-side dialog session (SessionId), page cursor (CurrentPage/PAGE_SIZE), generate_session_id, handle_button_click, and the whole DIALOG_BUS handler. New handle_picker_result(context,cancelled,page): cancelled -> root; "stop" -> stop+reshow; else context is the anim index -> play+reshow. Re-shows land on the SAME page (page round-trips via the result). No longer routes by anim name (was context==name, which poisoned on bracket-leading names).
 - v1.2 rev 9: animation picker mode renamed unordered to menu.unordered (menu-mode taxonomy; no behavior change).
@@ -196,7 +197,7 @@ show_animation_menu(integer page) {
         "title",     PLUGIN_LABEL,
         "prompt",    body,
         "items",     items,
-        "fixed",     "stop\t[Stop]\t3\t" + (string)PLUGIN_ACL_MASK + "\nclose\t[Close]\t5\t" + (string)PLUGIN_ACL_MASK,
+        "fixed",     "stop\t[Stop]\t" + (string)PLUGIN_ACL_MASK + "\nclose\t[Close]\t" + (string)PLUGIN_ACL_MASK,
         "acl",       (string)CurrentAcl,
         "page",      (string)page
     ]), NULL_KEY);
