@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_dialogs.lsl
 VERSION: 1.2
-REVISION: 8
+REVISION: 9
 PURPOSE: Centralized dialog management for shared listener handling
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.2 rev 9: retired the legacy button_data / buttons / numbered_list receive paths (the rev-8 cleanup phase). kmod_menu is the sole ui.dialog.open sender and emits only button_rows, so those branches were dead. handle_dialog_open is button_rows-only; handle_numbered_list_dialog deleted. Plugin-facing buttons->rows bridge lives in kmod_menu, unchanged.
 - v1.2 rev 8: delimited button transport (dual-accept). New button_rows field carries buttons as "context\tlabel\n..." — a dialog label/context can contain neither tab nor newline, so labels with [ ] { } round-trip intact (JSON arrays collapsed them to a blank box). Context-FIRST because a JSON value that LEADS with [ or { poisons llList2Json; contexts never do, labels sit mid-value. Session click-map stores that rows string directly (build_rows) and resolves clicks via resolve_context — no llList2Json/llJson2List touches a label. The response `button` echo is guarded (placeholder when a label leads with [/{; only picker items do, and they route by context). Legacy button_data/buttons paths kept working during migration; removed once all senders emit button_rows. Toggle buttons still resolve label from config+state by context.
 - v1.2 rev 7: nav:close handled centrally — a Close click closes the session and broadcasts the new ui.dialog.close (distinct from ui.dialog.timeout) so consumers tear down once instead of redrawing.
 - v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
@@ -218,115 +219,31 @@ handle_dialog_open(string msg) {
     string session_id = llJsonGetValue(msg, ["session_id"]);
     key user = (key)llJsonGetValue(msg, ["user"]);
 
-    // Check for numbered list type
-    string dialog_type = llJsonGetValue(msg, ["dialog_type"]);
-    if (dialog_type != JSON_INVALID && dialog_type == "numbered_list") {
-        handle_numbered_list_dialog(msg, session_id, user);
-        return;
-    }
+    // Buttons arrive ONLY as button_rows — delimited "context\tlabel\n..."
+    // (bracket-immune; see build_rows). kmod_menu is the sole ui.dialog.open
+    // sender and emits this format exclusively; the legacy button_data / buttons
+    // / numbered_list paths were retired once every sender moved to rows.
+    if (llJsonGetValue(msg, ["button_rows"]) == JSON_INVALID) return;
 
-    // Standard dialog. Button source, in preference order:
-    //   button_rows  — delimited "label\tcontext\n..." (current; bracket-immune)
-    //   button_data  — LEGACY JSON array of {label,context} objects / strings
-    //   buttons      — LEGACY JSON array of bare label strings (no routing)
-    // The legacy paths remain only until every sender emits button_rows; they
-    // are removed in the cleanup phase. `buttons` doubles as the labels array.
     list buttons = [];
     list map_ctxs = [];
-
-    if ((llJsonGetValue(msg, ["button_rows"]) != JSON_INVALID)) {
-        // Delimited format. Labels may carry [ ] { } safely — no JSON parses a
-        // label. Toggle buttons still resolve their label from the registered
-        // config+state, keyed by context.
-        string rows_in = llJsonGetValue(msg, ["button_rows"]);
-        list rows = llParseStringKeepNulls(rows_in, ["\n"], []);
-        integer rlen = llGetListLength(rows);
-        integer ri = 0;
-        while (ri < rlen) {
-            // Row is "context\tlabel".
-            list f = llParseStringKeepNulls(llList2String(rows, ri), ["\t"], []);
-            string ctx = llList2String(f, 0);
-            string lbl = "";
-            if (llGetListLength(f) > 1) lbl = llList2String(f, 1);
-            if (find_button_config_idx(ctx) != -1) {
-                lbl = get_button_label(ctx, read_toggle_state(ctx));
-            }
-            buttons += [lbl];
-            map_ctxs += [ctx];
-            ri += 1;
+    string rows_in = llJsonGetValue(msg, ["button_rows"]);
+    list rows = llParseStringKeepNulls(rows_in, ["\n"], []);
+    integer rlen = llGetListLength(rows);
+    integer ri = 0;
+    while (ri < rlen) {
+        // Row is "context\tlabel". Toggle buttons resolve their label live from
+        // the registered config+state, keyed by context.
+        list f = llParseStringKeepNulls(llList2String(rows, ri), ["\t"], []);
+        string ctx = llList2String(f, 0);
+        string lbl = "";
+        if (llGetListLength(f) > 1) lbl = llList2String(f, 1);
+        if (find_button_config_idx(ctx) != -1) {
+            lbl = get_button_label(ctx, read_toggle_state(ctx));
         }
-    }
-    else if ((llJsonGetValue(msg, ["button_data"]) != JSON_INVALID)) {
-        // New format: button_data contains mixed array of strings and objects
-        string button_data_json = llJsonGetValue(msg, ["button_data"]);
-        list button_data_list = llJson2List(button_data_json);
-
-        // Resolve button labels from config+state and build mapping
-        integer i = 0;
-        integer len = llGetListLength(button_data_list);
-        while (i < len) {
-            string item = llList2String(button_data_list, i);
-            string button_text = "";
-            string button_context = "";
-
-            // Routable buttons: JSON objects with context+label (state optional, used for toggle resolution)
-            if (llJsonValueType(item, []) == JSON_OBJECT &&
-                (llJsonGetValue(item, ["context"]) != JSON_INVALID) && (llJsonGetValue(item, ["label"]) != JSON_INVALID)) {
-
-                string context = llJsonGetValue(item, ["context"]);
-                string label = llJsonGetValue(item, ["label"]);
-
-                // Check if there's a button config for this context (toggle buttons need state)
-                integer config_idx = find_button_config_idx(context);
-
-                if (config_idx != -1) {
-                    // Toggle button: resolve label via registered config.
-                    // State comes from plugin.<short>.state in LSD —
-                    // read live so menu renders always reflect the
-                    // latest toggle flip, including one that landed
-                    // mid-dialog.
-                    integer button_state = read_toggle_state(context);
-                    button_text = get_button_label(context, button_state);
-                }
-                else {
-                    // Action/plugin button: use label field directly
-                    button_text = label;
-                }
-
-                button_context = context;  // Routable buttons carry context
-            }
-            else {
-                // Navigation buttons or other non-routable buttons
-                // Extract label from JSON object if available, otherwise use string as-is
-                if (llJsonValueType(item, []) == JSON_OBJECT && (llJsonGetValue(item, ["label"]) != JSON_INVALID)) {
-                    button_text = llJsonGetValue(item, ["label"]);
-                }
-                else {
-                    button_text = item;
-                }
-                // button_context remains empty (no routing)
-            }
-
-            buttons += [button_text];
-            map_ctxs += [button_context];
-
-            i++;
-        }
-    }
-    else if ((llJsonGetValue(msg, ["buttons"]) != JSON_INVALID)) {
-        // Old format: buttons is array of strings (no routing contexts)
-        string buttons_json = llJsonGetValue(msg, ["buttons"]);
-        buttons = llJson2List(buttons_json);
-
-        integer i = 0;
-        integer len = llGetListLength(buttons);
-        while (i < len) {
-            map_ctxs += [""];
-            i++;
-        }
-    }
-    else {
-        return;
+        buttons += [lbl];
+        map_ctxs += [ctx];
+        ri += 1;
     }
 
     string title = "Menu";
@@ -382,100 +299,6 @@ handle_dialog_open(string msg) {
 
     // Show dialog
     llDialog(user, title + "\n\n" + message, buttons, channel);
-
-}
-
-handle_numbered_list_dialog(string msg, string session_id, key user) {
-    if (!validate_required_fields(msg, ["items"])) {
-        return;
-    }
-    
-    string title = "Select Item";
-    string prompt = "Choose:";
-    integer timeout = 60;
-    
-    string tmp = llJsonGetValue(msg, ["title"]);
-    if (tmp != JSON_INVALID) {
-        title = tmp;
-    }
-    tmp = llJsonGetValue(msg, ["prompt"]);
-    if (tmp != JSON_INVALID) {
-        prompt = tmp;
-    }
-    tmp = llJsonGetValue(msg, ["timeout"]);
-    if (tmp != JSON_INVALID) {
-        timeout = (integer)tmp;
-    }
-    
-    // Parse items
-    string items_json = llJsonGetValue(msg, ["items"]);
-    list items = llJson2List(items_json);
-    integer item_count = llGetListLength(items);
-    integer original_count = item_count;
-    
-    if (item_count == 0) {
-        return;
-    }
-    
-    // Build body text with numbered list (max 11 items to leave room for Back button)
-    string body = prompt + "\n\n";
-    list buttons = ["Back"];
-    
-    integer max_items = 11;
-    if (item_count > max_items) {
-        // Warn about truncation
-        llRegionSayTo(llGetOwner(), 0, "WARNING: Item list truncated to " + (string)max_items + " items (had " + (string)original_count + ")");
-        item_count = max_items;
-    }
-    
-    integer i = 0;
-    while (i < item_count) {
-        string item = llList2String(items, i);
-        body += (string)(i + 1) + ". " + item + "\n";
-        buttons += [(string)(i + 1)];
-        i += 1;
-    }
-    
-    // Close existing session with same ID
-    integer existing_idx = find_session_idx(session_id);
-    if (existing_idx != -1) {
-        close_session_at_idx(existing_idx);
-    }
-    
-    // Enforce session limit
-    if (llGetListLength(SessionIDs) >= SESSION_MAX) {
-        close_session_at_idx(0);
-    }
-    
-    // Get channel and create listen
-    integer channel = get_next_channel();
-    integer listen_handle = llListen(channel, "", user, "");
-    
-    // Calculate timeout timestamp
-    integer timeout_unix = 0;
-    if (timeout > 0) {
-        timeout_unix = now() + timeout;
-    }
-
-    // Numbered-list buttons carry no routing contexts.
-    list map_ctxs = [];
-    integer j = 0;
-    integer btn_len = llGetListLength(buttons);
-    while (j < btn_len) {
-        map_ctxs += [""];
-        j++;
-    }
-
-    // Add to sessions
-    SessionIDs += [session_id];
-    SessionUsers += [user];
-    SessionChannels += [channel];
-    SessionListens += [listen_handle];
-    SessionTimeouts += [timeout_unix];
-    SessionButtonMaps += [build_rows(buttons, map_ctxs)];
-
-    // Show dialog
-    llDialog(user, title + "\n\n" + body, buttons, channel);
 
 }
 
