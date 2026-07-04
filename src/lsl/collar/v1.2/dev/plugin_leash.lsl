@@ -1,12 +1,16 @@
 /*--------------------
 PLUGIN: plugin_leash.lsl
 VERSION: 1.2
-REVISION: 14
+REVISION: 18
 PURPOSE: Self-contained leash UI — main menu, Settings (length/turn/texture/
          enhanced), Get Holder, direct actions (Clip/Unclip/Yank/Take), AND
          the target picker (avatar picker for Pass/Offer/Coffle, object scan
          for Post, offer-reception modal). Absorbed plugin_leash_target.
 CHANGES:
+- v1.2 rev 18: target picker migrated to kmod_menu's menu.sensor service (like plugin_restrict force-sit + owners rev 22). startPicker now sends ui.menu.render {mode:menu.sensor} — kind:agents for Pass/Offer/Coffle, kind:objects for Post, range:10 — and kmod_menu owns the llSensor + picker + the "none found" message; the pick returns via ui.sensor.result → handle_sensor_result → sendAction(MenuContext,target). DELETED populateAvatars, startObjectScan, renderPickerPage, the sensor()/no_sensor() events, the Candidates list, and the ui.menu.picker.result handler. This is the memory relief the stack-heap time-bomb needed — the whole scan+build machinery leaves the script. The offer-reception modal (dialog.modal) + the four menus stay on DIALOG_BUS unchanged. PICKER_RANGE kept as the range value passed to the service.
+- v1.2 rev 17: both pickers now range-capped to PICKER_RANGE (10m) of the collar. (a) Pass/Offer/Coffle avatar picker: AGENT_LIST_PARCEL is uncapped, so a crowded parcel would build an unbounded candidate list — the residual O(n²) list-pointer churn the rev-16 llDumpList2String fix doesn't remove; now filtered by llGetObjectDetails OBJECT_POS + llVecDist. (b) Post object scan: llSensor range 96m → 10m, so you can't clip a leash to a post across the region. Both bound the candidate count AND keep targets genuinely nearby. "No nearby avatars/objects found" now literally means within 10m.
+- v1.2 rev 16: FIX — Stack-Heap Collision on the Post path (regressed by rev 15's delimited rewrite; script sits ~85% of the Mono ceiling). renderPickerPage built the item payload with `items += ... "\t" ...` in a loop — LSL `+=` recopies the whole growing string every iteration, and Mono does NOT reclaim that intermediate garbage mid-event, so 16 long-UUID object rows allocated ~10KB of transient garbage that overflowed the heap. Pre-migration (rev 14) used a single llList2Json call (one allocation) and never collided. Fix: build the rows as a LIST and join ONCE via llDumpList2String — same low peak, keeps the delimited transport. Also had sensor()/populateAvatars accumulate straight into the global Candidates (no scratch list live during the render — secondary, smaller saving). NOTE: plugin_leash still sits ~85% at rest — a standing memory time-bomb; a further split is the durable fix (flagged separately). The same string-concat pattern exists in the other batch-B pickers (blacklist/owners) and is being corrected there too.
+- v1.2 rev 15: target picker migrated to menu.picker (kmod_menu rev 24). renderPickerPage now hands kmod_menu key-first "uuid\tname" rows and it owns paging + the click; the pick returns as ONE ui.menu.picker.result on UI_BUS with context = the selected UUID (no JSON on any name → real display names, poison-immune). Dropped the DIALOG_BUS picker branch (handlePickerClick → handle_picker_result), the picker SessionId, and the PickPage cursor. The offer-reception modal (dialog.modal) and the four menus stay on DIALOG_BUS unchanged.
 - v1.2 rev 14: FIX — Texture button was added to Settings unconditionally, so any ACL that could open Settings (incl. ACL 1 public) saw it, while the intended audience is ACL 3/4/5 only. Gated the button + its body line behind UserAcl>=3 (folded into the existing Enhanced gate), and fail-closed the texture context + chain/silk/invisible set (engine trusts the plugin's ACL, so the floor must live here).
 - v1.2 rev 13: FIX — length menu's fixed-row spacer was btn(" ","") (a lone-space label); the space trimmed to "" through the menu-render JSON round-trips and llDialog threw "all buttons must have label strings", so the length menu never opened (Settings > Length looked dead). Changed the spacer to "-", matching the nav-row spacer — non-whitespace, survives the round-trip, no dialog-layer special-casing.
 - v1.2 rev 12: main to menu.fixed (dropped showMenu page param + LeashPage cursor + main prev/next), picker to menu.ordered, offer to dialog.modal; cleans up on the new ui.dialog.close.
@@ -41,6 +45,11 @@ string PLUGIN_LABEL = "Leash";
 string PLUGIN_CATEGORY = "Standalone";
 integer PLUGIN_ACL_MASK = 62;
 
+// Picker scan range, in metres — passed to kmod_menu's menu.sensor service for both
+// the Pass/Offer/Coffle avatar scan and the Post object scan. Keeps targets
+// genuinely nearby (you shouldn't clip a leash to a person or a post 100m away).
+integer PICKER_RANGE = 10;
+
 
 /* -------------------- STATE -------------------- */
 // Current leash state (synced from core)
@@ -70,9 +79,8 @@ string PendingQueryContext = "";
 // Registration state (SYN/ACK pattern for active discovery)
 integer IsRegistered = FALSE;
 
-// --- merged from plugin_leash_target: picker + offer-reception state ---
-list Candidates = [];                 // [name, key, ...] strided
-integer PickPage = 0;
+// --- merged from plugin_leash_target: offer-reception state (the target scan +
+// picker now live in kmod_menu's menu.sensor service) ---
 string OfferDialogSession = "";
 key OfferTarget = NULL_KEY;
 key OfferOriginator = NULL_KEY;
@@ -301,80 +309,29 @@ string dialogTitleForContext(string ctx) {
     return "";
 }
 
-// OL picker render: hand the service the candidate names; it numbers the body,
-// pages, adds << >> Back, returns pick:<global-index>.
-renderPickerPage(integer page) {
-    integer total = llGetListLength(Candidates) / 2;
-    integer total_pages = (total + 8) / 9;
-    if (total_pages < 1) total_pages = 1;
-    if (page < 0) page = 0;
-    if (page >= total_pages) page = total_pages - 1;
-    PickPage = page;
-
-    list names = [];
-    integer i = 0;
-    while (i < total) {
-        names += [llList2String(Candidates, i * 2)];
-        i++;
-    }
-
-    string body = "Select avatar:";
-    if (MenuContext == "post") body = "Select object:";
-
-    SessionId = generate_session_id();
-    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.ordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      dialogTitleForContext(MenuContext),
-        "body",       body,
-        "items",      llList2Json(JSON_ARRAY, names),
-        "page",       PickPage
-    ]), NULL_KEY);
-}
-
-populateAvatars() {
-    list nearby = llGetAgentList(AGENT_LIST_PARCEL, []);
-    key wearer = llGetOwner();
-    list buf = [];
-    integer i = 0;
-    integer n = llGetListLength(nearby);
-    while (i < n) {
-        key detected = llList2Key(nearby, i);
-        if (detected != wearer) buf += [llKey2Name(detected), detected];
-        i++;
-    }
-    Candidates = buf;
-    if (llGetListLength(Candidates) > 2) {
-        Candidates = llListSortStrided(Candidates, 2, 0, TRUE);
-    }
-}
-
-startObjectScan() {
-    PickPage = 0;
-    Candidates = [];
-    llSensor("", NULL_KEY, PASSIVE | SCRIPTED, 96.0, PI);
-}
-
-// Entry point that replaces delegateTo: avatar picker for pass/offer/coffle,
-// object scan for post (render deferred to sensor()).
+// Entry point for the target picker. Both flavours delegate the scan to kmod_menu's
+// menu.sensor service: Pass/Offer/Coffle scan avatars (kind agents), Post scans
+// objects (kind objects), both range PICKER_RANGE. kmod_menu owns the llSensor +
+// the picker + the "none found" message; the picked key returns via ui.sensor.result
+// -> handle_sensor_result. No llSensor / sensor()/no_sensor() / candidate list here.
 startPicker(string subpath) {
-    if (subpath == "pass" || subpath == "offer" || subpath == "coffle") {
-        MenuContext = subpath;
-        populateAvatars();
-        if (llGetListLength(Candidates) == 0) {
-            llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
-            cleanupSession();
-            return;
-        }
-        renderPickerPage(0);
+    MenuContext = subpath;
+    string kind = "agents";
+    string prompt = "Select avatar:";
+    if (subpath == "post") {
+        kind = "objects";
+        prompt = "Select object:";
     }
-    else if (subpath == "post") {
-        MenuContext = "post";
-        startObjectScan();
-    }
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",      "ui.menu.render",
+        "mode",      "menu.sensor",
+        "kind",      kind,
+        "range",     (string)PICKER_RANGE,
+        "title",     dialogTitleForContext(subpath),
+        "prompt",    prompt,
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser
+    ]), NULL_KEY);
 }
 
 // Offer-reception modal to the offer TARGET (arbitrary user), Decline-first.
@@ -412,40 +369,22 @@ handleOfferResponse(string ctx) {
     OfferOriginator = NULL_KEY;
 }
 
-handlePickerClick(string ctx) {
-    if (ctx == "back") {
+// One ui.sensor.result per interaction — kmod_menu's menu.sensor owns the scan +
+// picker + click. cancelled (Back/timeout, or a "none found" it already announced) →
+// pop to the main menu. Otherwise `selected` is the picked avatar/object key;
+// MenuContext (pass/offer/coffle/post) says what to do with it.
+handle_sensor_result(key selected, integer cancelled) {
+    if (cancelled) {
         scheduleStateQuery("main");
         return;
     }
-    integer total_pages = (llGetListLength(Candidates) / 2 + 8) / 9;
-    if (total_pages < 1) total_pages = 1;
-    if (ctx == "prev") {
-        if (PickPage == 0) renderPickerPage(total_pages - 1);
-        else               renderPickerPage(PickPage - 1);
-        return;
-    }
-    if (ctx == "next") {
-        if (PickPage >= total_pages - 1) renderPickerPage(0);
-        else                             renderPickerPage(PickPage + 1);
-        return;
-    }
-    if (llSubStringIndex(ctx, "pick:") == 0) {
-        integer idx = (integer)llGetSubString(ctx, 5, -1);
-        integer li = idx * 2;
-        if (li >= 0 && li < llGetListLength(Candidates)) {
-            key selected = llList2Key(Candidates, li + 1);
-            if ((MenuContext == "pass" || MenuContext == "offer") && is_blacklisted(selected)) {
-                llRegionSayTo(CurrentUser, 0, "Cannot " + MenuContext + " leash: that person is blacklisted.");
-                cleanupSession();
-                return;
-            }
-            sendAction(MenuContext, ["target", (string)selected], CurrentUser);
-            cleanupSession();
-            return;
-        }
-        llRegionSayTo(CurrentUser, 0, "Invalid selection.");
+    if ((MenuContext == "pass" || MenuContext == "offer") && is_blacklisted(selected)) {
+        llRegionSayTo(CurrentUser, 0, "Cannot " + MenuContext + " leash: that person is blacklisted.");
         cleanupSession();
+        return;
     }
+    sendAction(MenuContext, ["target", (string)selected], CurrentUser);
+    cleanupSession();
 }
 
 /* -------------------- ACTIONS -------------------- */
@@ -735,8 +674,8 @@ handleButtonClick(string ctx) {
             }
         }
     }
-    // The picker MenuContexts (pass/offer/coffle/post) are dispatched to
-    // handlePickerClick by the dialog-response router, not here.
+    // The picker MenuContexts (pass/offer/coffle/post) resolve via
+    // handle_sensor_result off the UI_BUS menu.sensor result, not here.
 }
 
 /* -------------------- NAVIGATION -------------------- */
@@ -752,8 +691,6 @@ cleanupSession() {
     gPolicyButtons = [];
     SessionId = "";
     MenuContext = "";
-    Candidates = [];
-    PickPage = 0;
 }
 
 queryState() {
@@ -869,6 +806,18 @@ default
                 return;
             }
 
+            // Target-picker result from kmod_menu's menu.sensor service. Filter to
+            // our requester + the active user; `key` is the picked avatar/object (or
+            // a cancel from Back/timeout/none-found).
+            if (msg_type == "ui.sensor.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                string ru = llJsonGetValue(msg, ["user"]);
+                if (ru == JSON_INVALID || (key)ru != CurrentUser) return;
+                integer was_cancelled = (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID);
+                handle_sensor_result((key)llJsonGetValue(msg, ["key"]), was_cancelled);
+                return;
+            }
+
             if (msg_type == "plugin.leash.state") {
                 string tmp = llJsonGetValue(msg, ["leashed"]);
                 if (tmp != JSON_INVALID) Leashed = (integer)tmp;
@@ -933,18 +882,13 @@ default
                 if (response_session != SessionId) return;  // not ours
 
                 // Service nav carries nav:* contexts; normalize them to this
-                // plugin's internal nav vocabulary (back/prev/next), shared by
-                // picker + menus. On single-page menus << >> are inert
-                // (handleButtonClick redraws), except the length menu where
-                // they mean -1m / +1m.
+                // plugin's internal nav vocabulary (back/prev/next). On single-page
+                // menus << >> are inert (handleButtonClick redraws), except the
+                // length menu where they mean -1m / +1m. (The target picker no
+                // longer arrives here — it runs on menu.picker via UI_BUS.)
                 if      (ctx == "nav:back") ctx = "back";
                 else if (ctx == "nav:prev") ctx = "prev";
                 else if (ctx == "nav:next") ctx = "next";
-                if (MenuContext == "pass" || MenuContext == "offer"
-                    || MenuContext == "coffle" || MenuContext == "post") {
-                    handlePickerClick(ctx);
-                    return;
-                }
                 handleButtonClick(ctx);
                 return;
             }
@@ -976,40 +920,6 @@ default
         }
     }
 
-    // OBJECT mode only (post). PASSIVE|SCRIPTED already excludes avatars; the
-    // llGetAgentSize guard drops any stray agent.
-    sensor(integer num) {
-        if (MenuContext != "post") return;
-        if (CurrentUser == NULL_KEY) return;
-
-        key wearer = llGetOwner();
-        key my_key = llGetKey();
-        list buf = [];
-        integer i = 0;
-        while (i < num) {
-            key detected = llDetectedKey(i);
-            if (detected != my_key && detected != wearer
-                && llGetAgentSize(detected) == ZERO_VECTOR) {
-                buf += [llDetectedName(i), detected];
-            }
-            i = i + 1;
-        }
-        Candidates = buf;
-        if (llGetListLength(Candidates) > 2) {
-            Candidates = llListSortStrided(Candidates, 2, 0, TRUE);
-        }
-        if (llGetListLength(Candidates) == 0) {
-            llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
-            cleanupSession();
-            return;
-        }
-        renderPickerPage(0);
-    }
-
-    no_sensor() {
-        if (MenuContext != "post") return;
-        if (CurrentUser == NULL_KEY) return;
-        llRegionSayTo(CurrentUser, 0, "No nearby objects found to post to.");
-        cleanupSession();
-    }
+    // Object/avatar scanning is owned by kmod_menu's menu.sensor service now (see
+    // startPicker / handle_sensor_result); no sensor()/no_sensor() here.
 }

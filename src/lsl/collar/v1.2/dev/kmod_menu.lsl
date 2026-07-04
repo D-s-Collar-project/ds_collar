@@ -1,8 +1,9 @@
 /*--------------------
 MODULE: kmod_menu.lsl
 VERSION: 1.2
-REVISION: 24
+REVISION: 26
 CHANGES:
+- v1.2 rev 26: sensor pickers show DISPLAY names, resolved by the new kmod_names authority (delegated — kmod_menu no longer carries a dataserver/compose, which would have been a SECOND name resolver alongside kmod_settings'). The scan stores the legacy name as a placeholder; kickoff_name_resolve() sends name.resolve {uuids} to kmod_names on SETTINGS_BUS; each name.resolved reply slots its "Display" / "Display (username)" label onto the matching candidate (handle_name_resolved), and finalize_names() sorts + renders once all land (a 3s timer() stall-guard renders with placeholders otherwise). ALL sensor pickers render OL now — the composed labels routinely exceed llDialog's 24-char button cap, so names go in the numbered body (was UL for people). objects render immediately (prim names, no resolution). Single-flight per scan (req_id = SensorSession). [Supersedes the abandoned rev-25 in-module dataserver resolver — moved to kmod_names to keep one authority + relieve this module.]
 - v1.2 rev 24: fixed action buttons are ALWAYS contiguous (dropped the flanking path). render_picker now just nav + ACL-qualified fixed + content via the shared layout_buttons — the button list is exactly nav+fixed+content, so no padding by construction (consistent with every menu; the earlier explicit-slot/flanking approach was extra complexity whose only purpose was one specific look). Fixed-row format simplified "context\tlabel\tslot\tmask" -> "context\tlabel\tmask" (slot dropped; mask now field 2). animate's [Stop]/[Close] therefore sit contiguous at slots 3/4, content above.
 - v1.2 rev 23: FIX regression — render_picker no longer pads with blank filler buttons (rev 21's explicit-slot grid stamped " " into every empty slot, a field of empty buttons on any partial page, violating the NO-PADDING requirement). [Superseded by rev 24's simpler contiguous-only render.]
 - v1.2 rev 22: fixed actions are now ACL-gated + never leak. (1) LEAK FIX: handle_sensor_request clears PickerFixed (menu.sensor was inheriting a prior menu.picker's fixed buttons — e.g. animate's [Stop]/[Close] bled onto the force-sit picker). (2) ACL GATE: `fixed` rows gain a mask -> "context\tlabel\tslot\tmask", and the request carries the toucher's `acl`; render_picker (pass 1) shows a fixed button only if bit `acl` of its mask is set, otherwise that slot rejoins the content pool as a normal candidate button. page_size shrinks only for fixed buttons that ACTUALLY show. Mask absent -> visible to all (back-compat).
@@ -30,6 +31,7 @@ ARCHITECTURE: Consolidated message bus lanes
 
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
+integer SETTINGS_BUS = 800;   // picker name resolution delegated to kmod_names (name.resolve/resolved)
 integer UI_BUS = 900;
 integer DIALOG_BUS = 950;
 
@@ -80,6 +82,14 @@ integer SensorShape     = 2;    // SHAPE_UL or SHAPE_OL
 string  SensorSession   = "";   // dialog session id for the picker
 integer SensorPage      = 0;
 list    SensorCands     = [];   // resolved stride list [label, keyval, ...]
+
+// Picker name resolution is DELEGATED to kmod_names (the collar's name authority) —
+// no dataserver/compose here. We send name.resolve with the candidate uuids and
+// collect the per-uuid name.resolved replies, rendering once all are in (or a
+// NAME_TIMEOUT stall guard). Light collect-barrier only.
+integer NamePending = 0;    // outstanding name.resolved replies; render when it hits 0
+string  NameReqId   = "";   // req_id of the active resolve batch (= SensorSession)
+float   NAME_TIMEOUT = 3.0; // render with placeholders if kmod_names stalls
 
 /* -------------------- HELPERS -------------------- */
 
@@ -461,6 +471,66 @@ integer sensor_flags_for(string kind) {
     return PASSIVE | ACTIVE | SCRIPTED;
 }
 
+// Clear the in-flight name-resolution batch (single-flight; also on cancel/reset).
+clear_name_resolve() {
+    NamePending = 0;
+    NameReqId = "";
+    llSetTimerEvent(0.0);
+}
+
+// Delegate candidate name resolution to kmod_names: send the uuids, collect the
+// per-uuid name.resolved replies (handled in link_message), render when all land or
+// NAME_TIMEOUT elapses. Renders immediately if there's nothing to resolve.
+kickoff_name_resolve() {
+    integer n = llGetListLength(SensorCands) / 2;
+    list uuids = [];
+    integer c = 0;
+    while (c < n) {
+        uuids += [llList2String(SensorCands, c * 2 + 1)];
+        c += 1;
+    }
+    NameReqId = SensorSession;   // match replies to THIS scan
+    NamePending = n;
+    if (n == 0) { render_picker(); return; }
+    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+        "type",      "name.resolve",
+        "requester", "menu.picker",
+        "req_id",    SensorSession,
+        "uuids",     llDumpList2String(uuids, "\n")
+    ]), NULL_KEY);
+    llSetTimerEvent(NAME_TIMEOUT);
+}
+
+// A name.resolved reply from kmod_names: slot the composed label onto its candidate
+// (matched by uuid), and render once every candidate has landed.
+handle_name_resolved(string msg) {
+    if (llJsonGetValue(msg, ["requester"]) != "menu.picker") return;
+    if (llJsonGetValue(msg, ["req_id"]) != NameReqId) return;
+    if (!SensorActive) return;
+    string ruuid = llJsonGetValue(msg, ["uuid"]);
+    string label = llJsonGetValue(msg, ["label"]);
+    integer np = llGetListLength(SensorCands) / 2;
+    integer p = 0;
+    while (p < np) {
+        if (llList2String(SensorCands, p * 2 + 1) == ruuid) {
+            if (label != "") SensorCands = llListReplaceList(SensorCands, [label], p * 2, p * 2);
+            p = np;
+        }
+        else p += 1;
+    }
+    NamePending -= 1;
+    if (NamePending <= 0) finalize_names();
+}
+
+// All candidate labels are in (or the stall timer fired): sort + render.
+finalize_names() {
+    clear_name_resolve();
+    if (!SensorActive) return;
+    if (llGetListLength(SensorCands) > 2)
+        SensorCands = llListSortStrided(SensorCands, 2, 0, TRUE);
+    render_picker();
+}
+
 // Reply to the requesting plugin, then clear SensorActive so a stray late dialog
 // event can't double-fire. idx = the picked absolute index into SensorCands
 // (ignored when cancelled). menu.sensor -> ui.sensor.result {name,key};
@@ -611,9 +681,11 @@ handle_sensor_request(string msg) {
     SensorPrompt = llJsonGetValue(msg, ["prompt"]);
     if (SensorPrompt == JSON_INVALID) SensorPrompt = "Select an option:";
 
-    // objects -> OL; people (agents/collars) -> UL.
-    if (SensorKind == "objects") SensorShape = SHAPE_OL;
-    else                         SensorShape = SHAPE_UL;
+    // ALL sensor pickers render OL. Agent/collar labels are now "Display Name
+    // (username)" (resolved authoritatively), which routinely blows past llDialog's
+    // 24-char button cap — so names go in the numbered body, never on a truncated
+    // button. (Objects were already OL for the same length reason.)
+    SensorShape = SHAPE_OL;
 
     float range = (float)llJsonGetValue(msg, ["range"]);
     if (range <= 0.0) range = 10.0;
@@ -623,6 +695,7 @@ handle_sensor_request(string msg) {
     SensorPage   = 0;
     PickerFixed  = [];   // scans carry no fixed actions — clear any left by a prior menu.picker
     PickerProvided = FALSE;
+    clear_name_resolve();  // supersede any in-flight name resolution
     SensorActive = TRUE;
     llSensor("", NULL_KEY, sensor_flags_for(SensorKind), range, PI);
 }
@@ -634,6 +707,7 @@ handle_sensor_request(string msg) {
 // fitting a button -> UL, else OL. Single-flight, shares the picker session.
 handle_picker_request(string msg) {
     if (!validate_required_fields(msg, ["user", "requester"])) return;
+    clear_name_resolve();  // supersede any in-flight menu.sensor name resolution
 
     SensorRequester = llJsonGetValue(msg, ["requester"]);
     SensorUserStr   = llJsonGetValue(msg, ["user"]);
@@ -741,6 +815,12 @@ default
             return;
         }
 
+        // Delegated picker name resolution — replies from kmod_names.
+        if (num == SETTINGS_BUS) {
+            if (msg_type == "name.resolved") handle_name_resolved(msg);
+            return;
+        }
+
         if (num == UI_BUS) {
             if (msg_type == "ui.menu.render") {
                 // Two families: navigable menus (menu.*) all flow through the one
@@ -794,6 +874,8 @@ default
         while (i < num_detected) {
             key dk = llDetectedKey(i);
             if (SensorKind == "agents") {
+                // Legacy name as placeholder; kickoff_name_resolve() upgrades it to
+                // the display name (+ username) via dataserver before rendering.
                 if (dk != wearer) SensorCands += [llDetectedName(i), dk];
             }
             else if (SensorKind == "collars") {
@@ -804,6 +886,7 @@ default
                 }
             }
             else {
+                // objects: llDetectedName IS the prim name (no display name concept).
                 if (dk != my_key && dk != wearer) SensorCands += [llDetectedName(i), dk];
             }
             i += 1;
@@ -813,9 +896,22 @@ default
             sensor_done_none();
             return;
         }
-        if (SensorShape == SHAPE_UL && llGetListLength(SensorCands) > 2)
-            SensorCands = llListSortStrided(SensorCands, 2, 0, TRUE);
-        render_picker();
+        // objects render straight away (prim names need no resolution); people
+        // (agents/collars) delegate name resolution to kmod_names first, then
+        // finalize_names() sorts + renders on the composed labels.
+        if (SensorKind == "objects") {
+            if (llGetListLength(SensorCands) > 2)
+                SensorCands = llListSortStrided(SensorCands, 2, 0, TRUE);
+            render_picker();
+            return;
+        }
+        kickoff_name_resolve();
+    }
+
+    // kmod_names stall guard: render with placeholders (legacy names) rather than
+    // hang the picker forever if a reply never lands.
+    timer() {
+        finalize_names();
     }
 
     no_sensor() {
