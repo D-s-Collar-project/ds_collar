@@ -1,10 +1,15 @@
 /*--------------------
 PLUGIN: plugin_owners.lsl
 VERSION: 1.2
-REVISION: 17
+REVISION: 22
 PURPOSE: Owner, trustee, and honorific management workflows
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 22: candidate avatar scan migrated to kmod_menu's menu.sensor service (like plugin_restrict force-sit). The plugin no longer runs its own llSensor: request_candidate_pick sends ui.menu.render {mode:menu.sensor,kind:agents,range:10} and the picked avatar returns via ui.sensor.result → handle_candidate_result → the accept prompt. Deleted start_scan + finish_scan + show_candidates + the sensor()/no_sensor() events + the CandidateKeys list + the acq_select branch. The honorific + remove-trustee LIST pickers stay on menu.picker (they provide an in-memory list, no scan). kmod_menu now owns the scan, range, and the "no people found" message.
+- v1.2 rev 21: MEMORY — all three picker item builds (candidate/honorific/remove-trustee) switched from `items +=` string concatenation to a row LIST joined ONCE via llDumpList2String. In-loop `+=` recopies the growing string each iteration (O(n²) transient garbage Mono doesn't reclaim mid-event) — the pattern that caused a stack-heap collision in plugin_leash (leash rev 16). Pre-emptive here.
+- v1.2 rev 20: reworked TRUSTEE_HONORIFICS to Sir/Miss/Madame/Monsieur/Lord/Lady (dropped Milord/Milady). 6 entries still single-page UL.
+- v1.2 rev 19: FIX — stale "Trustees: N" count on main after Add/Rem Trustee. The trustee add + remove branches redrew main immediately, before kmod_settings persisted + echoed settings.sync (when TrusteeKeys refreshes). Now they park in "await_sync" and the settings.sync handler rebuilds main ONCE with the committed count (gated on await_sync so an unrelated sync can't stack a duplicate). Same pattern as plugin_blacklist rev 16. Owner add/transfer is unaffected (soft-reboots, so the menu closes); trustee ops always change from the menu (dupe pre-checked), so they always sync — no kmod_settings change needed here.
+- v1.2 rev 18: all three LIST pickers (candidate/honorific/remove-trustee) migrated to menu.picker (kmod_menu rev 24). render_list_picker now hands kmod_menu key-first "key\tlabel\n..." rows — key = candidate/trustee UUID, or the honorific string — and it owns paging + the click; the pick returns as ONE ui.menu.picker.result on UI_BUS with context = that key (no JSON on any name → real display names, poison-immune; remove-trustee routes by UUID now, not pick:<idx>). Split handle_button: pickers (acq_select/acq_hon/remove_trustee) resolve in the new handle_picker_result off UI_BUS; the menu.fixed main + dialog.modal confirms stay on DIALOG_BUS. Dropped the nav paging block, redraw_picker, picker_count, the CurrentPage cursor, and LIST_PAGE_SIZE. The honorific picker is sent to the candidate, so the result is filtered by requester + active session (not user equality).
 - v1.2 rev 17: main to menu.fixed, owner/trustee pickers to menu.unordered/menu.ordered, confirm to dialog.modal; cleans up on the new ui.dialog.close.
 - v1.2 rev 16: main menu now paginates — separate MainPage cursor (distinct from CurrentPage, which is the LIST pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
 - v1.2 rev 15: handle_button is now fully context-routed — dropped the vestigial `(cmd == "" && label == "Back")` fallback + the unused `label` param + the button read at the call site. (Corrects rev 14's note: there is NO numbered_list path — it was fully retired in rev 8 (pickers→UL/OL) + rev 13 (confirms→modal); the label fallback was dead code, not a live legacy path.)
@@ -32,9 +37,6 @@ string PLUGIN_CONTEXT = "ui.core.owner";
 string PLUGIN_LABEL = "Owners";
 
 /* -------------------- CONSTANTS -------------------- */
-// LIST picker page size = 12 slots - 3 nav (<<,>>,Back), no fixed buttons.
-// CROSS-MODULE: must match kmod_menu's list-mode content slot count (UL + OL).
-integer LIST_PAGE_SIZE = 9;
 
 /* -------------------- SETTINGS KEYS -------------------- */
 // The roster lives in user.<uuid> = "<acl>,<rank>,<name>,<honorific>"
@@ -66,20 +68,18 @@ integer UserAcl = -999;
 list gPolicyButtons = [];
 string SessionId;
 string MenuContext;
-integer CurrentPage;  // page cursor for the LIST pickers (scans / remove)
 
 key PendingCandidate;
 string PendingHonorific;
 integer CandidateIsOwner;  // acquisition role: 1 = owner (set/transfer), 0 = trustee
 integer OwnerConsents;     // exit flow: 1 = release (owner-authorized), 0 = runaway
-list CandidateKeys;
 
 list NameCache;
 key ActiveNameQuery;
 key ActiveQueryTarget;
 
 list OWNER_HONORIFICS = ["Master", "Mistress", "Daddy", "Mommy", "King", "Queen"];
-list TRUSTEE_HONORIFICS = ["Sir", "Madame", "Milord", "Milady"];
+list TRUSTEE_HONORIFICS = ["Sir", "Miss", "Madame", "Monsieur", "Lord", "Lady"];
 
 /* -------------------- HELPERS -------------------- */
 
@@ -405,24 +405,24 @@ show_main() {
     ]), NULL_KEY);
 }
 
-// Unified LIST picker open (menu service). Sets SessionId + MenuContext and
-// emits ui.menu.render in the given mode ("unordered" UL / "ordered" OL),
-// paged off CurrentPage. Used by show_candidates (UL), show_honorific (UL),
-// and show_remove_trustee (OL). Items are flat strings (label == context) or
-// {label,context} objects ({name, uuid} for the scan pickers).
-render_list_picker(key target, string ctx, string mode, string title, string body, list items) {
-    SessionId = gen_session();
+// Unified LIST picker open via menu.picker. Sets MenuContext and hands kmod_menu
+// key-first "key\tlabel\n..." rows: key = candidate/trustee UUID for the scan and
+// remove pickers, or the honorific string for the honorific picker. The key leads
+// each row (poison-safe) and returns verbatim as the result context; the label
+// (which may hold [ ] { }) sits in field 2, shown as-is. kmod_menu auto-shapes
+// (UL/OL), pages, and owns the click; the pick returns as ui.menu.picker.result on
+// UI_BUS. `target` is the avatar who receives the picker (the candidate for the
+// honorific pick, CurrentUser otherwise).
+render_list_picker(key target, string ctx, string title, string body, string items) {
     MenuContext = ctx;
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       mode,
-        "session_id", SessionId,
-        "user",       (string)target,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      title,
-        "body",       body,
-        "items",      llList2Json(JSON_ARRAY, items),
-        "page",       CurrentPage
+        "type",      "ui.menu.render",
+        "mode",      "menu.picker",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)target,
+        "title",     title,
+        "prompt",    body,
+        "items",     items
     ]), NULL_KEY);
 }
 
@@ -445,27 +445,33 @@ show_confirm(key target, string ctx, string title, string body) {
     ]), NULL_KEY);
 }
 
-show_candidates(string context, string title, string prompt) {
-    if (llGetListLength(CandidateKeys) == 0) {
-        llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
-        show_main();
-        return;
+// Ask kmod_menu's menu.sensor service to scan nearby avatars (10m), render the
+// picker, and reply ui.sensor.result with the chosen avatar's key. Title/prompt
+// derive from the acquisition role (CandidateIsOwner + has_owner). No llSensor /
+// sensor()/no_sensor() / candidate list lives here anymore.
+request_candidate_pick() {
+    string title = "Add Trustee";
+    string prompt = "Choose the person you wish to empower as trustee:";
+    if (CandidateIsOwner) {
+        if (has_owner()) {
+            title = "Transfer";
+            prompt = "Choose new owner:";
+        }
+        else {
+            title = "Set Owner";
+            prompt = "Choose the person you wish to submit to:";
+        }
     }
-
-    // UL picker: button face = display name, context = UUID. Carrying the key
-    // in the context means a name collision / >24-char truncation can't
-    // ambiguate the pick — the click returns the UUID directly. The service
-    // A-Z-sorts by name and pages off CurrentPage.
-    list items = [];
-    integer i = 0;
-    integer n = llGetListLength(CandidateKeys);
-    while (i < n) {
-        key k = (key)llList2String(CandidateKeys, i);
-        items += [btn(get_name(k), (string)k)];
-        i++;
-    }
-
-    render_list_picker(CurrentUser, context, "menu.unordered", title, prompt, items);
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",      "ui.menu.render",
+        "mode",      "menu.sensor",
+        "kind",      "agents",
+        "range",     "10",
+        "title",     title,
+        "prompt",    prompt,
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser
+    ]), NULL_KEY);
 }
 
 show_honorific(key target, string context) {
@@ -474,21 +480,19 @@ show_honorific(key target, string context) {
     // the acquisition bit — not the context — selects which one.
     list choices = OWNER_HONORIFICS;
     if (!CandidateIsOwner) choices = TRUSTEE_HONORIFICS;
-    // UL picker, flat items (label == context == the honorific). Honorific
-    // lists are short (<=6) and single-page, so pin the page cursor at 0.
-    CurrentPage = 0;
-    render_list_picker(target, context, "menu.unordered", "Honorific",
-        "What would you like to be called?", choices);
-}
-
-// Begin an avatar scan for the given picker context. Shared by the menu
-// (Add Owner / Transfer / Add Trustee) and the chat aliases — each caller
-// gates first, then calls this; the scan body itself is identical.
-start_scan(string scan_ctx) {
-    CurrentPage = 0;
-    MenuContext = scan_ctx;
-    CandidateKeys = [];
-    llSensor("", NULL_KEY, AGENT, 10.0, PI);
+    // menu.picker rows "honorific\thonorific" (key == label == the honorific).
+    // Honorific lists are short, so auto-shape lands on UL (single page). Rows as a
+    // LIST, joined ONCE (llDumpList2String) — never `items +=` (see leash rev 16).
+    list rows = [];
+    integer i = 0;
+    integer n = llGetListLength(choices);
+    while (i < n) {
+        string hon = llList2String(choices, i);
+        rows += [hon + "\t" + hon];
+        i++;
+    }
+    render_list_picker(target, context, "Honorific",
+        "What would you like to be called?", llDumpList2String(rows, "\n"));
 }
 
 // Chat subcommand handler. Routes into the existing menu flows by
@@ -518,7 +522,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
         }
         gPolicyButtons = [];
         CandidateIsOwner = 1;
-        start_scan("acq_scan");
+        request_candidate_pick();
         return;
     }
     if (verb == "rem" && role == "owner") {
@@ -544,7 +548,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
         }
         gPolicyButtons = [];
         CandidateIsOwner = 0;
-        start_scan("acq_scan");
+        request_candidate_pick();
         return;
     }
     if (verb == "rem" && role == "trustee") {
@@ -554,7 +558,6 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         gPolicyButtons = [];
-        CurrentPage = 0;
         show_remove_trustee();
         return;
     }
@@ -570,11 +573,11 @@ show_remove_trustee() {
         return;
     }
 
-    // OL picker: names (with honorific) go in the numbered body — display
-    // names can exceed llDialog's 24-char button cap — and the click returns
-    // pick:<index>. names[] is built parallel to TrusteeKeys, so the index
-    // maps straight back to the UUID. The service pages off CurrentPage.
-    list names = [];
+    // menu.picker rows "uuid\tname (honorific)": the UUID leads (poison-safe) and
+    // returns as the result context — no more parallel-index bookkeeping. Names can
+    // exceed llDialog's 24-char button cap, so auto-shape lands on OL (numbered body).
+    // Rows as a LIST, joined ONCE (llDumpList2String) — never `items +=` (leash r16).
+    list rows = [];
     integer i = 0;
     integer n = llGetListLength(TrusteeKeys);
     while (i < n) {
@@ -584,51 +587,12 @@ show_remove_trustee() {
         string hon = "";
         if (i < llGetListLength(TrusteeHonorifics)) hon = llList2String(TrusteeHonorifics, i);
         if (hon != "") display_name += " (" + hon + ")";
-        names += [display_name];
+        rows += [llList2String(TrusteeKeys, i) + "\t" + display_name];
         i++;
     }
 
-    render_list_picker(CurrentUser, "remove_trustee", "menu.ordered", "Remove Trustee",
-        "Select to remove:", names);
-}
-
-/* -------------------- PICKER PAGING -------------------- */
-
-// Render the candidate picker for the active acquisition, deriving the title
-// and prompt from the role bit (+ has_owner for owner = set vs transfer).
-// Shared by sensor / no_sensor (scan results) and redraw_picker (paging).
-finish_scan() {
-    string title = "Add Trustee";
-    string prompt = "Choose trustee:";
-    if (CandidateIsOwner) {
-        if (has_owner()) {
-            title = "Transfer";
-            prompt = "Choose new owner:";
-        }
-        else {
-            title = "Set Owner";
-            prompt = "Choose owner:";
-        }
-    }
-    show_candidates("acq_select", title, prompt);
-}
-
-// Total item count for the active LIST picker — drives << >> page wrapping.
-integer picker_count() {
-    if (MenuContext == "acq_select") return llGetListLength(CandidateKeys);
-    if (MenuContext == "remove_trustee") return llGetListLength(TrusteeKeys);
-    if (MenuContext == "acq_hon") {
-        if (CandidateIsOwner) return llGetListLength(OWNER_HONORIFICS);
-        return llGetListLength(TRUSTEE_HONORIFICS);
-    }
-    return 0;
-}
-
-// Re-render the active LIST picker after a << >> page change.
-redraw_picker() {
-    if (MenuContext == "acq_select") finish_scan();
-    else if (MenuContext == "remove_trustee") show_remove_trustee();
-    else if (MenuContext == "acq_hon") show_honorific(PendingCandidate, "acq_hon");
+    render_list_picker(CurrentUser, "remove_trustee", "Remove Trustee",
+        "Select to remove:", llDumpList2String(rows, "\n"));
 }
 
 /* -------------------- BUTTON HANDLING -------------------- */
@@ -653,7 +617,7 @@ handle_button(string cmd) {
             // Both make the candidate an owner; has_owner() at commit time
             // distinguishes set (unowned) from transfer (owned).
             CandidateIsOwner = 1;
-            start_scan("acq_scan");
+            request_candidate_pick();
         }
         else if (cmd == "release") {
             // Owner-authorized exit: owner confirms first, then the wearer.
@@ -691,10 +655,9 @@ handle_button(string cmd) {
         }
         else if (cmd == "add_trustee") {
             CandidateIsOwner = 0;
-            start_scan("acq_scan");
+            request_candidate_pick();
         }
         else if (cmd == "rem_trustee") {
-            CurrentPage = 0;
             show_remove_trustee();
         }
         else {
@@ -704,88 +667,14 @@ handle_button(string cmd) {
         return;
     }
 
-    // LIST picker paging: << >> arrive from the menu service with nav:* contexts;
-    // wrap CurrentPage off the active picker's count and redraw. (Content picks
-    // below carry their value in cmd.)
-    if (cmd == "nav:prev" || cmd == "nav:next") {
-        integer cnt = picker_count();
-        integer max_page = 0;
-        if (cnt > 0) max_page = (cnt - 1) / LIST_PAGE_SIZE;
-        if (cmd == "nav:prev") {
-            if (CurrentPage == 0) CurrentPage = max_page;
-            else CurrentPage -= 1;
-        }
-        else {
-            if (CurrentPage >= max_page) CurrentPage = 0;
-            else CurrentPage += 1;
-        }
-        redraw_picker();
-        return;
-    }
-
-    // ONE acquisition spine for owner (set + transfer) and trustee, keyed on
-    // CandidateIsOwner (+ has_owner() for owner = set vs transfer).
-    // UL scan pick: cmd IS the chosen UUID (validate against the live scan).
-    if (MenuContext == "acq_select") {
-        if (llListFindList(CandidateKeys, [cmd]) != -1) {
-            PendingCandidate = (key)cmd;
-            // A trustee can't be added twice.
-            if (!CandidateIsOwner && llListFindList(TrusteeKeys, [(string)PendingCandidate]) != -1) {
-                llRegionSayTo(CurrentUser, 0, "Already trustee.");
-                show_main();
-                return;
-            }
-            // Accept prompt — role-specific wording.
-            string a_title = "Accept Trustee";
-            string a_body = get_name(llGetOwner()) + " wants you as trustee.\n\nAccept?";
-            if (CandidateIsOwner) {
-                if (has_owner()) {
-                    a_title = "Accept Transfer";
-                    a_body = "Accept ownership of " + get_name(llGetOwner()) + "?";
-                }
-                else {
-                    a_title = "Accept Ownership";
-                    a_body = get_name(llGetOwner()) + " wishes to submit to you.\n\nAccept?";
-                }
-            }
-            show_confirm(PendingCandidate, "acq_accept", a_title, a_body);
-        }
-    }
-    else if (MenuContext == "acq_accept") {
+    // The candidate scan arrives via menu.sensor (handle_candidate_result); the
+    // honorific + remove-trustee picks via menu.picker (handle_picker_result) — both
+    // off UI_BUS. Only the dialog.modal CONFIRMS land here.
+    if (MenuContext == "acq_accept") {
         if (cmd == "confirm") show_honorific(PendingCandidate, "acq_hon");
         else {
             llRegionSayTo(CurrentUser, 0, "Declined.");
             show_main();
-        }
-    }
-    else if (MenuContext == "acq_hon") {
-        // UL honorific pick: cmd IS the chosen honorific. Validate against the
-        // role's pool, then branch to the role's commit.
-        list valid = OWNER_HONORIFICS;
-        if (!CandidateIsOwner) valid = TRUSTEE_HONORIFICS;
-        if (llListFindList(valid, [cmd]) != -1) {
-            PendingHonorific = cmd;
-            if (!CandidateIsOwner) {
-                // Trustee: commit directly.
-                add_trustee(PendingCandidate, PendingHonorific);
-                llRegionSayTo(PendingCandidate, 0, "You are trustee of " + get_name(llGetOwner()) + " as " + PendingHonorific + ".");
-                llRegionSayTo(CurrentUser, 0, get_name(PendingCandidate) + " is trustee.");
-                show_main();
-            }
-            else if (has_owner()) {
-                // Transfer: commit directly + notify the outgoing owner.
-                key old = OwnerKey;
-                persist_owner(PendingCandidate, PendingHonorific);
-                llRegionSayTo(old, 0, "You have transferred " + get_name(llGetOwner()) + " to " + get_name(PendingCandidate) + ".");
-                llRegionSayTo(PendingCandidate, 0, get_name(llGetOwner()) + " is now your property as " + PendingHonorific + ".");
-                llRegionSayTo(llGetOwner(), 0, "You are now property of " + PendingHonorific + " " + get_name(PendingCandidate) + ".");
-                cleanup();
-            }
-            else {
-                // Set (first owner): the WEARER double-confirms consent to be owned.
-                show_confirm(llGetOwner(), "acq_confirm", "Confirm",
-                    "Submit to " + get_name(PendingCandidate) + " as your " + PendingHonorific + "?");
-            }
         }
     }
     else if (MenuContext == "acq_confirm") {
@@ -865,20 +754,96 @@ handle_button(string cmd) {
             show_main();
         }
     }
-    else if (MenuContext == "remove_trustee") {
-        // OL pick: cmd is "pick:<global-index>" into TrusteeKeys.
-        if (llGetSubString(cmd, 0, 4) == "pick:") {
-            integer idx = (integer)llGetSubString(cmd, 5, -1);
-            if (idx >= 0 && idx < llGetListLength(TrusteeKeys)) {
-                key trustee_key = (key)llList2String(TrusteeKeys, idx);
-                remove_trustee(trustee_key);
-                llRegionSayTo(CurrentUser, 0, "Removed.");
-                llRegionSayTo(trustee_key, 0, "Removed as trustee.");
-                show_main();
-            }
+    else show_main();
+}
+
+// menu.sensor result: the picked candidate avatar (was the acq_select branch). The
+// live scan makes CandidateKeys validation unnecessary — trust the returned key.
+// Runs the role-specific accept prompt (owner set/transfer vs trustee).
+handle_candidate_result(key selected) {
+    PendingCandidate = selected;
+    // A trustee can't be added twice.
+    if (!CandidateIsOwner && llListFindList(TrusteeKeys, [(string)PendingCandidate]) != -1) {
+        llRegionSayTo(CurrentUser, 0, "Already trustee.");
+        show_main();
+        return;
+    }
+    // Accept prompt — role-specific wording.
+    string a_title = "Accept Trustee";
+    string a_body = get_name(llGetOwner()) + " wants you as trustee.\n\nAccept?";
+    if (CandidateIsOwner) {
+        if (has_owner()) {
+            a_title = "Accept Transfer";
+            a_body = "Accept ownership of " + get_name(llGetOwner()) + "?";
+        }
+        else {
+            a_title = "Accept Ownership";
+            a_body = get_name(llGetOwner()) + " wishes to submit to you.\n\nAccept?";
         }
     }
-    else show_main();
+    show_confirm(PendingCandidate, "acq_accept", a_title, a_body);
+}
+
+// LIST-picker result from kmod_menu (menu.picker) — the honorific + remove-trustee
+// pickers only (the candidate SCAN is menu.sensor → handle_candidate_result). One
+// result per interaction; cancelled (Back/timeout) → back to main. context IS the
+// key we handed out (honorific string, or trustee UUID). The honorific picker is
+// sent to the candidate, so this is filtered by requester + active session upstream.
+handle_picker_result(string context, integer cancelled) {
+    if (cancelled) {
+        show_main();
+        return;
+    }
+
+    if (MenuContext == "acq_hon") {
+        // context IS the chosen honorific. Validate against the role's pool, then
+        // branch to the role's commit.
+        list valid = OWNER_HONORIFICS;
+        if (!CandidateIsOwner) valid = TRUSTEE_HONORIFICS;
+        if (llListFindList(valid, [context]) != -1) {
+            PendingHonorific = context;
+            if (!CandidateIsOwner) {
+                // Trustee: commit directly.
+                add_trustee(PendingCandidate, PendingHonorific);
+                llRegionSayTo(PendingCandidate, 0, "You are trustee of " + get_name(llGetOwner()) + " as " + PendingHonorific + ".");
+                llRegionSayTo(CurrentUser, 0, get_name(PendingCandidate) + " is trustee.");
+                // Defer the main redraw to settings.sync — the "Trustees: N" count
+                // is only fresh after kmod_settings persists the add. Rendering now
+                // shows a stale count (and syncing while main is open would stack a
+                // duplicate); await_sync redraws once with the committed roster.
+                MenuContext = "await_sync";
+            }
+            else if (has_owner()) {
+                // Transfer: commit directly + notify the outgoing owner.
+                key old = OwnerKey;
+                persist_owner(PendingCandidate, PendingHonorific);
+                llRegionSayTo(old, 0, "You have transferred " + get_name(llGetOwner()) + " to " + get_name(PendingCandidate) + ".");
+                llRegionSayTo(PendingCandidate, 0, get_name(llGetOwner()) + " is now your property as " + PendingHonorific + ".");
+                llRegionSayTo(llGetOwner(), 0, "You are now property of " + PendingHonorific + " " + get_name(PendingCandidate) + ".");
+                cleanup();
+            }
+            else {
+                // Set (first owner): the WEARER double-confirms consent to be owned.
+                show_confirm(llGetOwner(), "acq_confirm", "Confirm",
+                    "Submit to " + get_name(PendingCandidate) + " as your " + PendingHonorific + "?");
+            }
+        }
+        return;
+    }
+
+    if (MenuContext == "remove_trustee") {
+        // context IS the chosen trustee UUID.
+        if (llListFindList(TrusteeKeys, [context]) != -1) {
+            key trustee_key = (key)context;
+            remove_trustee(trustee_key);
+            llRegionSayTo(CurrentUser, 0, "Removed.");
+            llRegionSayTo(trustee_key, 0, "Removed as trustee.");
+            // Defer the main redraw to settings.sync (same as trustee add) so the
+            // "Trustees: N" count reflects the committed roster, once.
+            MenuContext = "await_sync";
+        }
+        return;
+    }
 }
 
 /* -------------------- CLEANUP -------------------- */
@@ -895,12 +860,10 @@ cleanup() {
     gPolicyButtons = [];
     SessionId = "";
     MenuContext = "";
-    CurrentPage = 0;
     PendingCandidate = NULL_KEY;
     PendingHonorific = "";
     CandidateIsOwner = 0;
     OwnerConsents = 0;
-    CandidateKeys = [];
 }
 
 /* -------------------- EVENTS -------------------- */
@@ -938,7 +901,14 @@ default {
             }
         }
         else if (num == SETTINGS_BUS) {
-            if (type == "settings.sync") apply_settings_sync();
+            if (type == "settings.sync") {
+                apply_settings_sync();
+                // A trustee add/remove parks in await_sync and defers its redraw
+                // here: TrusteeKeys (the "Trustees: N" count) is only fresh after
+                // the persist round-trip. Rebuild main ONCE; gated on await_sync so
+                // an unrelated sync never stacks a second dialog on an open menu.
+                if (CurrentUser != NULL_KEY && MenuContext == "await_sync") show_main();
+            }
         }
         else if (num == UI_BUS) {
             if (type == "ui.menu.start" && (llJsonGetValue(msg, ["context"]) != JSON_INVALID)) {
@@ -959,6 +929,25 @@ default {
                     UserAcl = acl;
                     show_main();
                 }
+            }
+            // Picker result from kmod_menu (menu.picker). Filter to our requester +
+            // an active session (the honorific picker is sent to the candidate, not
+            // CurrentUser, so we don't match on user); context is the chosen key.
+            else if (type == "ui.menu.picker.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                if (CurrentUser == NULL_KEY) return;
+                integer was_cancelled = (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID);
+                string pctx = llJsonGetValue(msg, ["context"]);
+                if (pctx == JSON_INVALID) pctx = "";
+                handle_picker_result(pctx, was_cancelled);
+            }
+            // Candidate scan result from kmod_menu's menu.sensor service. cancelled
+            // (or "no people found", which kmod_menu already announced) → redraw main.
+            else if (type == "ui.sensor.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                if (CurrentUser == NULL_KEY) return;
+                if (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID) { show_main(); return; }
+                handle_candidate_result((key)llJsonGetValue(msg, ["key"]));
             }
         }
         else if (num == DIALOG_BUS) {
@@ -982,30 +971,8 @@ default {
         }
     }
 
-    sensor(integer count) {
-        if (CurrentUser == NULL_KEY) return;
-        if (MenuContext != "acq_scan") return;
-
-        list candidates = [];
-        key wearer = llGetOwner();
-        integer i;
-
-        while (i < count) {
-            key k = llDetectedKey(i);
-            if (k != wearer) candidates += [(string)k];
-            i++;
-        }
-
-        CandidateKeys = candidates;
-        finish_scan();
-    }
-
-    no_sensor() {
-        if (CurrentUser == NULL_KEY) return;
-        if (MenuContext != "acq_scan") return;
-        CandidateKeys = [];
-        finish_scan();
-    }
+    // Avatar scanning is owned by kmod_menu's menu.sensor service now (see
+    // request_candidate_pick / handle_candidate_result); no sensor()/no_sensor() here.
 
     dataserver(key qid, string data) {
         if (qid != ActiveNameQuery) return;

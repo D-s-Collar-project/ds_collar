@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_folders.lsl
 VERSION: 1.2
-REVISION: 11
+REVISION: 14
 PURPOSE: Manage RLV shared folders — enumerate, attach, detach, and lock #RLV subfolders
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility.
              Uses @getinv RLV command to enumerate actual #RLV subfolders in real-time;
@@ -13,6 +13,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibilit
              @getpath at picker render; this plugin does NOT maintain any
              shadow lock vector.
 CHANGES:
+- v1.2 rev 14: fixed-action display labels bracketed ([Attach]/[Detach]/[Lock]/[Unlock]) per the project fixed-action-button convention. Routing contexts (attach/detach/lock/unlock) + btn_allowed policy labels unchanged — display-only.
+- v1.2 rev 13: add_fixed drops the slot field ("context\tlabel") — kmod_menu rev 24 places fixed buttons contiguously (no explicit slots / flanking). No behaviour change; Attach/Detach/Lock still sit contiguous after nav.
+- v1.2 rev 12: folder picker migrated to menu.picker (central picker, kmod_menu rev 22), forced OL. show_folder_pick sends candidates as key-first rows "index\t[ind] name mark\n..." + policy-gated fixed actions (Attach/Detach/Lock|Unlock) pinned contiguously from slot 3 via add_fixed; kmod_menu owns the session, paging, and the click and replies ONE ui.menu.picker.result (handle_picker_result: Back at root -> exit, at subfolder -> pop+rescan; attach/detach -> act+rescan; lock/unlock -> act+reshow same page; numeric -> drill in). Also FIXES a latent poison: the old flat items led with the worn indicator "[+]"/"[-]"/"[ ]", auto-typing under llList2Json(JSON_ARRAY) and collapsing the whole picker — now the index leads each row and indicators render for real. Dropped SessionId/MenuContext/PickPage/LastMaxPage/generate_session_id/handle_dialog_response/handle_dialog_timeout/the DIALOG_BUS handler.
 - v1.2 rev 11: folder picker mode renamed ordered to menu.ordered (menu-mode taxonomy; no behavior change).
 - v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Actions + pick:<idx> already routed by context.
 - v1.2 rev 9: on safeword.fired, clear the persisted folder-lock list (LockedNames=[] + delete folders.locked) so the locks don't re-apply on the next sync — kmod_rlv already released the detachallthis claims.
@@ -25,7 +28,8 @@ CHANGES:
 integer KERNEL_LIFECYCLE = 500;
 integer SETTINGS_BUS     = 800;
 integer UI_BUS           = 900;
-integer DIALOG_BUS       = 950;
+// The picker is kmod_menu's menu.picker; its result returns on UI_BUS, so this
+// plugin no longer talks to DIALOG_BUS.
 
 /* -------------------- PLUGIN IDENTITY -------------------- */
 string PLUGIN_CONTEXT = "ui.core.folders";
@@ -48,33 +52,25 @@ list    LockedNames       = [];   // Folder paths locked via @detachallthis:name
 key     CurrentUser       = NULL_KEY;
 integer UserAcl           = 0;
 list    gPolicyButtons    = [];
-string  SessionId         = "";
-string  MenuContext       = "";   // "scanning" | "pick"
 string  CurrentPath       = "";   // #RLV-relative browsing path; "" = #RLV root
 // Strided pairs from @getinvworn: [name0, worn0, name1, worn1, ...].
 // Worn is a two-digit "<self><descendants>" code (each 0-3). Folder count
 // is llGetListLength(Folders) / 2. Combined to halve heap and to allow
 // pre-allocation via doubling in handle_rlv_response.
+// The folder picker is now kmod_menu's menu.picker (it owns the session, paging,
+// and the click), so no per-plugin SessionId / page cursor / MenuContext.
 list    Folders           = [];
-integer PickPage          = 0;
-// Stashed by show_folder_pick so the dispatcher's prev/next wrap branches
-// don't have to recompute action_count → page_size → max_page. Refreshed
-// on every render; only consumed by the immediately-following click.
-integer LastMaxPage       = 0;
 integer RlvListenHandle   = 0;
 
 /* -------------------- HELPERS -------------------- */
 
-integer json_has(string j, list path) {
-    return (llJsonGetValue(j, path) != JSON_INVALID);
-}
-
-string generate_session_id() {
-    return PLUGIN_CONTEXT + "_" + (string)llGetUnixTime();
-}
-
-string btn(string label, string cmd) {
-    return llList2Json(JSON_OBJECT, ["label", label, "context", cmd]);
+// Append a fixed-action row "context\tlabel" to a \n-joined rows string for
+// menu.picker's `fixed` field (kmod_menu places them contiguously after nav).
+// Actions are policy-gated plugin-side (btn_allowed), so no ACL mask is attached —
+// whoever reaches here sees them.
+string add_fixed(string rows, string ctx, string label) {
+    if (rows != "") rows += "\n";
+    return rows + ctx + "\t" + label;
 }
 
 list get_policy_buttons(string ctx, integer acl) {
@@ -144,25 +140,14 @@ stop_rlv_listen() {
     llSetTimerEvent(0.0);
 }
 
+// kmod_menu owns the picker session now; nothing plugin-side to close.
 cleanup_session() {
     stop_rlv_listen();
-
-    if (SessionId != "") {
-        llMessageLinked(LINK_SET, DIALOG_BUS, llList2Json(JSON_OBJECT, [
-            "type",       "ui.dialog.close",
-            "session_id", SessionId
-        ]), NULL_KEY);
-    }
-
-    SessionId         = "";
     CurrentUser       = NULL_KEY;
     UserAcl           = 0;
     gPolicyButtons    = [];
-    MenuContext       = "";
     CurrentPath       = "";
     Folders           = [];
-    PickPage          = 0;
-    LastMaxPage       = 0;
 }
 
 /* -------------------- SETTINGS -------------------- */
@@ -286,8 +271,6 @@ pop_current_path() {
 // response lands in handle_rlv_response which shows show_folder_pick(0).
 scan_current_path() {
     Folders  = [];
-    PickPage = 0;
-    MenuContext       = "scanning";
     stop_rlv_listen();
     RlvListenHandle = llListen(RLV_CHAN, "", llGetOwner(), "");
     rlv_force("@getinvworn:" + CurrentPath + "=" + (string)RLV_CHAN);
@@ -326,6 +309,10 @@ string worn_indicator(string raw) {
 // fixed action buttons (Attach / Detach / Lock|Unlock) that operate on
 // CurrentPath. Tapping a number drills into that subfolder. The worn/lock
 // indicators ride in each item's label; the service owns the slot layout.
+// menu.picker (OL): kmod_menu owns the session, paging, and the click. Fixed
+// action buttons (only at a subfolder, policy-gated by btn_allowed) pin
+// contiguously from slot 3 and act on CurrentPath; numbered folders fill the rest.
+// One ui.menu.picker.result comes back; tapping a number drills into that folder.
 show_folder_pick(integer page) {
     integer at_subfolder = (CurrentPath != "");
 
@@ -334,55 +321,25 @@ show_folder_pick(integer page) {
         if (llListFindList(LockedNames, [CurrentPath]) != -1) current_locked = TRUE;
     }
 
-    // Action buttons computed up-front because page_size depends on
-    // action_count (slot 5 is content for users without Lock/Unlock policy).
-    list action_buttons = [];
+    // Display labels are bracketed (the fixed-action convention); btn_allowed +
+    // the routing context stay unbracketed (policy label / stable token).
+    string fixed_rows = "";
     if (at_subfolder) {
-        if (btn_allowed("Attach")) action_buttons += [btn("Attach", "attach")];
-        if (btn_allowed("Detach")) action_buttons += [btn("Detach", "detach")];
+        if (btn_allowed("Attach")) fixed_rows = add_fixed(fixed_rows, "attach", "[Attach]");
+        if (btn_allowed("Detach")) fixed_rows = add_fixed(fixed_rows, "detach", "[Detach]");
         if (current_locked) {
-            if (btn_allowed("Unlock")) action_buttons += [btn("Unlock", "unlock")];
+            if (btn_allowed("Unlock")) fixed_rows = add_fixed(fixed_rows, "unlock", "[Unlock]");
         }
         else {
-            if (btn_allowed("Lock")) action_buttons += [btn("Lock", "lock")];
+            if (btn_allowed("Lock")) fixed_rows = add_fixed(fixed_rows, "lock", "[Lock]");
         }
     }
-    integer action_count = llGetListLength(action_buttons);
-
-    // 12 dialog slots minus 3 nav minus action buttons = content capacity.
-    integer page_size = 9 - action_count;
 
     integer total = llGetListLength(Folders) / 2;
-
-    SessionId   = generate_session_id();
-    MenuContext = "pick";
 
     string crumb = "#RLV";
     if (at_subfolder) crumb = "#RLV/" + CurrentPath;
 
-    integer max_page;
-    if (total == 0) max_page = 0;
-    else            max_page = (total - 1) / page_size;
-    if (page < 0)        page = 0;
-    if (page > max_page) page = max_page;
-    PickPage    = page;
-    LastMaxPage = max_page;
-
-    // Items: each label carries the worn indicator + name + lock mark; OL keys
-    // the click by index (pick:<global>), so the item's own context is unused.
-    list items = [];
-    integer i = 0;
-    while (i < total) {
-        string folder_name = llList2String(Folders, 2 * i);
-        string worn_ind    = worn_indicator(llList2String(Folders, 2 * i + 1));
-        string lock_mark   = "";
-        if (llListFindList(LockedNames, [full_path(folder_name)]) != -1) lock_mark = "*";
-        items += [worn_ind + " " + folder_name + lock_mark];
-        i += 1;
-    }
-
-    // Breadcrumb + legend; the menu service (OL) appends the numbered folder
-    // lines and moves the page counter into the title.
     string body = crumb;
     if (at_subfolder) {
         if (current_locked) body += "  (Locked)";
@@ -397,21 +354,34 @@ show_folder_pick(integer page) {
         body += "[+]=worn  [-]=partial  *=locked";
     }
 
-    // OL via the menu service: the nav row (<< >> Back) + the fixed action
-    // buttons reserve the low slots; numbered folders pack above (no padding).
-    // The service slices the page off `page` and numbers them; action buttons
-    // return their own context, nav returns its arrow label.
+    // Candidates as key-first rows "index\t[ind] name mark\n...": the index leads
+    // each row (poison-safe) and is our routing token; the worn/lock indicators
+    // ("[+]" etc.) + name ride in field 2 and render for real (the old flat items
+    // led with "[+]" and silently poisoned the whole picker). OL keeps the
+    // numbered "tap a number" UX regardless of name length.
+    string items = "";
+    integer i = 0;
+    while (i < total) {
+        string folder_name = llList2String(Folders, 2 * i);
+        string worn_ind    = worn_indicator(llList2String(Folders, 2 * i + 1));
+        string lock_mark   = "";
+        if (llListFindList(LockedNames, [full_path(folder_name)]) != -1) lock_mark = "*";
+        if (i > 0) items += "\n";
+        items += (string)i + "\t" + worn_ind + " " + folder_name + lock_mark;
+        i += 1;
+    }
+
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.ordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      PLUGIN_LABEL,
-        "body",       body,
-        "items",      llList2Json(JSON_ARRAY, items),
-        "fixed",      llList2Json(JSON_ARRAY, action_buttons),
-        "page",       page
+        "type",      "ui.menu.render",
+        "mode",      "menu.picker",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser,
+        "title",     PLUGIN_LABEL,
+        "prompt",    body,
+        "items",     items,
+        "fixed",     fixed_rows,
+        "shape",     "OL",
+        "page",      (string)page
     ]), NULL_KEY);
 }
 
@@ -511,49 +481,16 @@ apply_folder_action(string folder_path, string app_action) {
 
 /* -------------------- DIALOG HANDLER -------------------- */
 
-handle_dialog_response(string msg) {
-    if (!json_has(msg, ["session_id"])) return;
-    if (llJsonGetValue(msg, ["session_id"]) != SessionId) return;
-
-    key response_user = (key)llJsonGetValue(msg, ["user"]);
-    if (response_user != CurrentUser) return;
-
-    string ctx = llJsonGetValue(msg, ["context"]);
-    if (ctx == JSON_INVALID) ctx = "";
-    // Every button routes by context: nav (nav:*), actions, and folder picks.
-
-    if (MenuContext != "pick") return;
-
-    if (ctx == "nav:back") {
-        // At root, exit the plugin. At a subfolder, pop one level and
-        // re-scan so Back walks the user back up the path.
-        if (CurrentPath == "") {
-            return_to_root();
-        }
-        else {
-            pop_current_path();
-            scan_current_path();
-        }
+// menu.picker result (folder picker). cancelled (Back/timeout): at root exit the
+// plugin, at a subfolder pop one level and re-scan (Back walks up the path).
+// attach/detach act on CurrentPath then re-scan; lock/unlock act then reshow the
+// same page; a numeric context is a folder index -> drill into that subfolder.
+handle_picker_result(string ctx, integer cancelled, integer page) {
+    if (cancelled) {
+        if (CurrentPath == "") return_to_root();
+        else { pop_current_path(); scan_current_path(); }
         return;
     }
-
-    // Wrap-around paging per plugin_animate convention. LastMaxPage was
-    // stashed by the most recent show_folder_pick render — current by the
-    // time a click reaches us.
-    if (ctx == "nav:prev") {
-        if (PickPage == 0) show_folder_pick(LastMaxPage);
-        else               show_folder_pick(PickPage - 1);
-        return;
-    }
-    if (ctx == "nav:next") {
-        if (PickPage >= LastMaxPage) show_folder_pick(0);
-        else                         show_folder_pick(PickPage + 1);
-        return;
-    }
-
-    // Action buttons act on CurrentPath itself (only present at subfolder).
-    // Attach/Detach refresh the worn state via re-scan; Lock/Unlock just
-    // re-render in place.
     if (ctx == "attach" || ctx == "detach") {
         apply_folder_action(CurrentPath, ctx);
         scan_current_path();
@@ -561,24 +498,15 @@ handle_dialog_response(string msg) {
     }
     if (ctx == "lock" || ctx == "unlock") {
         apply_folder_action(CurrentPath, ctx);
-        show_folder_pick(PickPage);
+        show_folder_pick(page);
         return;
     }
-
-    // Numbered folder tap: drill into that subfolder.
-    if (llSubStringIndex(ctx, "pick:") == 0) {
-        integer idx = (integer)llGetSubString(ctx, 5, -1);
-        if (idx >= 0 && idx < llGetListLength(Folders) / 2) {
-            CurrentPath = full_path(llList2String(Folders, 2 * idx));
-            scan_current_path();
-        }
+    if (ctx == "") return;
+    integer idx = (integer)ctx;
+    if (idx >= 0 && idx < llGetListLength(Folders) / 2) {
+        CurrentPath = full_path(llList2String(Folders, 2 * idx));
+        scan_current_path();
     }
-}
-
-handle_dialog_timeout(string msg) {
-    if (!json_has(msg, ["session_id"])) return;
-    if (llJsonGetValue(msg, ["session_id"]) != SessionId) return;
-    cleanup_session();
 }
 
 /* -------------------- RLV RESPONSE HANDLER -------------------- */
@@ -737,6 +665,15 @@ default
                 UserAcl = start_acl;
                 show_main();
             }
+            else if (msg_type == "ui.menu.picker.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                if ((key)llJsonGetValue(msg, ["user"]) != CurrentUser) return;
+                integer was_cancelled = (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID);
+                string pctx = llJsonGetValue(msg, ["context"]);
+                if (pctx == JSON_INVALID) pctx = "";
+                integer ppage = (integer)llJsonGetValue(msg, ["page"]);
+                handle_picker_result(pctx, was_cancelled, ppage);
+            }
             else if (msg_type == "safeword.fired") {
                 // Wearer safeword: kmod_rlv's system-wide clear already released
                 // our detachallthis claims; clear the persisted lock list so they
@@ -745,13 +682,7 @@ default
                 persist_locked();
             }
         }
-        else if (num == DIALOG_BUS) {
-            if (msg_type == "ui.dialog.response") {
-                handle_dialog_response(msg);
-            }
-            else if (msg_type == "ui.dialog.timeout") {
-                handle_dialog_timeout(msg);
-            }
-        }
+        // No DIALOG_BUS handling — the folder picker is kmod_menu's menu.picker;
+        // its result arrives above on UI_BUS as ui.menu.picker.result.
     }
 }

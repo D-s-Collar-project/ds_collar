@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_outfits.lsl
 VERSION: 1.2
-REVISION: 15
+REVISION: 18
 PURPOSE: Browse #RLV/outfits subfolders and act on them. Four actions
          per outfit:
            Add    — attach the folder additively (layer on top)
@@ -50,6 +50,9 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              click and hides those items for the rest of the session.
              No shared shadow lock vector between plugins.
 CHANGES:
+- v1.2 rev 18: picker action row is now "[Help]  [Close]" — Help label bracketed to match the [Stop]/[Close] fixed-button convention, plus a new [Close] fixed action (context "close" -> cleanup_session, exits the menu; Back still returns to root). Both always-shown (no mask), contiguous after nav.
+- v1.2 rev 17: fixed-row format follows kmod_menu rev 24 — "help\tHelp" (dropped the trailing slot field, which rev-24 render_picker would otherwise misread as an ACL mask and hide Help for most users). Help still always shows, contiguous after nav.
+- v1.2 rev 16: outfit picker migrated to menu.picker (central picker, kmod_menu rev 22). show_picker sends candidates as key-first rows "index\tname+mark\n..." + fixed "help\tHelp\t3"; kmod_menu owns the session, paging, and the click and replies ONE ui.menu.picker.result (handled on UI_BUS: cancelled -> root; "help" -> notecard + reshow same page; else index -> show_action). Dropped the plugin's "pick" MenuContext branch, the picker SessionId, LastMaxPage, and the whole {label}-wrap (real bracket/digit names now render for real via delimited transport, no JSON touches a label). The empty + per-outfit action menus stay plugin-owned menu.fixed (fixed labels).
 - v1.2 rev 15: FIX — outfit OL rendered empty when any outfit folder name started with a digit/bracket ("1920s Gown", "[Formal]"): raw names in llList2Json(JSON_ARRAY,...) auto-type and return JSON_INVALID, poisoning the whole ui.menu.render message so nothing drew. Items now {label}-wrapped (the systemic picker fix; matches force-sit/menu.sensor).
 - v1.2 rev 14: outfit picker to menu.ordered, per-outfit action + empty menus to menu.fixed; cleans up on the new ui.dialog.close.
 - v1.2 rev 13: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Actions + pick:<idx> already routed by context.
@@ -85,15 +88,11 @@ integer UserAcl        = 0;
 list    gPolicyButtons = [];
 string  SessionId      = "";
 
-string  MenuContext    = "";   // "scanning" | "pick" | "action" | "empty"
+string  MenuContext    = "";   // "scanning" | "action" | "empty" (picker is kmod_menu-owned)
 string  SelectedOutfit = "";
 
 list    Outfits     = [];
-integer PickPage    = 0;
-integer LastMaxPage = 0;
-// page_size is 9 - action_count; the picker's only action button is Help
-// (always shown), so action_count=1 → page_size=8. LastMaxPage stashed for
-// prev/next wrap.
+integer PickPage    = 0;   // last page the picker was on (from the result); menu.picker owns paging
 
 list    LockedOutfits   = [];
 integer RlvListenHandle = 0;
@@ -186,7 +185,6 @@ cleanup_session() {
     SelectedOutfit = "";
     Outfits        = [];
     PickPage       = 0;
-    LastMaxPage    = 0;
 }
 
 return_to_root() {
@@ -278,63 +276,41 @@ scan_outfits() {
 
 /* -------------------- UI -------------------- */
 
+// menu.picker: kmod_menu owns the session, paging, and the click; we send
+// candidates + the fixed Help button and get one ui.menu.picker.result. Auto-shape
+// picks OL for long outfit names (the common case). Help is pinned to slot 3.
 show_picker(integer page) {
-    SessionId   = sid();
-    MenuContext = "pick";
-
-    // Action buttons computed up-front because page_size depends on
-    // Help is the picker's only action button (always shown, not policy-gated).
-    list action_buttons = [btn("Help", "help")];
-    integer action_count = llGetListLength(action_buttons);
-
-    // 12 dialog slots minus 3 nav minus action buttons = content capacity.
-    integer page_size = 9 - action_count;
     integer total = llGetListLength(Outfits);
 
-    integer max_page = 0;
-    if (total > 0) max_page = (total - 1) / page_size;
-    if (page < 0)        page = 0;
-    if (page > max_page) page = max_page;
-    PickPage    = page;
-    LastMaxPage = max_page;
-
     string body = "Outfits  (#RLV/" + OUTFITS_ROOT + ")";
-    if (total == 0) {
-        body += "\n\nNo outfits found.\nCreate subfolders under #RLV/" + OUTFITS_ROOT + ".";
-    }
-    else {
-        body += "\n*=locked";
-    }
+    if (total == 0) body += "\n\nNo outfits found.\nCreate subfolders under #RLV/" + OUTFITS_ROOT + ".";
+    else            body += "\n*=locked";
 
-    // Items: outfit name + lock mark; the OL service numbers them and returns
-    // pick:<global-index>. The page counter moves into the title.
-    list items = [];
+    // Candidates as key-first rows "index\tname+mark\n...": the index is our
+    // routing token (it leads each row so the field never [/{-leads; an outfit name
+    // starting with a digit or bracket rides safely in field 2 and renders for
+    // real). Help rides as a fixed action button (contiguous after nav, always shown).
+    string items = "";
     integer i = 0;
     while (i < total) {
         string outfit_name = llList2String(Outfits, i);
         string mark = "";
         if (llListFindList(LockedOutfits, [outfit_name]) != -1) mark = " *";
-        // {label}-wrap: a bare name starting with a digit/bracket (e.g. "1920s
-        // Gown", "[Formal]") auto-types under llList2Json(JSON_ARRAY,...) and
-        // returns JSON_INVALID, poisoning the whole render. As an object the name
-        // is a quoted value, never auto-typed. kmod_menu reads .label.
-        items += [llList2Json(JSON_OBJECT, ["label", outfit_name + mark])];
+        if (i > 0) items += "\n";
+        items += (string)i + "\t" + outfit_name + mark;
         i += 1;
     }
 
-    // OL via the menu service: nav (<< >> Back) + the fixed Help button reserve
-    // the low slots; numbered outfits pack above (no padding).
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.ordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      PLUGIN_LABEL,
-        "body",       body,
-        "items",      llList2Json(JSON_ARRAY, items),
-        "fixed",      llList2Json(JSON_ARRAY, action_buttons),
-        "page",       page
+        "type",      "ui.menu.render",
+        "mode",      "menu.picker",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser,
+        "title",     PLUGIN_LABEL,
+        "prompt",    body,
+        "items",     items,
+        "fixed",     "help\t[Help]\nclose\t[Close]",
+        "page",      (string)page
     ]), NULL_KEY);
 }
 
@@ -478,27 +454,8 @@ handle_dialog_response(string msg) {
         return;
     }
 
-    if (MenuContext == "pick") {
-        if (ctx == "nav:back") { return_to_root(); return; }
-        if (ctx == "nav:prev") {
-            if (PickPage == 0) show_picker(LastMaxPage);
-            else               show_picker(PickPage - 1);
-            return;
-        }
-        if (ctx == "nav:next") {
-            if (PickPage >= LastMaxPage) show_picker(0);
-            else                         show_picker(PickPage + 1);
-            return;
-        }
-        if (ctx == "help") { give_setup_notecard(); show_picker(PickPage); return; }
-        if (llSubStringIndex(ctx, "pick:") == 0) {
-            integer pick_idx = (integer)llGetSubString(ctx, 5, -1);
-            if (pick_idx >= 0 && pick_idx < llGetListLength(Outfits)) {
-                show_action(llList2String(Outfits, pick_idx));
-            }
-        }
-        return;
-    }
+    // (The "pick" outfit picker is now kmod_menu's menu.picker — its result
+    // arrives as ui.menu.picker.result on UI_BUS, not here. See the event loop.)
 
     if (MenuContext == "action") {
         if (ctx == "nav:back") { show_picker(PickPage); return; }
@@ -642,6 +599,24 @@ default {
                 CurrentUser = id;
                 UserAcl     = start_acl;
                 scan_outfits();
+            }
+            else if (msg_type == "ui.menu.picker.result") {
+                // Outfit picker (menu.picker) result. Back/timeout -> root; Help ->
+                // notecard + reshow same page; Close -> exit the menu; otherwise
+                // context is the outfit index -> open its action menu.
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                if ((key)llJsonGetValue(msg, ["user"]) != CurrentUser) return;
+                if (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID) { return_to_root(); return; }
+                string pctx = llJsonGetValue(msg, ["context"]);
+                if (pctx == JSON_INVALID) pctx = "";
+                PickPage = (integer)llJsonGetValue(msg, ["page"]);
+                if (pctx == "help") { give_setup_notecard(); show_picker(PickPage); return; }
+                if (pctx == "close") { cleanup_session(); return; }   // exit the menu entirely
+                if (pctx == "") return;
+                integer pick_idx = (integer)pctx;
+                if (pick_idx >= 0 && pick_idx < llGetListLength(Outfits)) {
+                    show_action(llList2String(Outfits, pick_idx));
+                }
             }
             else if (msg_type == "safeword.fired") {
                 // Wearer safeword: kmod_rlv's system-wide clear already released

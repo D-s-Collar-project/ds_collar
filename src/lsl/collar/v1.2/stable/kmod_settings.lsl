@@ -1,9 +1,12 @@
 /*--------------------
 MODULE: kmod_settings.lsl
 VERSION: 1.2
-REVISION: 10
+REVISION: 13
 PURPOSE: Validation guards, roster conversion, and LSD settings store
 CHANGES:
+- v1.2 rev 13: FIX — existing roster records (chiefly blacklist entries written before kmod_names) still showed the stored USERNAME, never the composed display name. Added a boot-time resolve_roster(): on a delayed timer (so kmod_names is up), re-resolve every record whose stored name still looks like a bare username/placeholder (no space AND no "(") — request_name → kmod_names → the composed label overwrites the record. handle_name_resolved gained a changed-check so an already-composed record neither rewrites nor broadcasts (no sync storm; near-zero cost on later boots). Owners/trustees that already hold a display name (has a space) are left as-is; new adds compose at add-time as before.
+- v1.2 rev 12: name resolution DELEGATED to the new kmod_names module (the collar's single name authority) — kmod_settings no longer runs a dataserver. request_name(uuid) now just sends name.resolve on SETTINGS_BUS; the name.resolved reply (handle_name_resolved) writes the composed "Display (username)" label into the record. Records get the composed format for free: blacklist is no longer username-only, owners/trustees gain the "(username)" suffix when a custom display name differs. Removed the entire in-module resolver (request_username, handle_name_response, the dataserver + timer events, the NameQuery* query map) — this DROPS kmod_settings' memory (it had briefly hit 91.7% as a would-be authority, over the old 90.6% wall; delegating is why kmod_names exists). See kmod_names rev 1 + kmod_menu rev 26.
+- v1.2 rev 11: blacklist add/remove now ALWAYS echo settings.sync (was only-on-change). The requesting UI (plugin_blacklist rev 16) defers its menu redraw to the sync so the count reflects the committed roster; a silent rejected add (owner/trustee/dupe/cap) previously sent no sync and stranded the await_sync menu with no dialog. Blacklist ops are rare, explicit, single-shot, so the extra sync on a no-op is negligible — the other single-writer paths keep their only-on-change broadcast.
 - v1.2 rev 10: FIX — blacklist cleared on update. migrate_legacy_roster() unconditionally delete_role(-1)'d the blacklist then rebuilt from the card; with the card silent on the blacklist (the norm — it's UI-managed safety state), a card re-stream on update wiped it for good. Now the blacklist is only wiped-and-rebuilt when the card actually declares one; a silent card leaves the runtime blacklist intact. Surgical live fix (the full non-destructive-seed rework lives in the experimental stage).
 - v1.2 rev 9: whitelisted safeword.word (owned by plugin_maint) in MANAGED_SETTINGS_KEYS so the wearer's personal safeword persists via the single-writer settings.delta protocol.
 - v1.2 rev 8: ownership changes now REBOOT the collar instead of a light settings.sync, split by ENTRY vs EXIT. ENTRY (handle_set_owner: add/transfer) → request_owner_reboot() = kernel.reset.soft: scripts reset, roster + notecard KEPT (the new owner inherits a working collar; the card's "only one" guard blocks any stale card owner re-streaming). EXIT (handle_clear_owner: release) → factory_reset() = notecard removed + LSD wiped, SAME as runaway: a released/fled wearer's collar is fully cleared because the dom's authority — and their card settings — cease to apply, and an emptied owner slot would otherwise let the card re-stream the owner back. Removed clear_owner_records (subsumed by the wipe). Boot-safe: card path seeds via card_add_owner → user_write, never these handlers; trustee/blacklist mutations keep the light sync.
@@ -35,6 +38,7 @@ ARCHITECTURE: People live in user.<uuid> records (see USER RECORDS below);
 /* -------------------- CONSOLIDATED ISP -------------------- */
 integer KERNEL_LIFECYCLE = 500;
 integer SETTINGS_BUS = 800;
+float   ROSTER_RESOLVE_DELAY = 5.0;   // boot delay before re-resolving roster names (lets kmod_names start)
 
 /* -------------------- SETTINGS KEYS -------------------- */
 // Owned-state flag (derived from owner records; kept as a fast scalar for
@@ -115,11 +119,9 @@ key NotecardKey = NULL_KEY;
 
 integer MaxListLen = 64;
 
-// Pending name queries (display-name or username): parallel lists. The
-// response updates the matching user record's name field directly, so no
-// role tag is needed.
-list NameQueryIds   = [];
-list NameQueryUuids = [];
+// Roster record names are resolved by kmod_names (the single name authority) — on a
+// record add we send name.resolve, and its name.resolved reply writes the composed
+// "Display (username)" label into the record. No dataserver / compose here.
 
 // Card honorifics buffered during a parse: the card's honorific lines may
 // precede or follow the uuid lines, so they're applied by rank at EOF
@@ -139,10 +141,6 @@ string normalize_bool(string s) {
     integer v = (integer)s;
     if (v != 0) v = 1;
     return (string)v;
-}
-
-list list_remove_at(list source_list, integer idx) {
-    return llDeleteSubList(source_list, idx, idx);
 }
 
 /* -------------------- USER RECORD PRIMITIVES -------------------- */
@@ -419,43 +417,55 @@ integer has_external_owner() {
 }
 
 
-/* -------------------- ASYNC NAME RESOLUTION -------------------- */
+/* -------------------- NAME RESOLUTION (delegated to kmod_names) -------------------- */
 
-// Display-name upgrade for owners/trustees.
+// Ask kmod_names (the collar's single name authority) to resolve a uuid; its
+// name.resolved reply writes the composed "Display (username)" label into the record.
+// No dataserver / compose lives here anymore.
 request_name(string uuid_str) {
     if (uuid_str == "" || (key)uuid_str == NULL_KEY) return;
-    key qid = llRequestDisplayName((key)uuid_str);
-    NameQueryIds   += [qid];
-    NameQueryUuids += [uuid_str];
+    llMessageLinked(LINK_SET, SETTINGS_BUS, llList2Json(JSON_OBJECT, [
+        "type",      "name.resolve",
+        "requester", "settings.roster",
+        "req_id",    "",
+        "uuids",     uuid_str
+    ]), NULL_KEY);
 }
 
-// Username variant — the blacklist's human-readable fallback for avatars
-// who may be absent (usernames are stable; display names can churn).
-// Replies route through the same dataserver → handle_name_response path.
-request_username(string uuid_str) {
-    if (uuid_str == "" || (key)uuid_str == NULL_KEY) return;
-    key qid = llRequestUsername((key)uuid_str);
-    NameQueryIds   += [qid];
-    NameQueryUuids += [uuid_str];
-}
-
-// One response path for every role: a resolved name just updates the
-// record's name field, if the record still exists. The four per-roster
-// branches of the CSV era collapsed into this.
-handle_name_response(key query_id, string name) {
-    integer idx = llListFindList(NameQueryIds, [query_id]);
-    if (idx == -1) return;
-
-    string uuid_str = llList2String(NameQueryUuids, idx);
-
-    NameQueryIds   = list_remove_at(NameQueryIds, idx);
-    NameQueryUuids = list_remove_at(NameQueryUuids, idx);
-
-    if (name == "") return;
-    if (user_read(uuid_str) == "") return;
-
-    user_set_field(uuid_str, 2, name);
+// name.resolved {uuid,label} from kmod_names — write the composed label into the
+// record's name field (if it still exists) and broadcast so consumers re-read. The
+// changed-check makes the boot re-resolve idempotent: a record already holding the
+// composed label neither rewrites nor broadcasts (no sync storm once migrated).
+handle_name_resolved(string msg) {
+    if (llJsonGetValue(msg, ["requester"]) != "settings.roster") return;
+    string uuid_str = llJsonGetValue(msg, ["uuid"]);
+    string label    = llJsonGetValue(msg, ["label"]);
+    if (uuid_str == JSON_INVALID || label == JSON_INVALID || label == "") return;
+    string rec = user_read(uuid_str);
+    if (rec == "") return;
+    if (llList2String(llCSV2List(rec), 2) == label) return;   // already correct
+    user_set_field(uuid_str, 2, label);
     broadcast_settings_changed();
+}
+
+// Boot migration: re-resolve roster records whose stored name still looks like a
+// bare username / placeholder (no space AND no "(" — i.e. NOT a composed "Display"
+// or "Display (username)"). This upgrades entries written before kmod_names existed
+// — chiefly old blacklist records, which stored the username. Cheap: after migration
+// composed names have a space or "(" and are skipped, so it's near-zero on later
+// boots (and the changed-check above suppresses redundant syncs). Runs on a delayed
+// timer so kmod_names is up first.
+resolve_roster() {
+    list ks = user_keys();
+    integer i = 0;
+    integer n = llGetListLength(ks);
+    while (i < n) {
+        string k  = llList2String(ks, i);
+        string nm = llList2String(llCSV2List(llLinksetDataRead(k)), 2);
+        if (llSubStringIndex(nm, " ") == -1 && llSubStringIndex(nm, "(") == -1)
+            request_name(llGetSubString(k, 5, -1));   // strip "user." → uuid
+        i += 1;
+    }
 }
 
 /* -------------------- INTERNAL MUTATORS -------------------- */
@@ -512,16 +522,15 @@ integer add_blacklist_internal(string uuid_str, string name_str) {
     if (user_role(uuid_str) == -1) return FALSE;
     if (role_count(-1) >= MaxListLen) return FALSE;
 
-    // Name chain: provided (picker resolves while the avatar is in-region)
-    // → username → UUID placeholder + async username upgrade.
+    // Placeholder name (provided → username → uuid); request_name then upgrades it
+    // to the composed "Display (username)" via kmod_names, same as owners/trustees.
+    // (Blacklist is no longer username-only — it gets the display name too.)
     string nm = san_field(name_str);
     if (nm == "") nm = llGetUsername((key)uuid_str);
-    if (nm == "") {
-        nm = uuid_str;
-        request_username(uuid_str);
-    }
+    if (nm == "") nm = uuid_str;
 
     user_write(uuid_str, -1, 0, nm, "");
+    request_name(uuid_str);
     return TRUE;
 }
 
@@ -842,18 +851,22 @@ handle_blacklist_add(string msg) {
     string name_str = llJsonGetValue(msg, ["name"]);
     if (name_str == JSON_INVALID) name_str = "";
 
-    if (add_blacklist_internal(uuid_str, name_str)) {
-        broadcast_settings_changed();
-    }
+    add_blacklist_internal(uuid_str, name_str);
+    // Always echo a sync — even a rejected add (owner/trustee/dupe/cap) writes
+    // nothing but the requesting UI still needs to rebuild against the committed
+    // roster (plugin_blacklist defers its menu redraw to this sync). A silent
+    // reject would otherwise strand an await_sync menu with no dialog.
+    broadcast_settings_changed();
 }
 
 handle_blacklist_remove(string msg) {
     string uuid_str = llJsonGetValue(msg, ["uuid"]);
     if (uuid_str == JSON_INVALID) return;
 
-    if (remove_blacklist_internal(uuid_str)) {
-        broadcast_settings_changed();
-    }
+    remove_blacklist_internal(uuid_str);
+    // Always echo a sync (symmetry with add): the requesting UI defers its redraw
+    // to this sync, so it must fire whether or not a record was actually removed.
+    broadcast_settings_changed();
 }
 
 handle_runaway() {
@@ -928,6 +941,15 @@ default
             llLinksetDataWrite(KEY_SENTINEL, "1");
             broadcast_settings_changed();
         }
+
+        // Migrate/refresh roster display names once kmod_names is up (see
+        // resolve_roster). Delayed so the authority has started listening.
+        llSetTimerEvent(ROSTER_RESOLVE_DELAY);
+    }
+
+    timer() {
+        llSetTimerEvent(0.0);
+        resolve_roster();
     }
 
     on_rez(integer start_param) {
@@ -976,11 +998,9 @@ default
         }
     }
 
-    dataserver(key query_id, string data) {
-        // Notecard reading moved to kmod_bootstrap. The only dataserver traffic
-        // left here is async display-name resolution for roster records.
-        handle_name_response(query_id, data);
-    }
+    // No dataserver here — name resolution is delegated to kmod_names (records get
+    // their labels back via the name.resolved link message). Notecard I/O lives in
+    // kmod_bootstrap.
 
     link_message(integer sender, integer num, string msg, key id) {
         // CSV envelope (single-writer protocol) — detect before JSON parsing
@@ -1027,5 +1047,7 @@ default
         else if (msg_type == "settings.blacklist.remove") handle_blacklist_remove(msg);
         else if (msg_type == "settings.runaway")        handle_runaway();
         else if (msg_type == "settings.reset.config")   handle_reset_config();
+        // Composed name for a roster record, back from kmod_names.
+        else if (msg_type == "name.resolved")           handle_name_resolved(msg);
     }
 }

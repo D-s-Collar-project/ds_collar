@@ -1,10 +1,15 @@
 /*--------------------
 PLUGIN: plugin_blacklist.lsl
 VERSION: 1.2
-REVISION: 13
+REVISION: 18
 PURPOSE: Blacklist management with sensor-based avatar selection
 ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button visibility
 CHANGES:
+- v1.2 rev 18: add-scan migrated to kmod_menu's menu.sensor service (like plugin_restrict/owners/leash). request_add_pick sends ui.menu.render {mode:menu.sensor,kind:agents,range:20}; the picked avatar returns via ui.sensor.result → handle_add_result → send_blacklist_add (+ await_sync counter). Deleted the plugin's own llSensor + sensor()/no_sensor() events + CandidateKeys + show_add_candidates + the add_pick branch. The REMOVE picker stays on menu.picker (it lists the in-memory Blacklist, no scan). NOTE: menu.sensor doesn't pre-filter already-blacklisted/owner (the plugin used to), so they can appear — the add just rejects them via kmod_settings' guards (harmless).
+- v1.2 rev 17: MEMORY — both picker item builds switched from `items +=` string concatenation to a row LIST joined ONCE via llDumpList2String. The in-loop `+=` recopies the growing string each iteration (O(n²) transient garbage Mono doesn't reclaim mid-event) — the same pattern that caused a stack-heap collision in plugin_leash's object picker (leash rev 16). Pre-emptive here (blacklist counts are smaller) but the same latent risk.
+- v1.2 rev 16: FIX (supersedes rev 15's approach) — stale counter after add/remove is now handled by deferring the redraw, not double-rendering. A picker add/remove parks in "await_sync" and does NOT redraw immediately; the settings.sync handler rebuilds main ONCE with the committed count. Redraw fires only in await_sync (rev 15 redrew whenever main was open, which STACKED a second dialog on the already-showing menu — a duplicate + a UI-convention violation). Pairs with kmod_settings rev bump: blacklist add/remove now always echo a sync (even a rejected add), so the await never strands.
+- v1.2 rev 15: FIX — main-menu counter was stale after an add/remove: the flow redraws main immediately, before kmod_settings persists + broadcasts settings.sync (which is when the Blacklist cache refreshes). Now the settings.sync handler redraws the main menu when it's the open view, so the count reflects the committed state.
+- v1.2 rev 14: add + remove pickers migrated to menu.picker (kmod_menu rev 24). Both now hand kmod_menu key-first "uuid\tname" rows and it owns paging + the click; the pick returns as ONE ui.menu.picker.result on UI_BUS with context = the selected UUID (no JSON on any name → real display names, poison-immune). Dropped the DIALOG_BUS picker branch (nav/pick decode), the picker SessionId, the CurrentPage cursor, and OL_PAGE_SIZE. Main menu (menu.fixed) + Show listing (dialog.info) stay on DIALOG_BUS unchanged.
 - v1.2 rev 13: chat command "<prefix> blacklist add <uuid|username>" for direct blacklisting without the sensor picker. Arrives as subpath "add.<arg>" (bare "add" still opens the picker); handle_subpath routes it to direct_blacklist_add. UUID works for anyone; a username resolves against region avatars (llGetAgentList, synchronous — no name2key, so absent people need a UUID). Same +Blacklist ACL gate and kmod_settings guards as the picker.
 - v1.2 rev 12: main to menu.fixed (dropped MainPage cursor + main prev/next), add/remove pickers to menu.ordered, list view to dialog.info; cleans up on the new ui.dialog.close.
 - v1.2 rev 11: main menu now paginates — separate MainPage cursor (distinct from CurrentPage, the OL pickers') clamped/wrapped to the button count, nav:prev/nav:next page through, single page redraws. Defensive; part of the all-pagers-operational pass.
@@ -29,9 +34,6 @@ string PLUGIN_CONTEXT = "ui.core.blacklist";
 string PLUGIN_LABEL = "Blacklist";
 
 /* -------------------- CONSTANTS -------------------- */
-// OL picker page size = 12 slots - 3 nav (<<,>>,Back), no fixed buttons.
-// CROSS-MODULE: must match kmod_menu's ordered-mode content slot count.
-integer OL_PAGE_SIZE = 9;
 
 /* ACL levels for reference:
    -1 = Blacklisted
@@ -53,7 +55,7 @@ integer OL_PAGE_SIZE = 9;
 string BTN_ADD = "+Blacklist";
 string BTN_REMOVE = "-Blacklist";
 string BTN_SHOW = "Show Blklst";
-float BLACKLIST_RADIUS = 20.0;
+integer BLACKLIST_RADIUS = 20;   // metres — passed to menu.sensor as the scan range
 
 /* -------------------- STATE -------------------- */
 // Roster cache (rebuilt from user.* records on settings.sync): parallel
@@ -66,11 +68,8 @@ key CurrentUser = NULL_KEY;
 integer CurrentUserAcl = -999;
 list gPolicyButtons = [];
 string SessionId = "";
-string MenuContext = "";  // "main", "add_scan", "add_pick", "remove"
-integer CurrentPage = 0;  // page cursor for the OL pickers (remove / add_pick)
+string MenuContext = "";  // "main", "remove", "await_sync"
 
-// Sensor results
-list CandidateKeys = [];
 
 /* -------------------- HELPERS -------------------- */
 
@@ -284,10 +283,7 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         gPolicyButtons = [];
-        CurrentPage = 0;
-        MenuContext = "add_scan";
-        CandidateKeys = [];
-        llSensor("", NULL_KEY, AGENT, BLACKLIST_RADIUS, PI);
+        request_add_pick();
         return;
     }
     // "add.<uuid|username>" — direct add from chat (bare "add" above = picker).
@@ -310,7 +306,6 @@ handle_subpath(key user, integer acl_level, string subpath) {
             return;
         }
         gPolicyButtons = [];
-        CurrentPage = 0;
         show_remove_menu();
         return;
     }
@@ -367,58 +362,49 @@ show_remove_menu() {
         return;
     }
 
-    SessionId = generate_session_id();
     MenuContext = "remove";
 
-    // OL picker: names go in the body (numbered) since display names can exceed
-    // the 24-char button cap; buttons are the index. blacklist_names() is
-    // parallel to Blacklist, so pick:<idx> maps straight back to the UUID.
-    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.ordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      "Remove from Blacklist",
-        "body",       "Select an avatar to remove:",
-        "items",      llList2Json(JSON_ARRAY, blacklist_names()),
-        "page",       CurrentPage
-    ]), NULL_KEY);
-}
-
-show_add_candidates() {
-    if (llGetListLength(CandidateKeys) == 0) {
-        llRegionSayTo(CurrentUser, 0, "No nearby avatars found.");
-        show_main_menu();
-        return;
-    }
-
-    // Display name for every candidate (OL pages them — no 11-item cap).
-    // names[] is parallel to CandidateKeys, so pick:<idx> maps to the UUID.
-    list names = [];
+    // menu.picker: key-first "uuid\tname" rows (uuid from Blacklist, name from the
+    // parallel blacklist_names()). The UUID leads each row (poison-safe) and comes
+    // back verbatim as the result context; kmod_menu auto-shapes, pages, owns the
+    // click. No JSON touches a name, so bracketed display names show verbatim.
+    // Build the rows as a LIST and join ONCE (llDumpList2String) — never `items +=`
+    // in the loop, whose O(n²) recopy garbage is a stack-heap risk (see leash r16).
+    list names = blacklist_names();
+    list rows = [];
     integer i = 0;
-    integer n = llGetListLength(CandidateKeys);
+    integer n = llGetListLength(Blacklist);
     while (i < n) {
-        key k = (key)llList2String(CandidateKeys, i);
-        string name = llGetDisplayName(k);
-        if (name == "") name = (string)k;
-        names += [name];
+        rows += [llList2String(Blacklist, i) + "\t" + llList2String(names, i)];
         i += 1;
     }
 
-    SessionId = generate_session_id();
-    MenuContext = "add_pick";
-
     llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
-        "type",       "ui.menu.render",
-        "mode",       "menu.ordered",
-        "session_id", SessionId,
-        "user",       (string)CurrentUser,
-        "menu_type",  PLUGIN_CONTEXT,
-        "title",      "Add to Blacklist",
-        "body",       "Select an avatar to blacklist:",
-        "items",      llList2Json(JSON_ARRAY, names),
-        "page",       CurrentPage
+        "type",      "ui.menu.render",
+        "mode",      "menu.picker",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser,
+        "title",     "Remove from Blacklist",
+        "prompt",    "Select an avatar to remove:",
+        "items",     llDumpList2String(rows, "\n")
+    ]), NULL_KEY);
+}
+
+// Ask kmod_menu's menu.sensor service to scan nearby avatars, render the picker,
+// and reply ui.sensor.result with the chosen avatar's key. No llSensor /
+// sensor()/no_sensor() / candidate list lives here anymore. (menu.sensor doesn't
+// know the already-blacklisted/owner rule, so those can appear — the add just
+// rejects them via kmod_settings' guards.)
+request_add_pick() {
+    llMessageLinked(LINK_SET, UI_BUS, llList2Json(JSON_OBJECT, [
+        "type",      "ui.menu.render",
+        "mode",      "menu.sensor",
+        "kind",      "agents",
+        "range",     (string)BLACKLIST_RADIUS,
+        "title",     "Add to Blacklist",
+        "prompt",    "Select an avatar to blacklist:",
+        "requester", PLUGIN_CONTEXT,
+        "user",      (string)CurrentUser
     ]), NULL_KEY);
 }
 
@@ -447,11 +433,47 @@ cleanup_session() {
     gPolicyButtons = [];
     SessionId = "";
     MenuContext = "";
-    CurrentPage = 0;
-    CandidateKeys = [];
 }
 
 /* -------------------- DIALOG HANDLERS -------------------- */
+
+// A mutation is NOT redrawn immediately: the count on the main menu comes from the
+// Blacklist cache, which is only fresh AFTER kmod_settings persists and echoes a
+// settings.sync. So we send the mutation, enter "await_sync", and let the sync
+// handler rebuild the menu ONCE with the committed count — no stale-then-redraw
+// double dialog. kmod_settings always syncs on add/remove (even a rejected add),
+// so this never strands.
+
+// REMOVE picker result (menu.picker — the in-memory Blacklist list). cancelled
+// (Back/timeout) → back to the blacklist menu; otherwise context IS the UUID.
+handle_picker_result(string context, integer cancelled) {
+    if (cancelled) {
+        show_main_menu();
+        return;
+    }
+    if (MenuContext == "remove") {
+        send_blacklist_remove(context);
+        llRegionSayTo(CurrentUser, 0, "Removed from blacklist.");
+        MenuContext = "await_sync";
+        return;
+    }
+    show_main_menu();
+}
+
+// ADD scan result from kmod_menu's menu.sensor service. `name` is the display name
+// it resolved during the scan (persist it alongside the UUID). cancelled (or a "no
+// people found" it already announced) → back to the blacklist menu.
+handle_add_result(string result_key, string result_name, integer cancelled) {
+    if (cancelled || result_key == "") {
+        show_main_menu();
+        return;
+    }
+    string nm = result_name;
+    if (nm == "") nm = llGetUsername((key)result_key);
+    send_blacklist_add(result_key, nm);
+    llRegionSayTo(CurrentUser, 0, "Added to blacklist.");
+    MenuContext = "await_sync";
+}
 
 handle_dialog_response(string msg) {
     if (llJsonGetValue(msg, ["session_id"]) == JSON_INVALID) return;
@@ -475,64 +497,14 @@ handle_dialog_response(string msg) {
         return;
     }
 
-    // OL picker (remove / add_pick): << >> page; pick:<idx> selects.
-    if (MenuContext == "remove" || MenuContext == "add_pick") {
-        integer cnt = llGetListLength(Blacklist);
-        if (MenuContext == "add_pick") cnt = llGetListLength(CandidateKeys);
-
-        if (cmd == "nav:prev" || cmd == "nav:next") {
-            integer max_page = 0;
-            if (cnt > 0) max_page = (cnt - 1) / OL_PAGE_SIZE;
-            if (cmd == "nav:prev") {
-                if (CurrentPage == 0) CurrentPage = max_page;
-                else CurrentPage -= 1;
-            }
-            else {
-                if (CurrentPage >= max_page) CurrentPage = 0;
-                else CurrentPage += 1;
-            }
-            if (MenuContext == "remove") show_remove_menu();
-            else show_add_candidates();
-            return;
-        }
-
-        if (llGetSubString(cmd, 0, 4) == "pick:") {
-            integer idx = (integer)llGetSubString(cmd, 5, -1);
-            if (idx >= 0 && idx < cnt) {
-                if (MenuContext == "remove") {
-                    send_blacklist_remove(llList2String(Blacklist, idx));
-                    llRegionSayTo(CurrentUser, 0, "Removed from blacklist.");
-                }
-                else {
-                    string entry = llList2String(CandidateKeys, idx);
-                    if (entry != "") {
-                        // Resolve the name NOW, while the avatar is in-region
-                        // from the sensor pass — kmod_settings persists it
-                        // alongside the UUID.
-                        string nm = llGetDisplayName((key)entry);
-                        if (nm == "") nm = llGetUsername((key)entry);
-                        send_blacklist_add(entry, nm);
-                        llRegionSayTo(CurrentUser, 0, "Added to blacklist.");
-                    }
-                }
-            }
-            show_main_menu();
-            return;
-        }
-        return;
-    }
-
-    // Main menu actions
+    // Main menu actions (menu.fixed). The remove/add pickers run on menu.picker
+    // and resolve via handle_picker_result off UI_BUS, never here.
     if (MenuContext == "main") {
         if (cmd == "add") {
-            CurrentPage = 0;
-            MenuContext = "add_scan";
-            CandidateKeys = [];
-            llSensor("", NULL_KEY, AGENT, BLACKLIST_RADIUS, PI);
+            request_add_pick();
             return;
         }
         if (cmd == "remove") {
-            CurrentPage = 0;
             show_remove_menu();
             return;
         }
@@ -605,6 +577,12 @@ default {
         if (num == SETTINGS_BUS) {
             if (msg_type == "settings.sync") {
                 apply_settings_sync();
+                // A picker add/remove parks in "await_sync" and defers its redraw
+                // to here — the Blacklist cache (and its counter) is only fresh now,
+                // AFTER the persist round-trip. Rebuild the main menu ONCE with the
+                // committed count. Only fires in await_sync, so an unrelated sync
+                // never stacks a second dialog on an already-open menu.
+                if (CurrentUser != NULL_KEY && MenuContext == "await_sync") show_main_menu();
                 return;
             }
 
@@ -636,6 +614,34 @@ default {
                 return;
             }
 
+            // REMOVE picker result from kmod_menu (menu.picker). Filter to our
+            // requester + the active user; context is the selected UUID (or a cancel).
+            if (msg_type == "ui.menu.picker.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                string ru = llJsonGetValue(msg, ["user"]);
+                if (ru == JSON_INVALID || (key)ru != CurrentUser) return;
+                integer was_cancelled = (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID);
+                string pctx = llJsonGetValue(msg, ["context"]);
+                if (pctx == JSON_INVALID) pctx = "";
+                handle_picker_result(pctx, was_cancelled);
+                return;
+            }
+
+            // ADD scan result from kmod_menu's menu.sensor service. `name` is the
+            // scanned display name; `key` the picked avatar (or a cancel).
+            if (msg_type == "ui.sensor.result") {
+                if (llJsonGetValue(msg, ["requester"]) != PLUGIN_CONTEXT) return;
+                string sru = llJsonGetValue(msg, ["user"]);
+                if (sru == JSON_INVALID || (key)sru != CurrentUser) return;
+                integer add_cancelled = (llJsonGetValue(msg, ["cancelled"]) != JSON_INVALID);
+                string skey = llJsonGetValue(msg, ["key"]);
+                if (skey == JSON_INVALID) skey = "";
+                string sname = llJsonGetValue(msg, ["name"]);
+                if (sname == JSON_INVALID) sname = "";
+                handle_add_result(skey, sname, add_cancelled);
+                return;
+            }
+
             return;
         }
 
@@ -660,33 +666,6 @@ default {
         }
     }
 
-    sensor(integer count) {
-        if (CurrentUser == NULL_KEY) return;
-        if (MenuContext != "add_scan") return;
-
-        list candidates = [];
-        key owner = llGetOwner();
-        integer i = 0;
-
-        while (i < count) {
-            key k = llDetectedKey(i);
-            string entry = (string)k;
-
-            if (k != owner && llListFindList(Blacklist, [entry]) == -1) {
-                candidates += [entry];
-            }
-            i += 1;
-        }
-
-        CandidateKeys = candidates;
-        show_add_candidates();
-    }
-
-    no_sensor() {
-        if (CurrentUser == NULL_KEY) return;
-        if (MenuContext != "add_scan") return;
-
-        CandidateKeys = [];
-        show_add_candidates();
-    }
+    // Avatar scanning is owned by kmod_menu's menu.sensor service now (see
+    // request_add_pick / handle_add_result); no sensor()/no_sensor() here.
 }

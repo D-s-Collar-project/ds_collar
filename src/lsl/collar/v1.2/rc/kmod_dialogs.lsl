@@ -1,10 +1,11 @@
 /*--------------------
 MODULE: kmod_dialogs.lsl
 VERSION: 1.2
-REVISION: 7
+REVISION: 8
 PURPOSE: Centralized dialog management for shared listener handling
 ARCHITECTURE: Consolidated message bus lanes
 CHANGES:
+- v1.2 rev 8: delimited button transport (dual-accept). New button_rows field carries buttons as "context\tlabel\n..." — a dialog label/context can contain neither tab nor newline, so labels with [ ] { } round-trip intact (JSON arrays collapsed them to a blank box). Context-FIRST because a JSON value that LEADS with [ or { poisons llList2Json; contexts never do, labels sit mid-value. Session click-map stores that rows string directly (build_rows) and resolves clicks via resolve_context — no llList2Json/llJson2List touches a label. The response `button` echo is guarded (placeholder when a label leads with [/{; only picker items do, and they route by context). Legacy button_data/buttons paths kept working during migration; removed once all senders emit button_rows. Toggle buttons still resolve label from config+state by context.
 - v1.2 rev 7: nav:close handled centrally — a Close click closes the session and broadcasts the new ui.dialog.close (distinct from ui.dialog.timeout) so consumers tear down once instead of redrawing.
 - v1.2 rev 6: revision baseline normalized to rev 6 (no functional change this rev).
 --------------------*/
@@ -171,6 +172,42 @@ integer read_toggle_state(string context) {
     return (integer)llLinksetDataRead("plugin." + short_name + ".state");
 }
 
+/* -------------------- DELIMITED CLICK-MAP -------------------- */
+
+// The session click-map is stored as the delimited button_rows string itself —
+// "context\tlabel\n...". A dialog label/context can contain neither a tab nor a
+// newline, so this is bracket-immune (no llList2Json ever touches a label).
+// Context-FIRST: when this string rides a message field it must not lead with
+// [ or { (llList2Json would auto-type it and fail); contexts never do.
+string build_rows(list labels, list ctxs) {
+    string s = "";
+    integer n = llGetListLength(labels);
+    integer i = 0;
+    while (i < n) {
+        if (i > 0) s += "\n";
+        s += llList2String(ctxs, i) + "\t" + llList2String(labels, i);
+        i += 1;
+    }
+    return s;
+}
+
+// Resolve a clicked button label to its context against a stored rows string.
+// Row is "context\tlabel": match the clicked label (field 1), return context
+// (field 0). Returns "" when not found.
+string resolve_context(string rows_str, string clicked) {
+    list rows = llParseStringKeepNulls(rows_str, ["\n"], []);
+    integer n = llGetListLength(rows);
+    integer i = 0;
+    while (i < n) {
+        list f = llParseStringKeepNulls(llList2String(rows, i), ["\t"], []);
+        if (llGetListLength(f) > 1 && llList2String(f, 1) == clicked) {
+            return llList2String(f, 0);
+        }
+        i += 1;
+    }
+    return "";
+}
+
 /* -------------------- DIALOG DISPLAY -------------------- */
 
 handle_dialog_open(string msg) {
@@ -188,15 +225,38 @@ handle_dialog_open(string msg) {
         return;
     }
 
-    // Standard dialog - check for button_data (new format) or buttons (old format)
+    // Standard dialog. Button source, in preference order:
+    //   button_rows  — delimited "label\tcontext\n..." (current; bracket-immune)
+    //   button_data  — LEGACY JSON array of {label,context} objects / strings
+    //   buttons      — LEGACY JSON array of bare label strings (no routing)
+    // The legacy paths remain only until every sender emits button_rows; they
+    // are removed in the cleanup phase. `buttons` doubles as the labels array.
     list buttons = [];
-    // Click map stored as two parallel JSON arrays {"b":[labels],"c":[ctxs]}
-    // so the listen handler resolves a click with one llListFindList on the
-    // labels instead of per-entry JSON object parsing (hot path). buttons
-    // doubles as the labels array.
     list map_ctxs = [];
 
-    if ((llJsonGetValue(msg, ["button_data"]) != JSON_INVALID)) {
+    if ((llJsonGetValue(msg, ["button_rows"]) != JSON_INVALID)) {
+        // Delimited format. Labels may carry [ ] { } safely — no JSON parses a
+        // label. Toggle buttons still resolve their label from the registered
+        // config+state, keyed by context.
+        string rows_in = llJsonGetValue(msg, ["button_rows"]);
+        list rows = llParseStringKeepNulls(rows_in, ["\n"], []);
+        integer rlen = llGetListLength(rows);
+        integer ri = 0;
+        while (ri < rlen) {
+            // Row is "context\tlabel".
+            list f = llParseStringKeepNulls(llList2String(rows, ri), ["\t"], []);
+            string ctx = llList2String(f, 0);
+            string lbl = "";
+            if (llGetListLength(f) > 1) lbl = llList2String(f, 1);
+            if (find_button_config_idx(ctx) != -1) {
+                lbl = get_button_label(ctx, read_toggle_state(ctx));
+            }
+            buttons += [lbl];
+            map_ctxs += [ctx];
+            ri += 1;
+        }
+    }
+    else if ((llJsonGetValue(msg, ["button_data"]) != JSON_INVALID)) {
         // New format: button_data contains mixed array of strings and objects
         string button_data_json = llJsonGetValue(msg, ["button_data"]);
         list button_data_list = llJson2List(button_data_json);
@@ -317,11 +377,8 @@ handle_dialog_open(string msg) {
     SessionChannels += [channel];
     SessionListens += [listen_handle];
     SessionTimeouts += [timeout_unix];
-    // Store map as {"b":[labels],"c":[ctxs]} (parallel arrays)
-    SessionButtonMaps += [llList2Json(JSON_OBJECT, [
-        "b", llList2Json(JSON_ARRAY, buttons),
-        "c", llList2Json(JSON_ARRAY, map_ctxs)
-    ])];
+    // Store map as the delimited rows string (bracket-immune; see build_rows).
+    SessionButtonMaps += [build_rows(buttons, map_ctxs)];
 
     // Show dialog
     llDialog(user, title + "\n\n" + message, buttons, channel);
@@ -415,10 +472,7 @@ handle_numbered_list_dialog(string msg, string session_id, key user) {
     SessionChannels += [channel];
     SessionListens += [listen_handle];
     SessionTimeouts += [timeout_unix];
-    SessionButtonMaps += [llList2Json(JSON_OBJECT, [
-        "b", llList2Json(JSON_ARRAY, buttons),
-        "c", llList2Json(JSON_ARRAY, map_ctxs)
-    ])];
+    SessionButtonMaps += [build_rows(buttons, map_ctxs)];
 
     // Show dialog
     llDialog(user, title + "\n\n" + body, buttons, channel);
@@ -469,16 +523,9 @@ default
             if (id == session_user) {
                 string session_id = llList2String(SessionIDs, i);
 
-                // Map is {"b":[labels],"c":[ctxs]} — resolve the click with
-                // one list search instead of per-entry JSON object parsing.
-                string button_map_json = llList2String(SessionButtonMaps, i);
-                list map_labels = llJson2List(llJsonGetValue(button_map_json, ["b"]));
-                string clicked_context = "";
-                integer j = llListFindList(map_labels, [message]);
-                if (j != -1) {
-                    string ctx_val = llJsonGetValue(button_map_json, ["c", j]);
-                    if (ctx_val != JSON_INVALID) clicked_context = ctx_val;
-                }
+                // Click-map is the delimited rows string; resolve label -> context
+                // without any JSON (labels may contain [ ] { }). See resolve_context.
+                string clicked_context = resolve_context(llList2String(SessionButtonMaps, i), message);
 
                 // Close (nav:close) is handled centrally: tear down the session
                 // and broadcast ui.dialog.close so the owning consumer clears its
@@ -496,12 +543,20 @@ default
                     return;
                 }
 
-                // Send response message with context
+                // The `button` field echoes the clicked label for consumers that
+                // still read it (fixed-label menus). A label that LEADS with [ or {
+                // would poison this JSON object at encode; only picker-item labels do
+                // that, and picker responses route by context (never button), so a
+                // placeholder is harmless there. Fixed menu labels never lead with a
+                // bracket, so they pass through unchanged.
+                string safe_button = message;
+                string lead = llGetSubString(message, 0, 0);
+                if (lead == "[" || lead == "{") safe_button = " ";
                 string response = llList2Json(JSON_OBJECT, [
                     "type", "ui.dialog.response",
                     "session_id", session_id,
                     "user", (string)id,
-                    "button", message,
+                    "button", safe_button,
                     "context", clicked_context
                 ]);
                 llMessageLinked(LINK_SET, DIALOG_BUS, response, NULL_KEY);
