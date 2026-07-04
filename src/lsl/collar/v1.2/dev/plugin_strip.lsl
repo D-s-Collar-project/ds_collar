@@ -1,7 +1,7 @@
 /*--------------------
 PLUGIN: plugin_strip.lsl
 VERSION: 1.2
-REVISION: 12
+REVISION: 13
 PURPOSE: Strip unlocked clothing layers and attachments from the wearer.
          Public to every ACL. Items in @detachallthis-locked subfolders
          (e.g. plugin_outfits's outfits/.base claim) silently survive
@@ -28,6 +28,7 @@ ARCHITECTURE: Consolidated message bus lanes, LSD policy-driven button
              of the session. parse_status uses `;|` separator so
              @detachallthis paths (which embed `/`) survive parsing.
 CHANGES:
+- v1.2 rev 13: layer/attachment picker gains a fixed [Close] action (context "close" -> cleanup_session, exits the menu) per the fixed-action-button convention; Back still returns to the category chooser. Must precede the numeric apply_pick branch ((integer)"close" would be item 0).
 - v1.2 rev 12: layer/attachment picker migrated to menu.picker (central picker, kmod_menu rev 22), forced OL. show_picker sends candidates as key-first rows "index\tdisplay\n..." (no fixed action buttons); kmod_menu owns the session, paging, and the click and replies ONE ui.menu.picker.result (handle_picker_result: Back -> category menu; numeric -> apply_pick, which strips + re-shows async at PickPage). Dropped the picker branch of handle_dialog_response + LastMaxPage. The category chooser stays plugin-owned menu.fixed (SessionId + ui.dialog.response) — untouched.
 - v1.2 rev 11: category chooser to menu.fixed, layer/attachment picker to menu.ordered; cleans up on the new ui.dialog.close.
 - v1.2 rev 10: nav routes by context (nav:back/nav:prev/nav:next), not the button label; dropped the now-unused `button` local. Categories + pick:<idx> already routed by context.
@@ -466,9 +467,9 @@ show_category_menu() {
     ]), NULL_KEY);
 }
 
-// menu.picker (OL): kmod_menu owns the session, paging, and the click. No fixed
-// action buttons (nav + numbered items only). Picking an item strips it; the
-// picker re-shows async after the strip verify. One ui.menu.picker.result returns.
+// menu.picker (OL): kmod_menu owns the session, paging, and the click. One fixed
+// action, [Close] (exits the menu), sits after nav; picking an item strips it and
+// the picker re-shows async after the strip verify. One ui.menu.picker.result returns.
 show_picker(string category, integer page) {
     integer total;
     string  header;
@@ -520,6 +521,7 @@ show_picker(string category, integer page) {
         "title",     PLUGIN_LABEL,
         "prompt",    body,
         "items",     items,
+        "fixed",     "close\t[Close]",
         "shape",     "OL",
         "page",      (string)page
     ]), NULL_KEY);
@@ -571,11 +573,12 @@ handle_dialog_response(string msg) {
     // arrives as ui.menu.picker.result on UI_BUS (see handle_picker_result), not here.
 }
 
-// menu.picker result (layer/attachment picker). Back/timeout -> category menu; a
-// numeric context is the item index -> strip it (the picker re-shows async after
-// the strip verify, via show_current_picker(PickPage)).
+// menu.picker result (layer/attachment picker). Back/timeout -> category menu;
+// [Close] -> exit the menu; a numeric context is the item index -> strip it (the
+// picker re-shows async after the strip verify, via show_current_picker(PickPage)).
 handle_picker_result(string ctx, integer cancelled, integer page) {
     if (cancelled) { show_category_menu(); return; }
+    if (ctx == "close") { cleanup_session(); return; }   // [Close] exits the menu entirely
     if (ctx == "") return;
     PickPage = page;
     apply_pick((integer)ctx);
