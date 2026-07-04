@@ -1,7 +1,7 @@
 /*--------------------
 SCRIPT: updater_bundler.lsl  (v1.2)
 VERSION: 1.2
-REVISION: 3
+REVISION: 4
 PURPOSE: Installer child-prim script. Holds the staged collar inventory in
   its own contents. Three modes:
     UPDATE — on LM_BUNDLE_BEGIN, asks update_shim for the collar's current
@@ -25,6 +25,7 @@ ARCHITECTURE: Lives in a child prim of the installer linkset. Sibling
   llRemoteLoadScriptPin and llGiveInventory both source from the calling
   script's own prim.
 CHANGES:
+  r4 — Update now syncs CORE kmods, not just refreshing existing scripts: a plain Update ADDS a brand-new core module (a kmod_ with no plugin_ peer + not leash/rlv — e.g. kmod_names) and REMOVES a retired one, in addition to the existing subsystem-scoped add/remove for feature plugins. New is_core_kmod() + filter_managed_in() (replaces filter_subsystem_in at both update call sites); feature plugins stay opt-in (a leash-less collar won't grow leash on update) and wearer-custom plugins in unmanaged subsystems are still left alone. Fixes the dependency trap where updating kmod_menu/kmod_settings (which delegate to kmod_names) wouldn't bring kmod_names along. Install-existing already reaches new core via the Core Components feature; unchanged.
   r3 — Dropped plugin_leash_target from leash_members(): it merged into plugin_leash (v1.2) and no longer ships. Harmless either way — its "leash" anchor keeps subsystem_id classifying any lingering collar copy as leash, so the update SWEEP still removes a stray; this just stops the explicit member list naming a retired script. kmod_leash_engine / kmod_particles / plugin_leash / leash_holder still grouped explicitly.
   r2 — Debounce the CHANGED_INVENTORY park. r1's "drop-in is race-free" held
        for DROPPING a fresh script, but not for EDITING one: a recompile fires
@@ -470,19 +471,37 @@ integer subsystem_present(string subsys, list inv) {
     return FALSE;
 }
 
-// Keep only those `items` whose subsystem appears in `reference`.
-//   ADD pass:    reference = collar inventory  → ship bundler-only scripts
-//                into subsystems the collar already has.
-//   REMOVE pass: reference = bundler scripts   → drop collar-only scripts
-//                from subsystems the bundler manages (superseded); a
-//                wearer-custom script in an unmanaged subsystem is left.
-list filter_subsystem_in(list items, list reference) {
+// TRUE if `name` is a CORE infrastructure kmod: a kmod_ that isn't part of the
+// leash/rlv feature subsystems and has no plugin_<subsystem> peer in the bundler.
+// Wearers never hand-author these, so update FORCE-syncs core kmods (adds new,
+// removes retired) regardless of subsystem presence — that's how a brand-new core
+// module (e.g. kmod_names) reaches an installed collar on a plain Update, and a
+// genuinely-retired one is swept. Feature plugins stay subsystem-scoped below.
+integer is_core_kmod(string name, list bundler_scripts) {
+    if (llSubStringIndex(name, "kmod_") != 0) return FALSE;
+    string subsys = subsystem_id(name);
+    if (subsys == "leash" || subsys == "rlv") return FALSE;
+    if (llListFindList(bundler_scripts, ["plugin_" + subsys]) != -1) return FALSE;
+    return TRUE;
+}
+
+// Keep the `items` we should sync on update: a CORE kmod (force-synced) OR a script
+// whose subsystem already appears in `reference` (the subsystem-scoped rule that
+// keeps FEATURE plugins opt-in / protects wearer-custom plugins).
+//   ADD pass:    reference = collar inventory  → ship bundler-only core kmods + any
+//                bundler-only script into subsystems the collar already has.
+//   REMOVE pass: reference = bundler scripts   → drop collar-only core kmods (retired
+//                infrastructure) + collar-only scripts from subsystems the bundler
+//                still manages (superseded). A wearer-custom PLUGIN in an unmanaged
+//                subsystem is left; core kmods are assumed never wearer-authored.
+list filter_managed_in(list items, list reference, list bundler_scripts) {
     list out = [];
     integer i = 0;
     integer n = llGetListLength(items);
     while (i < n) {
         string name = llList2String(items, i);
-        if (subsystem_present(subsystem_id(name), reference)) out += [name];
+        if (is_core_kmod(name, bundler_scripts)
+            || subsystem_present(subsystem_id(name), reference)) out += [name];
         i += 1;
     }
     return out;
@@ -936,18 +955,20 @@ default {
             CollarInv = [];
             if (csv != "") CollarInv = llCSV2List(csv);
 
-            // UPDATE mode, scripts phase: subsystem-aware diff. On top of the
-            // ∩ refresh, ALSO ship bundler-only scripts whose subsystem is
-            // already on the collar, and mark collar-only scripts whose
-            // subsystem the bundler manages for removal (swept after the ship
-            // loop). Candidates here is the full bundler script set.
+            // UPDATE mode, scripts phase: core-aware, subsystem-scoped diff. On top
+            // of the ∩ refresh: ADD bundler-only core kmods (new infrastructure like
+            // kmod_names) + bundler-only scripts whose subsystem is already on the
+            // collar; REMOVE collar-only core kmods (retired infrastructure) +
+            // collar-only scripts in bundler-managed subsystems (superseded). Feature
+            // plugins stay opt-in; wearer-custom plugins are left. Swept after the
+            // ship loop. Candidates here is the full bundler script set.
             if (Mode == "update" && TypePhase == "scripts") {
                 list bundler_scripts = Candidates;
                 list refresh      = apply_diff_predicate(bundler_scripts, CollarInv);
                 list bundler_only = list_subtract(bundler_scripts, CollarInv);
-                ScriptAdds        = filter_subsystem_in(bundler_only, CollarInv);
+                ScriptAdds        = filter_managed_in(bundler_only, CollarInv, bundler_scripts);
                 list collar_only  = list_subtract(CollarInv, bundler_scripts);
-                Removals          = filter_subsystem_in(collar_only, bundler_scripts);
+                Removals          = filter_managed_in(collar_only, bundler_scripts, bundler_scripts);
 
                 Candidates = refresh + ScriptAdds;
                 CandIdx = 0;
