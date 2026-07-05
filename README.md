@@ -124,6 +124,7 @@ The system uses a **5-channel architecture** for all inter-script communication:
 ## 📚 Documentation
 
 - **[agents.md](https://github.com/D-s-Collar-project/ds_collar/blob/main/agents.md)** — Comprehensive LSL reference covering quirks, limitations, coding standards, review checklist, documentation guidelines, and versioning specification
+- **[Script version dashboard](https://d-s-collar-project.github.io/ds_collar/src/lsl/collar/v1.2/script_versions.html)** — Live per-script revision table for v1.2 (dev vs rc vs stable, with promotion status)
 
 ---
 
