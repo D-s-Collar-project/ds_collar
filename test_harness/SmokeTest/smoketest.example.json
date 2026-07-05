@@ -1,0 +1,44 @@
+{
+  // Copy to smoketest.json (gitignored) and fill in the two scripted-agent
+  // accounts. NEVER commit real credentials.
+  "LoginUri": "https://login.agni.lindenlab.com/cgi-bin/login.cgi",
+  "StartLocation": "last",
+
+  "Wearer": {
+    "FirstName": "wearer.alt.username",
+    "LastName": "Resident",
+    "Password": "…"
+  },
+  "Owner": {
+    "FirstName": "owner.alt.username",
+    "LastName": "Resident",
+    "Password": "…"
+  },
+
+  // Substring of the worn collar object's name.
+  "CollarObjectName": "collar",
+
+  // chat.channel of the collar (default 1). Prefix "" = collar default
+  // (first two characters of the wearer's username).
+  "ChatChannel": 1,
+  "ChatPrefix": "",
+
+  // Positive channel for the in-world test fixture (relay trap emulator).
+  "FixtureCommandChannel": 907001,
+
+  // Wearer answers the collar's RLV probe so RLV-gated plugins activate.
+  "EmulateRlv": true,
+
+  "WaitTimeoutSec": 20,
+  "RebootWaitSec": 45,
+
+  // Empty = all suites, in canonical order:
+  // baseline, ownership, owner-controls, leash, rlv, relay, tpe-sos, teardown
+  "Suites": [],
+
+  // true = run Release + Runaway factory-reset tests at the end
+  // (also enabled by --destructive).
+  "RunDestructiveTeardown": false,
+
+  "ReportPath": ""
+}

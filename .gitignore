@@ -30,3 +30,7 @@ WinGrowl/installer/Output/
 *.cil
 *.out
 *.lsl.pp
+
+# Smoketest credentials and run artifacts (never commit)
+test_harness/SmokeTest/smoketest.json
+test_harness/SmokeTest/smoketest-report.md
