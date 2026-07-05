@@ -1,0 +1,43 @@
+title: D/s Collar
+description: A modern, modular D/s collar system for Second Life
+url: "https://d-s-collar-project.github.io"
+baseurl: "/ds_collar"
+
+# Supported by the github-pages gem the build action uses.
+theme: jekyll-theme-cayman
+
+# All bundled with the github-pages gem; listed explicitly so the build
+# behaves like classic branch-based Pages:
+#  - readme-index: README.md becomes index.html (fixes the root 404)
+#  - relative-links: [x](FILE.md) links rewrite to the rendered .html
+#  - optional-front-matter / default-layout / titles-from-headings:
+#    plain markdown docs render with the theme without per-file front matter
+plugins:
+  - jekyll-readme-index
+  - jekyll-relative-links
+  - jekyll-optional-front-matter
+  - jekyll-default-layout
+  - jekyll-titles-from-headings
+
+# Docs site only — keep source trees browsable but drop tooling, build
+# output, and dev-only material.
+exclude:
+  - .github/
+  - test_harness/
+  - tools/
+  - scripts/
+  - lslinterpreter/
+  - archive/
+  - anims/
+  - satomi/
+  - reports/
+  - bin/
+  - obj/
+  - "*.sln"
+  - "DEBUG_*.lsl"
+  - debug.log
+  - CLAUDE.md
+  - agents.md
+  - agents-style.md
+  - setup-lslint.sh
+  - "Environment changes - ds_collar_modular.txt"
