@@ -123,14 +123,14 @@ The system uses a **5-channel architecture** for all inter-script communication:
 
 ## 📚 Documentation
 
-- **[agents.md](./agents.md)** — Comprehensive LSL reference covering quirks, limitations, coding standards, review checklist, documentation guidelines, and versioning specification
+- **[agents.md](https://github.com/D-s-Collar-project/ds_collar/blob/main/agents.md)** — Comprehensive LSL reference covering quirks, limitations, coding standards, review checklist, documentation guidelines, and versioning specification
 
 ---
 
 ## 🔧 Contributing
 
 1. Fork the repo.
-2. Read **[agents.md](./agents.md)** thoroughly — it contains all LSL quirks, coding standards, versioning rules, and the review checklist.
+2. Read **[agents.md](https://github.com/D-s-Collar-project/ds_collar/blob/main/agents.md)** thoroughly — it contains all LSL quirks, coding standards, versioning rules, and the review checklist.
 3. Work from the **authoritative baselines** (kernel, modules, plugin skeleton).
 4. Ensure your scripts compile in Second Life.
 5. Use the **Code Review Checklist** in agents.md before submitting.
