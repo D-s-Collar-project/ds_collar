@@ -1,9 +1,16 @@
 /*--------------------
 SCRIPT: control_hud.lsl
 VERSION: 1.2
-REVISION: 0
+REVISION: 1
 PURPOSE: Auto-detect nearby collars and connect automatically
 ARCHITECTURE: RLV relay-style broadcast and listen workflow, namespaced internal message protocol
+CHANGES:
+- v1.2 rev 1: same-region llGetDisplayName fast path for scan labels and the
+  connect message (scan responders are range-checked to 20 m, so the wearer is
+  always in-region); llRequestDisplayName/llRequestAgentData remain only as
+  fallback. A held-down scan loop in a crowd no longer feeds SL's average-rate
+  name-request throttle. Connect message now shows the display name (was
+  legacy name via DATA_NAME), matching the scan labels.
 --------------------*/
 
 
@@ -234,14 +241,37 @@ request_acl_from_collar(key avatar_key, key collar_key) {
 
 /* -------------------- MENU TRIGGERING -------------------- */
 
+// Announce the connection and ask the collar for the menu. Must run BEFORE
+// cleanup_session() wipes RequestedContext/TargetCollarKey.
+finish_connect(string avatar_name) {
+    llRegionSayTo(llGetOwner(), 0, "Connected to " + avatar_name + "'s collar.");
+
+    string json_msg = llList2Json(JSON_OBJECT, [
+        "type", "remote.menurequest",
+        "avatar", (string)HudWearer,
+        "context", RequestedContext
+    ]);
+    llRegionSayTo(TargetCollarKey, COLLAR_MENU_CHAN, json_msg);
+
+    cleanup_session();
+}
+
 trigger_collar_menu() {
     if (TargetCollarKey == NULL_KEY) {
         llRegionSayTo(llGetOwner(), 0, "Error: No collar connection established.");
         return;
     }
 
+    // Same-region fast path: the collar range-checks scan/menu requests to
+    // 20 m, so the target wearer is in-region and llGetDisplayName answers
+    // synchronously — no throttled dataserver request needed.
+    string display_name = llGetDisplayName(TargetAvatarKey);
+    if (display_name != "" && display_name != "???") {
+        finish_connect(display_name);
+        return;
+    }
 
-    // Request display name via dataserver
+    // Fallback: request the name via dataserver
     DisplayNameQueryId = llRequestAgentData(TargetAvatarKey, DATA_NAME);
     DisplayNamePending = TRUE;
     llSetTimerEvent(QUERY_TIMEOUT_SEC);
@@ -354,6 +384,15 @@ default {
             string collar_owner_str = llJsonGetValue(message, ["collar_owner"]);
             if (collar_owner_str == JSON_INVALID) return;
             key collar_owner = (key)collar_owner_str;
+
+            // Same-region fast path: responders are range-checked to 20 m by
+            // the collar, so llGetDisplayName answers synchronously and the
+            // throttled llRequestDisplayName is never touched.
+            string display_name = llGetDisplayName(collar_owner);
+            if (display_name != "" && display_name != "???") {
+                add_detected_collar(collar_owner, id, display_name);
+                return;
+            }
 
             // Placeholder label until llRequestDisplayName resolves. llKey2Name
             // is regional-only and returns "" for absent avatars, which llDialog
@@ -475,18 +514,7 @@ default {
                 return;
             }
 
-            // Show simple connection message
-            llRegionSayTo(llGetOwner(), 0, "Connected to " + data + "'s collar.");
-
-            // Send menu request to collar
-            string json_msg = llList2Json(JSON_OBJECT, [
-                "type", "remote.menurequest",
-                "avatar", (string)HudWearer,
-                "context", RequestedContext
-            ]);
-            llRegionSayTo(TargetCollarKey, COLLAR_MENU_CHAN, json_msg);
-
-            cleanup_session();
+            finish_connect(data);
         }
     }
 
