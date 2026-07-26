@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "bypassPermissions",
     "allow": [
       "WebFetch(domain:wiki.secondlife.com)",
       "WebSearch",
